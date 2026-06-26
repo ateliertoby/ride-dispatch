@@ -27,9 +27,10 @@ def api_orders():
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     port = int(os.environ.get("RIDE_WEB_PORT", "3200"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="127.0.0.1", port=port)
 
 
 if __name__ == "__main__":
