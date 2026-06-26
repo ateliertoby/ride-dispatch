@@ -17,6 +17,13 @@ load_dotenv()
 DB_PATH = os.environ.get("RIDE_DB_PATH", "orders.db")
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
+_allowed_raw = os.environ.get("ALLOWED_CHAT_IDS", "")
+ALLOWED_CHAT_IDS: set[int] = (
+    {int(x.strip()) for x in _allowed_raw.split(",") if x.strip()}
+    if _allowed_raw.strip()
+    else set()
+)
+
 pending: dict = {}
 
 
@@ -42,6 +49,8 @@ def format_card(order) -> str:
 async def handle_message(update: Update, context):
     msg = update.message
     if not msg or not msg.text:
+        return
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
         return
 
     if msg.reply_to_message:
@@ -73,6 +82,8 @@ async def handle_message(update: Update, context):
 
 async def handle_callback(update: Update, context):
     query = update.callback_query
+    if ALLOWED_CHAT_IDS and query.message.chat_id not in ALLOWED_CHAT_IDS:
+        return
     msg_id = query.message.message_id
 
     if query.data == "confirm":
@@ -105,6 +116,7 @@ async def handle_start(update: Update, context):
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
