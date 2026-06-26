@@ -1,0 +1,77 @@
+from ride_dispatch.parser import parse_order
+
+DROPOFF_MSG = """服务类型: 送机
+接单车型: 特斯拉 Model S
+乘客姓名: ZHANG/XUAN(重要贵宾)
+用车时间: 2026-06-27 10:30:00
+乘客境外电话:
+航班号: QW916
+上车点: 香港数码港艾美酒店(南区/数码港 数码港道100号)
+下车点: 香港国际机场 T1(香港国际机场 T1)
+订单备注:
+附加服务:
+订单号: 1128148899006317
+司机可见备注:
+乘客出场时长:
+第三方联系方式:
+订单里程: 40
+更多联系方式:
+乘客电话: 86 13809802194"""
+
+PICKUP_MSG = """服务类型: 接机
+接单车型: 经济5座
+乘客姓名: HSU/ICHIEH
+用车时间: 2026-06-27 12:35:00
+乘客境外电话: 886 919456025
+航班号: CX477
+上车点: 香港国际机场1号航站楼(香港国际机场1号航站楼)
+下车点: Dorsett Kai Tak, Hong Kong(香港九龍城承啟道43號)
+订单备注:
+附加服务:
+订单号: 1128148173253603
+司机可见备注: 請司機務必加客人WhatsApp,帳號如下: 886919456025
+乘客出场时长: 30
+第三方联系方式: 【WhatsApp】 886919456025
+订单里程: 36
+更多联系方式:
+乘客电话:  """
+
+
+def test_parse_dropoff():
+    order = parse_order(DROPOFF_MSG)
+    assert order.service_type == "送机"
+    assert order.order_id == "1128148899006317"
+    assert order.passenger_name == "ZHANG/XUAN(重要贵宾)"
+    assert order.scheduled_time == "2026-06-27 10:30:00"
+    assert order.flight_number == "QW916"
+    assert order.pickup == "香港数码港艾美酒店(南区/数码港 数码港道100号)"
+    assert order.dropoff == "香港国际机场 T1(香港国际机场 T1)"
+    assert order.distance_km == 40
+    assert order.passenger_phone == "86 13809802194"
+    assert order.vehicle_type == "特斯拉 Model S"
+
+
+def test_parse_pickup():
+    order = parse_order(PICKUP_MSG)
+    assert order.service_type == "接机"
+    assert order.order_id == "1128148173253603"
+    assert order.passenger_name == "HSU/ICHIEH"
+    assert order.flight_number == "CX477"
+    assert order.overseas_phone == "886 919456025"
+    assert order.passenger_exit_minutes == 30
+    assert order.distance_km == 36
+    assert order.driver_notes == "請司機務必加客人WhatsApp,帳號如下: 886919456025"
+
+
+def test_parse_empty_fields():
+    order = parse_order(DROPOFF_MSG)
+    assert order.overseas_phone == ""
+    assert order.notes == ""
+    assert order.driver_notes == ""
+    assert order.passenger_exit_minutes is None
+    assert order.third_party_contact == ""
+
+
+def test_raw_message_preserved():
+    order = parse_order(DROPOFF_MSG)
+    assert order.raw_message == DROPOFF_MSG
