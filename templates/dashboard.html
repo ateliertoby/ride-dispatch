@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ride Dispatch</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f0f0f0; max-width: 480px; margin: 0 auto;
+  }
+  .header {
+    position: sticky; top: 0; z-index: 10;
+    background: #fff; padding: 12px 16px;
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid #e0e0e0;
+  }
+  .date-nav { display: flex; gap: 12px; align-items: center; }
+  .date-nav button {
+    background: none; border: 1px solid #ccc; border-radius: 8px;
+    padding: 6px 14px; font-size: 16px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .date { font-size: 17px; font-weight: 600; min-width: 120px; text-align: center; }
+  .revenue {
+    font-size: 28px; font-weight: 700; text-align: center;
+    padding: 20px 16px 12px; color: #1a1a1a;
+  }
+  .revenue small { font-size: 14px; font-weight: 400; color: #888; display: block; margin-bottom: 4px; }
+  .orders { padding: 0 12px 24px; }
+  .card {
+    background: #fff; border-radius: 12px; padding: 14px 16px;
+    margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .badge {
+    font-size: 13px; font-weight: 600; padding: 2px 8px;
+    border-radius: 4px; display: inline-block;
+  }
+  .badge.pickup { background: #e8f4fd; color: #0a84ff; }
+  .badge.dropoff { background: #fff3e0; color: #f57c00; }
+  .time { font-size: 15px; font-weight: 600; color: #333; }
+  .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+  .flight { font-size: 13px; color: #888; margin-bottom: 8px; }
+  .route { font-size: 13px; color: #555; line-height: 1.5; }
+  .route .arrow { color: #aaa; }
+  .price { font-size: 15px; font-weight: 600; margin-top: 8px; color: #1a1a1a; }
+  .price.none { color: #ccc; font-weight: 400; }
+  .empty { text-align: center; color: #999; padding: 60px 0; font-size: 15px; }
+  .count { font-size: 13px; color: #888; text-align: center; padding-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="date-nav">
+    <button onclick="go(-1)">&larr;</button>
+    <span class="date" id="date"></span>
+    <button onclick="go(1)">&rarr;</button>
+  </div>
+</div>
+<div class="revenue" id="revenue"></div>
+<div class="count" id="count"></div>
+<div class="orders" id="orders"></div>
+<script>
+let cur = new Date().toISOString().split('T')[0];
+
+function go(d) {
+  const dt = new Date(cur + 'T00:00:00');
+  dt.setDate(dt.getDate() + d);
+  cur = dt.toISOString().split('T')[0];
+  load();
+}
+
+async function load() {
+  document.getElementById('date').textContent = cur;
+  const res = await fetch('/api/orders?date=' + cur);
+  const data = await res.json();
+  const orders = data.orders;
+
+  let total = 0, priced = 0;
+  orders.forEach(o => { if (o.price) { total += o.price; priced++; } });
+
+  document.getElementById('revenue').innerHTML =
+    '<small>當日收入</small>$' + total.toFixed(0);
+  document.getElementById('count').textContent =
+    orders.length ? orders.length + ' 單' + (priced < orders.length ? ' · ' + (orders.length - priced) + ' 單未入價' : '') : '';
+
+  if (!orders.length) {
+    document.getElementById('orders').innerHTML = '<div class="empty">冇訂單</div>';
+    return;
+  }
+
+  document.getElementById('orders').innerHTML = orders.map(o => {
+    const isPickup = o.service_type === '接机';
+    const badge = isPickup ? 'pickup' : 'dropoff';
+    const label = isPickup ? '接機' : '送機';
+    const t = (o.scheduled_time || '').split(' ')[1];
+    const time = t ? t.slice(0, 5) : '';
+    const priceHtml = o.price
+      ? '<div class="price">$' + o.price.toFixed(0) + '</div>'
+      : '<div class="price none">未入價</div>';
+    return '<div class="card">' +
+      '<div class="card-top"><span class="badge ' + badge + '">' + label + '</span><span class="time">' + time + '</span></div>' +
+      '<div class="passenger">' + esc(o.passenger_name) + '</div>' +
+      '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' +
+      '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' +
+      priceHtml +
+      '</div>';
+  }).join('');
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+load();
+</script>
+</body>
+</html>
