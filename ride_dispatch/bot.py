@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order
-from .db import init_db, save_order, update_price, get_order_by_telegram_msg_id
+from .db import init_db, save_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
 
 load_dotenv()
 
@@ -26,6 +26,7 @@ ALLOWED_CHAT_IDS: set[int] = (
 
 pending: dict = {}
 awaiting_price: dict[int, str] = {}
+awaiting_cost: dict[int, tuple[str, str]] = {}
 
 
 def format_card(order) -> str:
@@ -69,6 +70,17 @@ async def handle_message(update: Update, context):
     order = parse_order(msg.text)
     if not order.order_id:
         chat_id = msg.chat_id
+        if chat_id in awaiting_cost:
+            text = msg.text.strip()
+            try:
+                amount = float(text)
+                order_id, cost_type = awaiting_cost.pop(chat_id)
+                label = "隧道費" if cost_type == "tunnel" else "停車費"
+                update_cost(DB_PATH, order_id, cost_type, amount)
+                await msg.reply_text(f"已記錄{label}: ${amount:.0f}")
+            except ValueError:
+                pass
+            return
         if chat_id in awaiting_price:
             text = msg.text.strip()
             try:
@@ -121,9 +133,74 @@ async def handle_callback(update: Update, context):
         await query.message.edit_reply_markup(reply_markup=None)
         await query.answer("已取消")
 
+    elif query.data.startswith("cancel:"):
+        order_id = query.data.split(":", 1)[1]
+        cancel_order(DB_PATH, order_id)
+        await query.message.edit_text(f"已取消訂單 #{order_id[-4:]}")
+        await query.answer("已取消")
+
+    elif query.data.startswith("cost:"):
+        _, cost_type, order_id = query.data.split(":", 2)
+        label = "隧道費" if cost_type == "tunnel" else "停車費"
+        awaiting_cost[query.message.chat_id] = (order_id, cost_type)
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text(f"打{label}金額：")
+        await query.answer()
+
+
+async def handle_cancel(update: Update, context):
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    from datetime import date
+    orders = get_orders_by_date(DB_PATH, date.today().isoformat())
+    if not orders:
+        await msg.reply_text("今日冇訂單。")
+        return
+    buttons = []
+    for o in orders:
+        t = o["scheduled_time"].split(" ")[1][:5] if " " in o["scheduled_time"] else ""
+        label = f"{t} {o['passenger_name']}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"cancel:{o['order_id']}")])
+    await msg.reply_text("撳邊張要取消：", reply_markup=InlineKeyboardMarkup(buttons))
+
 
 async def handle_start(update: Update, context):
-    await update.message.reply_text(
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    args = context.args
+    if args and args[0].startswith("order_"):
+        order_id = args[0][len("order_"):]
+        from datetime import date
+        orders = get_orders_by_date(DB_PATH, date.today().isoformat())
+        order = next((o for o in orders if o["order_id"] == order_id), None)
+        if not order:
+            await msg.reply_text("搵唔到呢張單。")
+            return
+        t = order["scheduled_time"].split(" ")[1][:5] if " " in order["scheduled_time"] else ""
+        type_label = "接機" if order["service_type"] == "接机" else "送機"
+        lines = [
+            f"{type_label} | {order['flight_number']}",
+            f"乘客: {order['passenger_name']}",
+            f"時間: {t}",
+        ]
+        if order.get("price"):
+            lines.append(f"收入: ${order['price']:.0f}")
+        tunnel = order.get("tunnel_fee") or 0
+        parking = order.get("parking_fee") or 0
+        if tunnel or parking:
+            lines.append(f"成本: 隧道${tunnel:.0f} 停車${parking:.0f}")
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("隧道費", callback_data=f"cost:tunnel:{order_id}"),
+                InlineKeyboardButton("停車費", callback_data=f"cost:parking:{order_id}"),
+            ],
+            [InlineKeyboardButton("取消訂單", callback_data=f"cancel:{order_id}")],
+        ])
+        await msg.reply_text("\n".join(lines), reply_markup=keyboard)
+        return
+    await msg.reply_text(
         "Ride Dispatch Bot\n直接 paste 訂單 message 就得。"
     )
 
@@ -133,6 +210,7 @@ def main():
     init_db(DB_PATH)
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
