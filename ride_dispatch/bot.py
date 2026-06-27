@@ -25,6 +25,7 @@ ALLOWED_CHAT_IDS: set[int] = (
 )
 
 pending: dict = {}
+awaiting_price: dict[int, str] = {}
 
 
 def format_card(order) -> str:
@@ -67,6 +68,17 @@ async def handle_message(update: Update, context):
 
     order = parse_order(msg.text)
     if not order.order_id:
+        chat_id = msg.chat_id
+        if chat_id in awaiting_price:
+            text = msg.text.strip()
+            try:
+                price = float(text)
+                order_id = awaiting_price.pop(chat_id)
+                update_price(DB_PATH, order_id, price)
+                await msg.reply_text(f"已更新價錢: ${price:.0f}")
+            except ValueError:
+                pass
+            return
         return
 
     text = format_card(order)
@@ -93,9 +105,10 @@ async def handle_callback(update: Update, context):
             return
         try:
             sent = await query.message.reply_text(
-                f"訂單 #{order.order_id[-4:]} 已保存。回覆呢條訊息入價錢。"
+                f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
             )
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id)
+            awaiting_price[query.message.chat_id] = order.order_id
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
         except sqlite3.IntegrityError:
