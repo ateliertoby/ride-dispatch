@@ -47,6 +47,7 @@
   }
   .badge.pickup { background: #e8f4fd; color: #0a84ff; }
   .badge.dropoff { background: #fff3e0; color: #f57c00; }
+  .badge.didi { background: #e8f5e9; color: #43a047; }
   .time { font-size: 15px; font-weight: 600; color: #333; }
   .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
   .flight { font-size: 13px; color: #888; margin-bottom: 8px; }
@@ -100,8 +101,8 @@ async function load() {
   const net = total - costs;
 
   document.getElementById('revenue').innerHTML =
-    '<small>總收入</small>$' + total.toFixed(0) +
-    (costs ? '<small style="margin-top:6px">淨收入</small>$' + net.toFixed(0) : '');
+    '<small>總收入</small>$' + $(total) +
+    (costs ? '<small style="margin-top:6px">淨收入</small>$' + $(net) : '');
   document.getElementById('count').textContent =
     orders.length ? orders.length + ' 單' + (priced < orders.length ? ' · ' + (orders.length - priced) + ' 單未入價' : '') : '';
 
@@ -111,26 +112,28 @@ async function load() {
   }
 
   document.getElementById('orders').innerHTML = orders.map(o => {
+    const isDidi = o.service_type === '滴滴';
     const isPickup = o.service_type === '接机';
-    const badge = isPickup ? 'pickup' : 'dropoff';
-    const label = isPickup ? '接機' : '送機';
+    const badge = isDidi ? 'didi' : isPickup ? 'pickup' : 'dropoff';
+    const label = isDidi ? '滴滴' : isPickup ? '接機' : '送機';
     const t = (o.scheduled_time || '').split(' ')[1];
     const time = t ? t.slice(0, 5) : '';
     const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
     let priceHtml = o.price
-      ? '<div class="price">$' + o.price.toFixed(0) + (costTotal ? ' <span style="font-weight:400;color:#888;font-size:13px">- $' + costTotal.toFixed(0) + ' = $' + (o.price - costTotal).toFixed(0) + '</span>' : '') + '</div>'
+      ? '<div class="price">$' + $(o.price) + (costTotal ? ' <span style="font-weight:400;color:#888;font-size:13px">- $' + $(costTotal) + ' = $' + $(o.price - costTotal) + '</span>' : '') + '</div>'
       : '<div class="price none">未入價</div>';
     const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
     return '<a href="' + tgLink + '" class="card">' +
       '<div class="card-top"><span class="badge ' + badge + '">' + label + '</span><span class="time">' + time + '</span></div>' +
-      '<div class="passenger">' + esc(o.passenger_name) + '</div>' +
-      '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' +
-      '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' +
+      (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
+      (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
+      (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
       priceHtml +
       '</a>';
   }).join('');
 }
 
+function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
