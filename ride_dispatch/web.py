@@ -1,7 +1,9 @@
 import os
+import sqlite3
+import time
 from datetime import date
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify
 from .db import init_db, get_orders_by_date
 
 load_dotenv()
@@ -24,6 +26,36 @@ def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
     return jsonify({"orders": orders, "date": date_str})
+
+
+def _fingerprint():
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
+        "count(case when status='cancelled' then 1 end), "
+        "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0) FROM orders"
+    ).fetchone()
+    conn.close()
+    return f"{row[0]}-{row[1]}-{row[2]}-{row[3]}-{row[4]}-{row[5]}"
+
+
+@app.route("/api/events")
+def events():
+    def stream():
+        yield "data: connected\n\n"
+        last = _fingerprint()
+        while True:
+            time.sleep(2)
+            current = _fingerprint()
+            if current != last:
+                last = current
+                yield "data: refresh\n\n"
+
+    return Response(
+        stream(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def main():

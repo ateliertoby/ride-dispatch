@@ -38,9 +38,19 @@ def init_db(db_path: str):
                 price REAL,
                 raw_message TEXT,
                 telegram_msg_id INTEGER,
+                status TEXT DEFAULT 'active',
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        for col in [
+            "status TEXT DEFAULT 'active'",
+            "tunnel_fee REAL DEFAULT 0",
+            "parking_fee REAL DEFAULT 0",
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -79,10 +89,23 @@ def update_price(db_path: str, order_id: str, price: float):
         conn.commit()
 
 
+def update_cost(db_path: str, order_id: str, cost_type: str, amount: float):
+    col = {"tunnel": "tunnel_fee", "parking": "parking_fee"}[cost_type]
+    with _conn(db_path) as conn:
+        conn.execute(f"UPDATE orders SET {col} = ? WHERE order_id = ?", (amount, order_id))
+        conn.commit()
+
+
+def cancel_order(db_path: str, order_id: str):
+    with _conn(db_path) as conn:
+        conn.execute("UPDATE orders SET status = 'cancelled' WHERE order_id = ?", (order_id,))
+        conn.commit()
+
+
 def get_orders_by_date(db_path: str, date_str: str) -> list[dict]:
     with _conn(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE scheduled_time LIKE ? ORDER BY scheduled_time",
+            "SELECT * FROM orders WHERE scheduled_time LIKE ? AND coalesce(status,'active') = 'active' ORDER BY scheduled_time",
             (f"{date_str}%",),
         ).fetchall()
         return [dict(r) for r in rows]

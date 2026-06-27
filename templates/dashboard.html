@@ -22,6 +22,11 @@
     padding: 6px 14px; font-size: 16px; cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
+  .refresh-btn {
+    background: none; border: 1px solid #ccc; border-radius: 8px;
+    padding: 6px 12px; font-size: 18px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
   .date { font-size: 17px; font-weight: 600; min-width: 120px; text-align: center; }
   .revenue {
     font-size: 28px; font-weight: 700; text-align: center;
@@ -29,9 +34,11 @@
   }
   .revenue small { font-size: 14px; font-weight: 400; color: #888; display: block; margin-bottom: 4px; }
   .orders { padding: 0 12px 24px; }
-  .card {
+  a.card {
+    display: block; text-decoration: none; color: inherit;
     background: #fff; border-radius: 12px; padding: 14px 16px;
     margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    -webkit-tap-highlight-color: rgba(0,0,0,.05);
   }
   .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .badge {
@@ -58,6 +65,7 @@
     <span class="date" id="date"></span>
     <button onclick="go(1)">&rarr;</button>
   </div>
+  <button class="refresh-btn" onclick="load()">&circlearrowright;</button>
 </div>
 <div class="revenue" id="revenue"></div>
 <div class="count" id="count"></div>
@@ -78,11 +86,16 @@ async function load() {
   const data = await res.json();
   const orders = data.orders;
 
-  let total = 0, priced = 0;
-  orders.forEach(o => { if (o.price) { total += o.price; priced++; } });
+  let total = 0, costs = 0, priced = 0;
+  orders.forEach(o => {
+    if (o.price) { total += o.price; priced++; }
+    costs += (o.tunnel_fee || 0) + (o.parking_fee || 0);
+  });
+  const net = total - costs;
 
   document.getElementById('revenue').innerHTML =
-    '<small>當日收入</small>$' + total.toFixed(0);
+    '<small>總收入</small>$' + total.toFixed(0) +
+    (costs ? '<small style="margin-top:6px">淨收入</small>$' + net.toFixed(0) : '');
   document.getElementById('count').textContent =
     orders.length ? orders.length + ' 單' + (priced < orders.length ? ' · ' + (orders.length - priced) + ' 單未入價' : '') : '';
 
@@ -97,16 +110,18 @@ async function load() {
     const label = isPickup ? '接機' : '送機';
     const t = (o.scheduled_time || '').split(' ')[1];
     const time = t ? t.slice(0, 5) : '';
-    const priceHtml = o.price
-      ? '<div class="price">$' + o.price.toFixed(0) + '</div>'
+    const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
+    let priceHtml = o.price
+      ? '<div class="price">$' + o.price.toFixed(0) + (costTotal ? ' <span style="font-weight:400;color:#888;font-size:13px">- $' + costTotal.toFixed(0) + ' = $' + (o.price - costTotal).toFixed(0) + '</span>' : '') + '</div>'
       : '<div class="price none">未入價</div>';
-    return '<div class="card">' +
+    const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
+    return '<a href="' + tgLink + '" class="card">' +
       '<div class="card-top"><span class="badge ' + badge + '">' + label + '</span><span class="time">' + time + '</span></div>' +
       '<div class="passenger">' + esc(o.passenger_name) + '</div>' +
       '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' +
       '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' +
       priceHtml +
-      '</div>';
+      '</a>';
   }).join('');
 }
 
@@ -117,6 +132,9 @@ function esc(s) {
 }
 
 load();
+
+const es = new EventSource('/api/events');
+es.onmessage = () => load();
 </script>
 </body>
 </html>
