@@ -10,7 +10,7 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order, parse_tongcheng
-from .db import init_db, save_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
+from .db import init_db, save_order, save_didi_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
 
 load_dotenv()
 
@@ -27,6 +27,7 @@ ALLOWED_CHAT_IDS: set[int] = (
 pending: dict = {}
 awaiting_price: dict[int, str] = {}
 awaiting_cost: dict[int, tuple[str, str]] = {}
+didi_state: dict[int, dict] = {}
 
 
 def format_card(order) -> str:
@@ -62,16 +63,20 @@ async def handle_message(update: Update, context):
             try:
                 price = float(text)
                 update_price(DB_PATH, order["order_id"], price)
-                await msg.reply_text(f"已更新價錢: ${price:.0f}")
+                await msg.reply_text(f"已更新價錢: ${price:g}")
                 return
             except ValueError:
                 pass
+
+    chat_id = msg.chat_id
+    if chat_id in didi_state:
+        await _handle_didi_step(msg, chat_id)
+        return
 
     order = parse_order(msg.text)
     if not (order.order_id and order.pickup):
         order = parse_tongcheng(msg.text)
     if not order.order_id:
-        chat_id = msg.chat_id
         if chat_id in awaiting_cost:
             text = msg.text.strip()
             try:
@@ -79,7 +84,7 @@ async def handle_message(update: Update, context):
                 order_id, cost_type = awaiting_cost.pop(chat_id)
                 label = "隧道費" if cost_type == "tunnel" else "停車費"
                 update_cost(DB_PATH, order_id, cost_type, amount)
-                await msg.reply_text(f"已記錄{label}: ${amount:.0f}")
+                await msg.reply_text(f"已記錄{label}: ${amount:g}")
             except ValueError:
                 pass
             return
@@ -89,7 +94,7 @@ async def handle_message(update: Update, context):
                 price = float(text)
                 order_id = awaiting_price.pop(chat_id)
                 update_price(DB_PATH, order_id, price)
-                await msg.reply_text(f"已更新價錢: ${price:.0f}")
+                await msg.reply_text(f"已更新價錢: ${price:g}")
             except ValueError:
                 pass
             return
@@ -149,12 +154,81 @@ async def handle_callback(update: Update, context):
         await query.message.reply_text(f"打{label}金額：")
         await query.answer()
 
+    elif query.data == "didi:notunnel":
+        chat_id = query.message.chat_id
+        if chat_id in didi_state:
+            await query.message.edit_reply_markup(reply_markup=None)
+            await _save_didi(query.message, chat_id, 0)
+        await query.answer()
+
     elif query.data.startswith("waive:"):
         _, cost_type, order_id = query.data.split(":", 2)
         update_cost(DB_PATH, order_id, cost_type, 0)
         await query.message.edit_reply_markup(reply_markup=None)
         await query.message.reply_text(f"已免停車費 #{order_id[-4:]}")
         await query.answer()
+
+
+async def handle_didi(update: Update, context):
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    didi_state[msg.chat_id] = {"step": "time"}
+    await msg.reply_text("打時間（6位數，例如 143025 = 14:30:25）：")
+
+
+async def _handle_didi_step(msg, chat_id):
+    state = didi_state[chat_id]
+    text = msg.text.strip()
+
+    if state["step"] == "time":
+        if len(text) != 6 or not text.isdigit():
+            await msg.reply_text("要6位數字，例如 143025")
+            return
+        h, m, s = text[:2], text[2:4], text[4:6]
+        if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59 and 0 <= int(s) <= 59):
+            await msg.reply_text("時間格式唔啱，再試。")
+            return
+        from datetime import date, datetime, timedelta
+        input_time = f"{h}:{m}:{s}"
+        now_time = datetime.now().strftime("%H:%M:%S")
+        day = date.today() if input_time <= now_time else date.today() - timedelta(days=1)
+        state["time"] = f"{day.isoformat()} {input_time}"
+        state["step"] = "fare"
+        await msg.reply_text("打車費：")
+
+    elif state["step"] == "fare":
+        try:
+            fare = float(text)
+        except ValueError:
+            await msg.reply_text("要數字。")
+            return
+        state["fare"] = fare
+        state["step"] = "tunnel"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("冇隧道費", callback_data="didi:notunnel")]]
+        )
+        await msg.reply_text("隧道費？打數字，或者撳下面：", reply_markup=keyboard)
+
+    elif state["step"] == "tunnel":
+        try:
+            tunnel = float(text)
+        except ValueError:
+            await msg.reply_text("要數字，或者撳「冇隧道費」。")
+            return
+        await _save_didi(msg, chat_id, tunnel)
+
+
+async def _save_didi(msg, chat_id, tunnel_fee):
+    state = didi_state.pop(chat_id)
+    from datetime import datetime
+    order_id = f"didi_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    save_didi_order(DB_PATH, order_id, state["time"], state["fare"], tunnel_fee)
+    net = state["fare"] - tunnel_fee
+    summary = f"滴滴已記錄\n時間: {state['time'].split(' ')[1][:5]}\n車費: ${state['fare']:g}"
+    if tunnel_fee:
+        summary += f"\n隧道: ${tunnel_fee:g}\n淨收入: ${net:g}"
+    await msg.reply_text(summary)
 
 
 async def handle_cancel(update: Update, context):
@@ -195,11 +269,11 @@ async def handle_start(update: Update, context):
             f"時間: {t}",
         ]
         if order.get("price"):
-            lines.append(f"收入: ${order['price']:.0f}")
+            lines.append(f"收入: ${order['price']:g}")
         tunnel = order.get("tunnel_fee") or 0
         parking = order.get("parking_fee") or 0
         if tunnel or parking:
-            lines.append(f"成本: 隧道${tunnel:.0f} 停車${parking:.0f}")
+            lines.append(f"成本: 隧道${tunnel:g} 停車${parking:g}")
         is_pickup = order["service_type"] == "接机"
         if is_pickup:
             parking_btn = InlineKeyboardButton("免停車費", callback_data=f"waive:parking:{order_id}")
@@ -219,14 +293,24 @@ async def handle_start(update: Update, context):
     )
 
 
+async def _set_commands(app):
+    from telegram import BotCommand
+    await app.bot.set_my_commands([
+        BotCommand("didi", "滴滴快速入單"),
+        BotCommand("cancel", "取消訂單"),
+    ])
+
+
 def main():
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("didi", handle_didi))
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.post_init = _set_commands
     app.run_polling()
 
 
