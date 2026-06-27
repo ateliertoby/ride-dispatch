@@ -1,4 +1,4 @@
-from ride_dispatch.parser import parse_order
+from ride_dispatch.parser import parse_order, parse_tongcheng
 
 DROPOFF_MSG = """服务类型: 送机
 接单车型: 特斯拉 Model S
@@ -75,3 +75,48 @@ def test_parse_empty_fields():
 def test_raw_message_preserved():
     order = parse_order(DROPOFF_MSG)
     assert order.raw_message == DROPOFF_MSG
+
+
+TONGCHENG_MSG = """
+            订单号：VBK6A3F92D051362A5675-同程
+
+            车型：舒适5座
+
+            用车时间：2026-06-28 10:30:00
+            出发地：8度海逸酒店
+            目的地：香港国际机场 T1
+乘客姓名ZHANG,YAN
+    乘客手机号86-13758170978
+成人数2    儿童数0
+"""
+
+
+def test_parse_tongcheng_dropoff():
+    order = parse_tongcheng(TONGCHENG_MSG)
+    assert order.order_id == "VBK6A3F92D051362A5675-同程"
+    assert order.service_type == "送机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-06-28 10:30:00"
+    assert order.pickup == "8度海逸酒店"
+    assert order.dropoff == "香港国际机场 T1"
+    assert order.passenger_name == "ZHANG,YAN"
+    assert order.passenger_phone == "86 13758170978"
+    assert order.flight_number == ""
+    assert order.raw_message == TONGCHENG_MSG
+
+
+def test_parse_tongcheng_pickup():
+    raw = """订单号：TC12345-同程
+车型：经济5座
+用车时间：2026-06-28 14:00:00
+出发地：香港国际机场 T1
+目的地：尖沙咀
+乘客姓名LI,WEI
+乘客手机号86-13900001111"""
+    order = parse_tongcheng(raw)
+    assert order.service_type == "接机"
+
+
+def test_tongcheng_no_pickup_from_standard():
+    order = parse_order(TONGCHENG_MSG)
+    assert order.pickup == ""

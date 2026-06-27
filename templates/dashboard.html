@@ -71,12 +71,18 @@
 <div class="count" id="count"></div>
 <div class="orders" id="orders"></div>
 <script>
-let cur = new Date().toISOString().split('T')[0];
+function fmt(d) {
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+let cur = fmt(new Date());
 
 function go(d) {
   const dt = new Date(cur + 'T00:00:00');
   dt.setDate(dt.getDate() + d);
-  cur = dt.toISOString().split('T')[0];
+  cur = fmt(dt);
   load();
 }
 

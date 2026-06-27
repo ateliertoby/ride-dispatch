@@ -90,3 +90,88 @@ def parse_order(raw: str) -> Order:
         more_contacts=parsed.get("more_contacts", ""),
         raw_message=raw,
     )
+
+
+_AIRPORT_KEYWORDS = ("机场", "機場", "airport")
+
+_TC_FIELD_MAP = {
+    "订单号": "order_id",
+    "车型": "vehicle_type",
+    "用车时间": "scheduled_time",
+    "出发地": "pickup",
+    "目的地": "dropoff",
+}
+
+_TC_NO_COLON = {
+    "乘客姓名": "passenger_name",
+    "乘客手机号": "passenger_phone",
+    "成人数": "adults",
+    "儿童数": "children",
+}
+
+
+def parse_tongcheng(raw: str) -> Order:
+    parsed = {}
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # Fields with colon
+        for sep in ("：", ":"):
+            if sep in line:
+                key, _, value = line.partition(sep)
+                key = key.strip()
+                value = value.strip()
+                if key in _TC_FIELD_MAP:
+                    parsed[_TC_FIELD_MAP[key]] = value
+                break
+        else:
+            # Fields without colon
+            for prefix, field in _TC_NO_COLON.items():
+                if line.startswith(prefix):
+                    parsed[field] = line[len(prefix):].strip()
+                    break
+
+    if not parsed.get("order_id"):
+        return Order(
+            order_id="", service_type="", vehicle_type="", passenger_name="",
+            scheduled_time="", passenger_phone="", overseas_phone="",
+            flight_number="", pickup="", dropoff="", distance_km=None,
+            notes="", driver_notes="", additional_services="",
+            passenger_exit_minutes=None, third_party_contact="",
+            more_contacts="", raw_message=raw,
+        )
+
+    # Infer service type from pickup/dropoff
+    dropoff = parsed.get("dropoff", "").lower()
+    pickup = parsed.get("pickup", "").lower()
+    if any(kw in dropoff for kw in _AIRPORT_KEYWORDS):
+        service_type = "送机"
+    elif any(kw in pickup for kw in _AIRPORT_KEYWORDS):
+        service_type = "接机"
+    else:
+        service_type = ""
+
+    phone = parsed.get("passenger_phone", "").replace("-", " ")
+
+    return Order(
+        order_id=parsed.get("order_id", ""),
+        service_type=service_type,
+        vehicle_type=parsed.get("vehicle_type", ""),
+        passenger_name=parsed.get("passenger_name", ""),
+        scheduled_time=parsed.get("scheduled_time", ""),
+        passenger_phone=phone,
+        overseas_phone="",
+        flight_number="",
+        pickup=parsed.get("pickup", ""),
+        dropoff=parsed.get("dropoff", ""),
+        distance_km=None,
+        notes="",
+        driver_notes="",
+        additional_services="",
+        passenger_exit_minutes=None,
+        third_party_contact="",
+        more_contacts="",
+        raw_message=raw,
+    )
