@@ -9,7 +9,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from .parser import parse_order
+from .parser import parse_order, parse_tongcheng
 from .db import init_db, save_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
 
 load_dotenv()
@@ -68,6 +68,8 @@ async def handle_message(update: Update, context):
                 pass
 
     order = parse_order(msg.text)
+    if not (order.order_id and order.pickup):
+        order = parse_tongcheng(msg.text)
     if not order.order_id:
         chat_id = msg.chat_id
         if chat_id in awaiting_cost:
@@ -147,6 +149,13 @@ async def handle_callback(update: Update, context):
         await query.message.reply_text(f"打{label}金額：")
         await query.answer()
 
+    elif query.data.startswith("waive:"):
+        _, cost_type, order_id = query.data.split(":", 2)
+        update_cost(DB_PATH, order_id, cost_type, 0)
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.reply_text(f"已免停車費 #{order_id[-4:]}")
+        await query.answer()
+
 
 async def handle_cancel(update: Update, context):
     msg = update.message
@@ -191,10 +200,15 @@ async def handle_start(update: Update, context):
         parking = order.get("parking_fee") or 0
         if tunnel or parking:
             lines.append(f"成本: 隧道${tunnel:.0f} 停車${parking:.0f}")
+        is_pickup = order["service_type"] == "接机"
+        if is_pickup:
+            parking_btn = InlineKeyboardButton("免停車費", callback_data=f"waive:parking:{order_id}")
+        else:
+            parking_btn = InlineKeyboardButton("停車費", callback_data=f"cost:parking:{order_id}")
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("隧道費", callback_data=f"cost:tunnel:{order_id}"),
-                InlineKeyboardButton("停車費", callback_data=f"cost:parking:{order_id}"),
+                parking_btn,
             ],
             [InlineKeyboardButton("取消訂單", callback_data=f"cancel:{order_id}")],
         ])
