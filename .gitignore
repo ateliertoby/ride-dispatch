@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .env
 *.db
+.venv/
+.pytest_cache/
+logs/
+.DS_Store
+CLAUDE.md
+AGENTS.md
