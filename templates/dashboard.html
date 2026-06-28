@@ -59,8 +59,12 @@
   .price.none { color: #ccc; font-weight: 400; }
   .empty { text-align: center; color: #999; padding: 60px 0; font-size: 15px; }
   .count { font-size: 13px; color: #888; text-align: center; padding-bottom: 8px; }
-  .est { font-size: 13px; color: #0a84ff; margin-top: 2px; }
-  .est.landed { color: #43a047; }
+  .phase { font-size: 11px; font-weight: 600; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+  .phase.est { background: #e8f4fd; color: #0a84ff; }
+  .phase.landed { background: #e8f5e9; color: #43a047; }
+  .phase.gate { background: #e8f5e9; color: #43a047; }
+  .flight-gate { font-size: 13px; color: #43a047; margin-top: 2px; }
+  .svc-time { font-size: 12px; color: #aaa; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -137,24 +141,34 @@ async function load() {
     }
     let priceHtml = priceDetail;
     const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
-    let estHtml = '';
-    if (isPickup && o.estimated_landing) {
-      const isLanded = o.estimated_landing.startsWith('Landed') || o.estimated_landing.startsWith('At gate');
-      const cls = isLanded ? 'est landed' : 'est';
-      if (isLanded) {
-        estHtml = '<div class="' + cls + '">' + esc(o.estimated_landing) + '</div>';
-      } else {
-        const estMatch = o.estimated_landing.match(/(\d{2}:\d{2})/);
-        if (estMatch && estMatch[1] !== time) {
-          estHtml = '<div class="' + cls + '">' + time + ' &rarr; ' + estMatch[1] + '</div>';
-        }
+    let timeDisplay = time;
+    let phaseBadge = '';
+    let gateHtml = '';
+    let svcTimeHtml = '';
+    if (isPickup) {
+      if (o.flight_eta) {
+        timeDisplay = o.flight_eta;
+      } else if (o.flight_scheduled) {
+        timeDisplay = o.flight_scheduled;
       }
+      if (o.flight_status === 'est') {
+        phaseBadge = '<span class="phase est">Est</span>';
+      } else if (o.flight_status === 'landed') {
+        phaseBadge = '<span class="phase landed">Landed</span>';
+      } else if (o.flight_status === 'gate') {
+        phaseBadge = '<span class="phase gate">At gate</span>';
+      }
+      if (o.flight_gate) {
+        gateHtml = '<div class="flight-gate">At gate ' + esc(o.flight_gate) + '</div>';
+      }
+      svcTimeHtml = '<div class="svc-time">用車 ' + time + '</div>';
     }
     return '<a href="' + tgLink + '" class="card">' +
-      '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + time + '</span></div>' +
+      '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
       (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
       (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
-      estHtml +
+      gateHtml +
+      svcTimeHtml +
       (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
       priceHtml +
       '</a>';
