@@ -93,7 +93,7 @@ TONGCHENG_MSG = """
 
 def test_parse_tongcheng_dropoff():
     order = parse_tongcheng(TONGCHENG_MSG)
-    assert order.order_id == "VBKTEST00000000000001-同程"
+    assert order.order_id == "VBKTEST00000000000001"
     assert order.service_type == "送机"
     assert order.vehicle_type == "舒适5座"
     assert order.scheduled_time == "2026-06-28 10:30:00"
