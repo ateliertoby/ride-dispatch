@@ -133,7 +133,12 @@ def parse_tongcheng(raw: str) -> Order:
                     parsed[field] = line[len(prefix):].strip()
                     break
 
-    if not parsed.get("order_id"):
+    oid = parsed.get("order_id", "")
+    if "-" in oid:
+        oid = oid.split("-")[0]
+    parsed["order_id"] = oid
+
+    if not oid:
         return Order(
             order_id="", service_type="", vehicle_type="", passenger_name="",
             scheduled_time="", passenger_phone="", overseas_phone="",
