@@ -63,7 +63,12 @@ def _poll_flights():
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            arrivals = fetch_arrivals(today)
+            arrivals = []
+            for d in dates:
+                try:
+                    arrivals.extend(fetch_arrivals(d))
+                except Exception:
+                    logger.exception("Failed to fetch arrivals for %s", d)
 
             updates = match_flights(orders, arrivals)
             for order_id, status in updates.items():
@@ -97,6 +102,7 @@ def events():
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -105,7 +111,6 @@ def main():
             logging.StreamHandler(),
         ],
     )
-    os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     t = threading.Thread(target=_poll_flights, daemon=True)
     t.start()
