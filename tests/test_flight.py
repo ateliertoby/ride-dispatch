@@ -1,4 +1,4 @@
-from ride_dispatch.flight import normalize_flight_no, match_flights
+from ride_dispatch.flight import normalize_flight_no, match_flights, parse_status
 
 
 def test_normalize_strips_spaces():
@@ -11,6 +11,30 @@ def test_normalize_uppercase():
 
 def test_normalize_multiple_spaces():
     assert normalize_flight_no("CX  4 89") == "CX489"
+
+
+def test_parse_status_est():
+    assert parse_status("Est at 14:26") == {"eta": "14:26", "gate": None, "status": "est"}
+
+
+def test_parse_status_landed():
+    assert parse_status("Landed 14:30") == {"eta": "14:30", "gate": None, "status": "landed"}
+
+
+def test_parse_status_gate():
+    assert parse_status("At gate 14:35") == {"eta": None, "gate": "14:35", "status": "gate"}
+
+
+def test_parse_status_gate_crossday():
+    assert parse_status("At gate 23:52 (28/06/2026)") == {"eta": None, "gate": "23:52", "status": "gate"}
+
+
+def test_parse_status_empty():
+    assert parse_status("") == {"eta": None, "gate": None, "status": None}
+
+
+def test_parse_status_diverted():
+    assert parse_status("Diverted To Guangzhou") == {"eta": None, "gate": None, "status": None}
 
 
 SAMPLE_ARRIVALS = [
@@ -38,19 +62,19 @@ SAMPLE_ARRIVALS = [
 def test_match_direct_flight():
     orders = [{"order_id": "O1", "flight_number": "CX489"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O1": "Est at 14:26"}
+    assert result == {"O1": {"scheduled": "13:00", "eta": "14:26", "gate": None, "status": "est"}}
 
 
 def test_match_codeshare():
     orders = [{"order_id": "O2", "flight_number": "CX505"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O2": "Landed 14:35"}
+    assert result == {"O2": {"scheduled": "14:30", "eta": "14:35", "gate": None, "status": "landed"}}
 
 
-def test_match_no_status_skipped():
+def test_match_no_status_still_returns_scheduled():
     orders = [{"order_id": "O3", "flight_number": "UO117"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {}
+    assert result == {"O3": {"scheduled": "16:00", "eta": None, "gate": None, "status": None}}
 
 
 def test_match_not_found():
@@ -66,4 +90,7 @@ def test_match_multiple_orders():
         {"order_id": "O4", "flight_number": "XX999"},
     ]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O1": "Est at 14:26", "O2": "Landed 14:35"}
+    assert result == {
+        "O1": {"scheduled": "13:00", "eta": "14:26", "gate": None, "status": "est"},
+        "O2": {"scheduled": "14:30", "eta": "14:35", "gate": None, "status": "landed"},
+    }
