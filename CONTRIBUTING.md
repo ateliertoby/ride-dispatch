@@ -30,13 +30,14 @@ ride_dispatch/
   parser.py    — Order parsing (entry point for new dispatch formats)
   bot.py       — Telegram handlers (entry point for new commands)
   db.py        — Schema + queries (entry point for new fields)
-  web.py       — Dashboard API (entry point for new endpoints)
+  flight.py    — HKIA flight data fetcher + matcher
+  web.py       — Dashboard API + SSE + flight poller
 templates/
   dashboard.html — Single-file dashboard UI
 deploy/
   *.plist      — macOS launchd service configs
 tests/
-  test_parser.py, test_db.py
+  test_parser.py, test_db.py, test_flight.py
 ```
 
 ## Common changes
@@ -46,3 +47,7 @@ tests/
 **Add a new order field:** Add to the `Order` dataclass in `parser.py`, add column in `db.py` `init_db()`, update `_INSERT_SQL` and `save_order()`.
 
 **Add a new bot command:** Add handler function in `bot.py`, register in `main()`.
+
+**Change flight polling interval:** In `web.py`, the poller loop sleeps for 300 seconds (5 min) between fetches. Adjust there.
+
+**Change flight matching logic:** `flight.py` `match_flights()` matches by flight number and date. If HKIA changes their response format, this is where it breaks.
