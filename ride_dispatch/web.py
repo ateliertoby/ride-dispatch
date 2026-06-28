@@ -1,10 +1,13 @@
+import logging
 import os
 import sqlite3
+import threading
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
-from .db import init_db, get_orders_by_date
+from .db import init_db, get_orders_by_date, get_pickup_flights, update_estimated_landing
+from .flight import fetch_arrivals, match_flights
 
 load_dotenv()
 
@@ -33,10 +36,45 @@ def _fingerprint():
     row = conn.execute(
         "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
         "count(case when status='cancelled' then 1 end), "
-        "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0) FROM orders"
+        "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0), "
+        "coalesce(group_concat(coalesce(estimated_landing,'')),'') FROM orders"
     ).fetchone()
     conn.close()
-    return f"{row[0]}-{row[1]}-{row[2]}-{row[3]}-{row[4]}-{row[5]}"
+    return f"{row[0]}-{row[1]}-{row[2]}-{row[3]}-{row[4]}-{row[5]}-{row[6]}"
+
+
+POLL_INTERVAL = 300
+
+def _poll_flights():
+    logger = logging.getLogger("flight_poller")
+    while True:
+        try:
+            today = date.today().isoformat()
+            dates = [today]
+            if datetime.now().hour < 2:
+                yesterday = (date.today() - timedelta(days=1)).isoformat()
+                dates.insert(0, yesterday)
+
+            orders = []
+            for d in dates:
+                orders.extend(get_pickup_flights(DB_PATH, d))
+
+            if not orders:
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            arrivals = fetch_arrivals(today)
+
+            updates = match_flights(orders, arrivals)
+            for order_id, status in updates.items():
+                update_estimated_landing(DB_PATH, order_id, status)
+
+            if updates:
+                logger.info("Updated %d flight(s): %s", len(updates), list(updates.keys()))
+        except Exception:
+            logger.exception("Flight poll error")
+
+        time.sleep(POLL_INTERVAL)
 
 
 @app.route("/api/events")
@@ -59,8 +97,18 @@ def events():
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler("logs/web.log"),
+            logging.StreamHandler(),
+        ],
+    )
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
+    t = threading.Thread(target=_poll_flights, daemon=True)
+    t.start()
     port = int(os.environ.get("RIDE_WEB_PORT", "3200"))
     app.run(host="127.0.0.1", port=port)
 
