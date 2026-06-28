@@ -48,6 +48,7 @@
   .badge.pickup { background: #e8f4fd; color: #0a84ff; }
   .badge.dropoff { background: #fff3e0; color: #f57c00; }
   .badge.didi { background: #e8f5e9; color: #43a047; }
+  .badge.uber { background: #f3e5f5; color: #8e24aa; }
   .time { font-size: 15px; font-weight: 600; color: #333; }
   .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
   .flight { font-size: 13px; color: #888; margin-bottom: 8px; }
@@ -113,9 +114,10 @@ async function load() {
 
   document.getElementById('orders').innerHTML = orders.map(o => {
     const isDidi = o.service_type === '滴滴';
+    const isUber = o.service_type === 'Uber';
     const isPickup = o.service_type === '接机';
-    const badge = isDidi ? 'didi' : isPickup ? 'pickup' : 'dropoff';
-    const label = isDidi ? '滴滴' : isPickup ? '接機' : '送機';
+    const badge = isDidi ? 'didi' : isUber ? 'uber' : isPickup ? 'pickup' : 'dropoff';
+    const label = isDidi ? '滴滴' : isUber ? 'Uber' : isPickup ? '接機' : '送機';
     const t = (o.scheduled_time || '').split(' ')[1];
     const time = t ? t.slice(0, 5) : '';
     const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);

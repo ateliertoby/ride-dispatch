@@ -85,12 +85,12 @@ def save_order(db_path: str, order: Order, telegram_msg_id: int) -> int:
         return cur.lastrowid
 
 
-def save_didi_order(db_path: str, order_id: str, scheduled_time: str, price: float, tunnel_fee: float) -> int:
+def save_quick_order(db_path: str, order_id: str, service_type: str, scheduled_time: str, price: float, tunnel_fee: float) -> int:
     with _conn(db_path) as conn:
         cur = conn.execute(
             """INSERT INTO orders (order_id, service_type, scheduled_time, price, tunnel_fee, passenger_name)
-               VALUES (?, '滴滴', ?, ?, ?, '')""",
-            (order_id, scheduled_time, price, tunnel_fee),
+               VALUES (?, ?, ?, ?, ?, '')""",
+            (order_id, service_type, scheduled_time, price, tunnel_fee),
         )
         conn.commit()
         return cur.lastrowid
