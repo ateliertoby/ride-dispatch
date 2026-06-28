@@ -146,22 +146,31 @@ async function load() {
     let gateHtml = '';
     let svcTimeHtml = '';
     if (isPickup) {
-      if (o.flight_eta) {
+      if (o.flight_status === 'gate' && o.flight_gate) {
+        timeDisplay = o.flight_gate;
+        phaseBadge = '<span class="phase gate">At gate</span>';
+      } else if (o.flight_status === 'landed' && o.flight_eta) {
         timeDisplay = o.flight_eta;
+        phaseBadge = '<span class="phase landed">Landed</span>';
+      } else if (o.flight_status === 'est' && o.flight_eta) {
+        timeDisplay = o.flight_eta;
+        phaseBadge = '<span class="phase est">Est</span>';
       } else if (o.flight_scheduled) {
         timeDisplay = o.flight_scheduled;
+      } else {
+        timeDisplay = '';
       }
-      if (o.flight_status === 'est') {
-        phaseBadge = '<span class="phase est">Est</span>';
-      } else if (o.flight_status === 'landed') {
-        phaseBadge = '<span class="phase landed">Landed</span>';
-      } else if (o.flight_status === 'gate') {
-        phaseBadge = '<span class="phase gate">At gate</span>';
+      if (o.flight_status === 'gate' && o.flight_eta) {
+        gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
       }
-      if (o.flight_gate) {
-        gateHtml = '<div class="flight-gate">At gate ' + esc(o.flight_gate) + '</div>';
+      const landingTime = o.flight_eta || o.flight_scheduled;
+      if (landingTime && o.passenger_exit_minutes) {
+        const [h, m] = landingTime.split(':').map(Number);
+        const total = h * 60 + m + o.passenger_exit_minutes;
+        const svcH = String(Math.floor(total / 60) % 24).padStart(2, '0');
+        const svcM = String(total % 60).padStart(2, '0');
+        svcTimeHtml = '<div class="svc-time">用車 ' + svcH + ':' + svcM + '</div>';
       }
-      svcTimeHtml = '<div class="svc-time">用車 ' + esc(time) + '</div>';
     }
     return '<a href="' + tgLink + '" class="card">' +
       '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
