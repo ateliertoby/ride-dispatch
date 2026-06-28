@@ -161,7 +161,7 @@ async function load() {
       if (o.flight_gate) {
         gateHtml = '<div class="flight-gate">At gate ' + esc(o.flight_gate) + '</div>';
       }
-      svcTimeHtml = '<div class="svc-time">用車 ' + time + '</div>';
+      svcTimeHtml = '<div class="svc-time">用車 ' + esc(time) + '</div>';
     }
     return '<a href="' + tgLink + '" class="card">' +
       '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
