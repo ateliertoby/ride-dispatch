@@ -6,7 +6,7 @@ import time
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
-from .db import init_db, get_orders_by_date, get_pickup_flights, update_estimated_landing
+from .db import init_db, get_orders_by_date, get_pickup_flights, update_flight_info
 from .flight import fetch_arrivals, match_flights
 
 load_dotenv()
@@ -37,7 +37,7 @@ def _fingerprint():
         "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
         "count(case when status='cancelled' then 1 end), "
         "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0), "
-        "coalesce(group_concat(coalesce(estimated_landing,'')),'') FROM orders"
+        "coalesce(group_concat(coalesce(flight_eta,'') || coalesce(flight_gate,'') || coalesce(flight_status,'')),'') FROM orders"
     ).fetchone()
     conn.close()
     return f"{row[0]}-{row[1]}-{row[2]}-{row[3]}-{row[4]}-{row[5]}-{row[6]}"
@@ -71,8 +71,8 @@ def _poll_flights():
                     logger.exception("Failed to fetch arrivals for %s", d)
 
             updates = match_flights(orders, arrivals)
-            for order_id, status in updates.items():
-                update_estimated_landing(DB_PATH, order_id, status)
+            for order_id, info in updates.items():
+                update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"])
 
             if updates:
                 logger.info("Updated %d flight(s): %s", len(updates), list(updates.keys()))
