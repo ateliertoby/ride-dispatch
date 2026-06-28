@@ -48,6 +48,10 @@ def init_db(db_path: str):
             "parking_fee REAL DEFAULT 0",
             "banner_fee REAL DEFAULT 0",
             "estimated_landing TEXT",
+            "flight_scheduled TEXT",
+            "flight_eta TEXT",
+            "flight_gate TEXT",
+            "flight_status TEXT",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -146,10 +150,16 @@ def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def update_estimated_landing(db_path: str, order_id: str, value: str):
+def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None):
     with _conn(db_path) as conn:
-        conn.execute(
-            "UPDATE orders SET estimated_landing = ? WHERE order_id = ?",
-            (value, order_id),
-        )
+        sets = ["flight_scheduled = ?", "flight_status = ?"]
+        params = [scheduled, status]
+        if eta is not None:
+            sets.append("flight_eta = ?")
+            params.append(eta)
+        if gate is not None:
+            sets.append("flight_gate = ?")
+            params.append(gate)
+        params.append(order_id)
+        conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE order_id = ?", params)
         conn.commit()

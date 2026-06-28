@@ -9,7 +9,7 @@ from ride_dispatch.db import (
     get_orders_by_date,
     get_order_by_telegram_msg_id,
     get_pickup_flights,
-    update_estimated_landing,
+    update_flight_info,
 )
 
 
@@ -109,14 +109,40 @@ def test_get_pickup_flights(db_path):
     assert rows[0]["order_id"] == "P1"
 
 
-def test_update_estimated_landing(db_path):
-    save_order(db_path, make_order(order_id="EL1"), 1)
-    update_estimated_landing(db_path, "EL1", "Est at 14:26")
+def test_update_flight_info_est(db_path):
+    save_order(db_path, make_order(order_id="F1"), 1)
+    update_flight_info(db_path, "F1", scheduled="14:40", eta="14:26", gate=None, status="est")
     rows = get_orders_by_date(db_path, "2026-06-27")
-    assert rows[0]["estimated_landing"] == "Est at 14:26"
+    assert rows[0]["flight_scheduled"] == "14:40"
+    assert rows[0]["flight_eta"] == "14:26"
+    assert rows[0]["flight_gate"] is None
+    assert rows[0]["flight_status"] == "est"
 
 
-def test_estimated_landing_null_by_default(db_path):
-    save_order(db_path, make_order(order_id="NL1"), 1)
+def test_update_flight_info_gate_preserves_eta(db_path):
+    save_order(db_path, make_order(order_id="F2"), 1)
+    update_flight_info(db_path, "F2", scheduled="14:40", eta="14:30", gate=None, status="landed")
+    update_flight_info(db_path, "F2", scheduled="14:40", eta=None, gate="14:35", status="gate")
     rows = get_orders_by_date(db_path, "2026-06-27")
-    assert rows[0]["estimated_landing"] is None
+    assert rows[0]["flight_eta"] == "14:30"
+    assert rows[0]["flight_gate"] == "14:35"
+    assert rows[0]["flight_status"] == "gate"
+
+
+def test_update_flight_info_scheduled_only(db_path):
+    save_order(db_path, make_order(order_id="F3"), 1)
+    update_flight_info(db_path, "F3", scheduled="16:00", eta=None, gate=None, status=None)
+    rows = get_orders_by_date(db_path, "2026-06-27")
+    assert rows[0]["flight_scheduled"] == "16:00"
+    assert rows[0]["flight_eta"] is None
+    assert rows[0]["flight_gate"] is None
+    assert rows[0]["flight_status"] is None
+
+
+def test_flight_columns_null_by_default(db_path):
+    save_order(db_path, make_order(order_id="F4"), 1)
+    rows = get_orders_by_date(db_path, "2026-06-27")
+    assert rows[0]["flight_scheduled"] is None
+    assert rows[0]["flight_eta"] is None
+    assert rows[0]["flight_gate"] is None
+    assert rows[0]["flight_status"] is None
