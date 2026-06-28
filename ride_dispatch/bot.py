@@ -96,9 +96,12 @@ async def handle_message(update: Update, context):
             text = msg.text.strip()
             try:
                 price = float(text)
-                order_id = awaiting_price.pop(chat_id)
+                order_id, banner_fee = awaiting_price.pop(chat_id)
                 update_price(DB_PATH, order_id, price)
-                await msg.reply_text(f"已更新價錢: ${price:g}")
+                if banner_fee:
+                    await msg.reply_text(f"已更新價錢: ${price:g}（+舉牌${banner_fee:g}）")
+                else:
+                    await msg.reply_text(f"已更新價錢: ${price:g}")
             except ValueError:
                 pass
             return
@@ -127,11 +130,13 @@ async def handle_callback(update: Update, context):
             await query.answer("訂單已過期")
             return
         try:
-            sent = await query.message.reply_text(
-                f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
-            )
+            banner_fee = 40.0 if "举牌" in (order.additional_services or "") else 0.0
+            prompt = f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
+            if banner_fee:
+                prompt += f"（會自動加${banner_fee:g}舉牌費）"
+            sent = await query.message.reply_text(prompt)
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id)
-            awaiting_price[query.message.chat_id] = order.order_id
+            awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
         except sqlite3.IntegrityError:
