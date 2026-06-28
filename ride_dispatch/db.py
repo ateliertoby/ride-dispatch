@@ -47,6 +47,7 @@ def init_db(db_path: str):
             "tunnel_fee REAL DEFAULT 0",
             "parking_fee REAL DEFAULT 0",
             "banner_fee REAL DEFAULT 0",
+            "estimated_landing TEXT",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -132,3 +133,23 @@ def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:
             "SELECT * FROM orders WHERE telegram_msg_id = ?", (msg_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT order_id, flight_number FROM orders "
+            "WHERE scheduled_time LIKE ? AND service_type = '接机' "
+            "AND flight_number != '' AND coalesce(status,'active') = 'active'",
+            (f"{date_str}%",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_estimated_landing(db_path: str, order_id: str, value: str):
+    with _conn(db_path) as conn:
+        conn.execute(
+            "UPDATE orders SET estimated_landing = ? WHERE order_id = ?",
+            (value, order_id),
+        )
+        conn.commit()
