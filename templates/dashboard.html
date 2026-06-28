@@ -59,6 +59,8 @@
   .price.none { color: #ccc; font-weight: 400; }
   .empty { text-align: center; color: #999; padding: 60px 0; font-size: 15px; }
   .count { font-size: 13px; color: #888; text-align: center; padding-bottom: 8px; }
+  .est { font-size: 13px; color: #0a84ff; margin-top: 2px; }
+  .est.landed { color: #43a047; }
 </style>
 </head>
 <body>
@@ -135,10 +137,24 @@ async function load() {
     }
     let priceHtml = priceDetail;
     const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
+    let estHtml = '';
+    if (isPickup && o.estimated_landing) {
+      const isLanded = o.estimated_landing.startsWith('Landed') || o.estimated_landing.startsWith('At gate');
+      const cls = isLanded ? 'est landed' : 'est';
+      if (isLanded) {
+        estHtml = '<div class="' + cls + '">' + esc(o.estimated_landing) + '</div>';
+      } else {
+        const estMatch = o.estimated_landing.match(/(\d{2}:\d{2})/);
+        if (estMatch && estMatch[1] !== time) {
+          estHtml = '<div class="' + cls + '">' + time + ' &rarr; ' + estMatch[1] + '</div>';
+        }
+      }
+    }
     return '<a href="' + tgLink + '" class="card">' +
       '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + time + '</span></div>' +
       (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
       (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
+      estHtml +
       (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
       priceHtml +
       '</a>';
