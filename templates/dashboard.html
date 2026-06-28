@@ -49,6 +49,7 @@
   .badge.dropoff { background: #fff3e0; color: #f57c00; }
   .badge.didi { background: #e8f5e9; color: #43a047; }
   .badge.uber { background: #f3e5f5; color: #8e24aa; }
+  .badge.banner { background: #fff8e1; color: #f9a825; margin-left: 4px; }
   .time { font-size: 15px; font-weight: 600; color: #333; }
   .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
   .flight { font-size: 13px; color: #888; margin-bottom: 8px; }
@@ -96,7 +97,7 @@ async function load() {
 
   let total = 0, costs = 0, priced = 0;
   orders.forEach(o => {
-    if (o.price) { total += o.price; priced++; }
+    if (o.price) { total += o.price + (o.banner_fee || 0); priced++; }
     costs += (o.tunnel_fee || 0) + (o.parking_fee || 0);
   });
   const net = total - costs;
@@ -121,12 +122,21 @@ async function load() {
     const t = (o.scheduled_time || '').split(' ')[1];
     const time = t ? t.slice(0, 5) : '';
     const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
-    let priceHtml = o.price
-      ? '<div class="price">$' + $(o.price) + (costTotal ? ' <span style="font-weight:400;color:#888;font-size:13px">- $' + $(costTotal) + ' = $' + $(o.price - costTotal) + '</span>' : '') + '</div>'
-      : '<div class="price none">未入價</div>';
+    const banner = o.banner_fee || 0;
+    let priceDetail = '';
+    if (o.price) {
+      const gross = o.price + banner;
+      priceDetail = '<div class="price">$' + $(o.price);
+      if (banner) priceDetail += ' + $' + $(banner);
+      if (costTotal) priceDetail += ' <span style="font-weight:400;color:#888;font-size:13px">- $' + $(costTotal) + ' = $' + $(gross - costTotal) + '</span>';
+      priceDetail += '</div>';
+    } else {
+      priceDetail = '<div class="price none">未入價</div>';
+    }
+    let priceHtml = priceDetail;
     const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
     return '<a href="' + tgLink + '" class="card">' +
-      '<div class="card-top"><span class="badge ' + badge + '">' + label + '</span><span class="time">' + time + '</span></div>' +
+      '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + time + '</span></div>' +
       (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
       (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
       (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +

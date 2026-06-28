@@ -46,6 +46,7 @@ def init_db(db_path: str):
             "status TEXT DEFAULT 'active'",
             "tunnel_fee REAL DEFAULT 0",
             "parking_fee REAL DEFAULT 0",
+            "banner_fee REAL DEFAULT 0",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -61,13 +62,14 @@ _INSERT_SQL = """
         pickup, dropoff, distance_km, notes, driver_notes,
         additional_services, passenger_exit_minutes,
         third_party_contact, more_contacts, raw_message, telegram_msg_id,
-        parking_fee
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parking_fee, banner_fee
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
 def save_order(db_path: str, order: Order, telegram_msg_id: int) -> int:
     parking = 32.0 if order.service_type == "接机" else 0.0
+    banner = 40.0 if "举牌" in (order.additional_services or "") else 0.0
     with _conn(db_path) as conn:
         cur = conn.execute(
             _INSERT_SQL,
@@ -78,7 +80,7 @@ def save_order(db_path: str, order: Order, telegram_msg_id: int) -> int:
                 order.dropoff, order.distance_km, order.notes, order.driver_notes,
                 order.additional_services, order.passenger_exit_minutes,
                 order.third_party_contact, order.more_contacts, order.raw_message,
-                telegram_msg_id, parking,
+                telegram_msg_id, parking, banner,
             ),
         )
         conn.commit()
