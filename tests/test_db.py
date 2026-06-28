@@ -8,6 +8,8 @@ from ride_dispatch.db import (
     update_price,
     get_orders_by_date,
     get_order_by_telegram_msg_id,
+    get_pickup_flights,
+    update_estimated_landing,
 )
 
 
@@ -96,3 +98,25 @@ def test_duplicate_order_id_raises(db_path):
     save_order(db_path, order, telegram_msg_id=1)
     with pytest.raises(sqlite3.IntegrityError):
         save_order(db_path, order, telegram_msg_id=2)
+
+
+def test_get_pickup_flights(db_path):
+    save_order(db_path, make_order(order_id="P1", service_type="接机", flight_number="CX100", scheduled_time="2026-06-27 11:00:00"), 1)
+    save_order(db_path, make_order(order_id="P2", service_type="送机", flight_number="QW916", scheduled_time="2026-06-27 12:00:00"), 2)
+    save_order(db_path, make_order(order_id="P3", service_type="接机", flight_number="", scheduled_time="2026-06-27 13:00:00"), 3)
+    rows = get_pickup_flights(db_path, "2026-06-27")
+    assert len(rows) == 1
+    assert rows[0]["order_id"] == "P1"
+
+
+def test_update_estimated_landing(db_path):
+    save_order(db_path, make_order(order_id="EL1"), 1)
+    update_estimated_landing(db_path, "EL1", "Est at 14:26")
+    rows = get_orders_by_date(db_path, "2026-06-27")
+    assert rows[0]["estimated_landing"] == "Est at 14:26"
+
+
+def test_estimated_landing_null_by_default(db_path):
+    save_order(db_path, make_order(order_id="NL1"), 1)
+    rows = get_orders_by_date(db_path, "2026-06-27")
+    assert rows[0]["estimated_landing"] is None
