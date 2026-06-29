@@ -1,4 +1,4 @@
-from ride_dispatch.parser import parse_order, parse_tongcheng
+from ride_dispatch.parser import parse_order, parse_feizhu, parse_tongcheng
 
 DROPOFF_MSG = """服务类型: 送机
 接单车型: 特斯拉 Model S
@@ -120,3 +120,52 @@ def test_parse_tongcheng_pickup():
 def test_tongcheng_no_pickup_from_standard():
     order = parse_order(TONGCHENG_MSG)
     assert order.pickup == ""
+
+
+FEIZHU_MSG = """订单编号：5122000000000000001-飛豬
+经济5座
+【接机】
+中国-中国香港
+[出发]香港国际机场T1
+[抵达]香港城市大学
+约38公里
+UO725
+[预计抵达]
+2026-06-29 16:00:00
+陈大文
+真实号：15000000005"""
+
+
+def test_parse_feizhu_pickup():
+    order = parse_feizhu(FEIZHU_MSG)
+    assert order.order_id == "5122000000000000001"
+    assert order.service_type == "接机"
+    assert order.vehicle_type == "经济5座"
+    assert order.pickup == "香港国际机场T1"
+    assert order.dropoff == "香港城市大学"
+    assert order.distance_km == 38
+    assert order.flight_number == "UO725"
+    assert order.scheduled_time == "2026-06-29 16:00:00"
+    assert order.passenger_name == "陈大文"
+    assert order.passenger_phone == "15000000005"
+
+
+FEIZHU_NO_FLIGHT = """订单编号：9999999999-飛豬
+经济5座
+【送机】
+中国-中国香港
+[出发]尖沙咀酒店
+[抵达]香港国际机场T1
+约30公里
+[预计抵达]
+2026-06-29 10:00:00
+李明
+真实号：13800001111"""
+
+
+def test_parse_feizhu_no_flight():
+    order = parse_feizhu(FEIZHU_NO_FLIGHT)
+    assert order.order_id == "9999999999"
+    assert order.service_type == "送机"
+    assert order.flight_number == ""
+    assert order.passenger_name == "李明"

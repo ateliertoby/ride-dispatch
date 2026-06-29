@@ -52,6 +52,7 @@ def init_db(db_path: str):
             "flight_eta TEXT",
             "flight_gate TEXT",
             "flight_status TEXT",
+            "source TEXT DEFAULT ''",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -67,13 +68,12 @@ _INSERT_SQL = """
         pickup, dropoff, distance_km, notes, driver_notes,
         additional_services, passenger_exit_minutes,
         third_party_contact, more_contacts, raw_message, telegram_msg_id,
-        parking_fee, banner_fee
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parking_fee, banner_fee, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-def save_order(db_path: str, order: Order, telegram_msg_id: int) -> int:
-    parking = 32.0 if order.service_type == "接机" else 0.0
+def save_order(db_path: str, order: Order, telegram_msg_id: int, parking: float = 0.0, source: str = "") -> int:
     banner = 40.0 if "举牌" in (order.additional_services or "") else 0.0
     with _conn(db_path) as conn:
         cur = conn.execute(
@@ -85,19 +85,19 @@ def save_order(db_path: str, order: Order, telegram_msg_id: int) -> int:
                 order.dropoff, order.distance_km, order.notes, order.driver_notes,
                 order.additional_services, order.passenger_exit_minutes,
                 order.third_party_contact, order.more_contacts, order.raw_message,
-                telegram_msg_id, parking, banner,
+                telegram_msg_id, parking, banner, source,
             ),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def save_quick_order(db_path: str, order_id: str, service_type: str, scheduled_time: str, price: float, tunnel_fee: float) -> int:
+def save_quick_order(db_path: str, order_id: str, service_type: str, scheduled_time: str, price: float, tunnel_fee: float, source: str = "") -> int:
     with _conn(db_path) as conn:
         cur = conn.execute(
-            """INSERT INTO orders (order_id, service_type, scheduled_time, price, tunnel_fee, passenger_name)
-               VALUES (?, ?, ?, ?, ?, '')""",
-            (order_id, service_type, scheduled_time, price, tunnel_fee),
+            """INSERT INTO orders (order_id, service_type, scheduled_time, price, tunnel_fee, passenger_name, source)
+               VALUES (?, ?, ?, ?, ?, '', ?)""",
+            (order_id, service_type, scheduled_time, price, tunnel_fee, source),
         )
         conn.commit()
         return cur.lastrowid
