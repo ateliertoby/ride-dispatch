@@ -58,6 +58,15 @@ def init_db(db_path: str):
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS arrivals_cache (
+                flight_no TEXT PRIMARY KEY,
+                scheduled TEXT,
+                eta TEXT,
+                gate TEXT,
+                status TEXT
+            )
+        """)
         conn.commit()
 
 
@@ -148,6 +157,25 @@ def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
             (f"{date_str}%",),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def save_arrivals_cache(db_path: str, entries: list[tuple]):
+    with _conn(db_path) as conn:
+        conn.execute("DELETE FROM arrivals_cache")
+        conn.executemany(
+            "INSERT OR REPLACE INTO arrivals_cache (flight_no, scheduled, eta, gate, status) VALUES (?, ?, ?, ?, ?)",
+            entries,
+        )
+        conn.commit()
+
+
+def get_cached_arrival(db_path: str, flight_no: str) -> dict | None:
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT scheduled, eta, gate, status FROM arrivals_cache WHERE flight_no = ?",
+            (flight_no,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None):

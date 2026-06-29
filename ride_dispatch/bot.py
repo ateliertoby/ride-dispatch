@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
+from .flight import match_order_from_cache
 
 load_dotenv()
 
@@ -143,6 +144,8 @@ async def handle_callback(update: Update, context):
                 prompt += f"（會自動加${banner_fee:g}舉牌費）"
             sent = await query.message.reply_text(prompt)
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
+            if order.service_type == "接机" and order.flight_number:
+                match_order_from_cache(DB_PATH, order.order_id, order.flight_number)
             awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
