@@ -36,6 +36,27 @@ def fetch_arrivals(date_str: str) -> list[dict]:
     return flights
 
 
+def build_cache_entries(arrivals: list[dict]) -> list[tuple]:
+    entries = []
+    for flight in arrivals:
+        scheduled = flight.get("time", "")
+        parsed = parse_status(flight.get("status", ""))
+        for f in flight.get("flight", []):
+            key = normalize_flight_no(f.get("no", ""))
+            if key:
+                entries.append((key, scheduled, parsed["eta"], parsed["gate"], parsed["status"]))
+    return entries
+
+
+def match_order_from_cache(db_path: str, order_id: str, flight_number: str) -> bool:
+    from .db import get_cached_arrival, update_flight_info
+    cached = get_cached_arrival(db_path, normalize_flight_no(flight_number))
+    if cached:
+        update_flight_info(db_path, order_id, cached["scheduled"], cached["eta"], cached["gate"], cached["status"])
+        return True
+    return False
+
+
 def match_flights(orders: list[dict], arrivals: list[dict]) -> dict[str, dict]:
     lookup = {}
     for flight in arrivals:

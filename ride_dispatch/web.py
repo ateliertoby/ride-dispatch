@@ -6,8 +6,8 @@ import time
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
-from .db import init_db, get_orders_by_date, get_pickup_flights, update_flight_info
-from .flight import fetch_arrivals, match_flights
+from .db import init_db, get_orders_by_date, get_pickup_flights, update_flight_info, save_arrivals_cache
+from .flight import fetch_arrivals, match_flights, build_cache_entries
 
 load_dotenv()
 
@@ -55,6 +55,15 @@ def _poll_flights():
                 yesterday = (date.today() - timedelta(days=1)).isoformat()
                 dates.insert(0, yesterday)
 
+            arrivals = []
+            for d in dates:
+                try:
+                    arrivals.extend(fetch_arrivals(d))
+                except Exception:
+                    logger.exception("Failed to fetch arrivals for %s", d)
+
+            save_arrivals_cache(DB_PATH, build_cache_entries(arrivals))
+
             orders = []
             for d in dates:
                 orders.extend(get_pickup_flights(DB_PATH, d))
@@ -62,13 +71,6 @@ def _poll_flights():
             if not orders:
                 time.sleep(POLL_INTERVAL)
                 continue
-
-            arrivals = []
-            for d in dates:
-                try:
-                    arrivals.extend(fetch_arrivals(d))
-                except Exception:
-                    logger.exception("Failed to fetch arrivals for %s", d)
 
             updates = match_flights(orders, arrivals)
             for order_id, info in updates.items():
