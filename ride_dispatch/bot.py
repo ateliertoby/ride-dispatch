@@ -33,7 +33,8 @@ uber_state: dict[int, dict] = {}
 
 
 def format_card(order) -> str:
-    type_label = "接機" if order.service_type == "接机" else "送機"
+    type_map = {"接机": "接機", "送机": "送機"}
+    type_label = type_map.get(order.service_type, "單程")
     time = order.scheduled_time
     if " " in time:
         time = time.split(" ")[1][:5]
@@ -355,7 +356,7 @@ async def handle_start(update: Update, context):
             await msg.reply_text("搵唔到呢張單。")
             return
         t = order["scheduled_time"].split(" ")[1][:5] if " " in order["scheduled_time"] else ""
-        type_label = "接機" if order["service_type"] == "接机" else "送機"
+        type_label = {"接机": "接機", "送机": "送機"}.get(order["service_type"], "單程")
         lines = [
             f"{type_label} | {order['flight_number']}",
             f"乘客: {order['passenger_name']}",
