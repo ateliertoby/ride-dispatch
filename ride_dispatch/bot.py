@@ -9,7 +9,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from .parser import parse_order, parse_tongcheng
+from .parser import parse_order, parse_feizhu, parse_tongcheng
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id
 
 load_dotenv()
@@ -78,8 +78,13 @@ async def handle_message(update: Update, context):
         return
 
     order = parse_order(msg.text)
+    source = "携程"
     if not (order.order_id and order.pickup):
+        order = parse_feizhu(msg.text)
+        source = "飛豬"
+    if not order.order_id:
         order = parse_tongcheng(msg.text)
+        source = "同程"
     if not order.order_id:
         if chat_id in awaiting_cost:
             text = msg.text.strip()
@@ -115,7 +120,7 @@ async def handle_message(update: Update, context):
         ]]
     )
     sent = await msg.reply_text(text, reply_markup=keyboard)
-    pending[sent.message_id] = order
+    pending[sent.message_id] = (order, source)
 
 
 async def handle_callback(update: Update, context):
@@ -125,17 +130,19 @@ async def handle_callback(update: Update, context):
     msg_id = query.message.message_id
 
     if query.data == "confirm":
-        order = pending.pop(msg_id, None)
-        if not order:
+        entry = pending.pop(msg_id, None)
+        if not entry:
             await query.answer("訂單已過期")
             return
+        order, source = entry
         try:
+            parking = 32.0 if source == "携程" and order.service_type == "接机" else 0.0
             banner_fee = 40.0 if "举牌" in (order.additional_services or "") else 0.0
             prompt = f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
             if banner_fee:
                 prompt += f"（會自動加${banner_fee:g}舉牌費）"
             sent = await query.message.reply_text(prompt)
-            save_order(DB_PATH, order, telegram_msg_id=sent.message_id)
+            save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
             awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
@@ -239,7 +246,7 @@ async def _save_didi(msg, chat_id, tunnel_fee):
     state = didi_state.pop(chat_id)
     from datetime import datetime
     order_id = f"didi_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    save_quick_order(DB_PATH, order_id, "滴滴", state["time"], state["fare"], tunnel_fee)
+    save_quick_order(DB_PATH, order_id, "滴滴", state["time"], state["fare"], tunnel_fee, source="滴滴")
     net = state["fare"] - tunnel_fee
     summary = f"滴滴已記錄\n時間: {state['time'].split(' ')[1][:5]}\n車費: ${state['fare']:g}"
     if tunnel_fee:
@@ -307,7 +314,7 @@ async def _save_uber(msg, chat_id, toll_fee):
     from datetime import datetime
     order_id = f"uber_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     total = state["income"] + toll_fee
-    save_quick_order(DB_PATH, order_id, "Uber", state["time"], total, toll_fee)
+    save_quick_order(DB_PATH, order_id, "Uber", state["time"], total, toll_fee, source="Uber")
     summary = f"Uber 已記錄\n時間: {state['time'].split(' ')[1][:5]}\n行程收入: ${state['income']:g}"
     if toll_fee:
         summary += f"\n通行費: ${toll_fee:g}\n總收入: ${total:g}"

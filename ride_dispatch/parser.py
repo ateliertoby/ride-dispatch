@@ -180,3 +180,95 @@ def parse_tongcheng(raw: str) -> Order:
         more_contacts="",
         raw_message=raw,
     )
+
+
+import re
+
+_FZ_DISTANCE_RE = re.compile(r"约(\d+)公里")
+_FZ_SERVICE_RE = re.compile(r"【(接机|送机)】")
+
+
+def parse_feizhu(raw: str) -> Order:
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    parsed = {}
+    time_idx = None
+
+    for i, line in enumerate(lines):
+        if line.startswith("订单编号") and ("：" in line or ":" in line):
+            sep = "：" if "：" in line else ":"
+            oid = line.partition(sep)[2].strip()
+            if "-" in oid:
+                oid = oid.split("-")[0]
+            parsed["order_id"] = oid
+
+        elif _FZ_SERVICE_RE.search(line):
+            parsed["service_type"] = _FZ_SERVICE_RE.search(line).group(1)
+
+        elif line.startswith("[出发]") or line.startswith("【出发】"):
+            parsed["pickup"] = re.sub(r"[\[【]出发[\]】]", "", line).strip()
+
+        elif line.startswith("[抵达]") or line.startswith("【抵达】"):
+            parsed["dropoff"] = re.sub(r"[\[【]抵达[\]】]", "", line).strip()
+
+        elif _FZ_DISTANCE_RE.search(line):
+            parsed["distance_km"] = int(_FZ_DISTANCE_RE.search(line).group(1))
+            parsed["_dist_idx"] = i
+
+        elif line.startswith("[预计抵达]") or line.startswith("【预计抵达】"):
+            parsed["_eta_idx"] = i
+
+        elif re.match(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}", line):
+            parsed["scheduled_time"] = line
+            time_idx = i
+
+        elif line.startswith("真实号") and ("：" in line or ":" in line):
+            sep = "：" if "：" in line else ":"
+            parsed["passenger_phone"] = line.partition(sep)[2].strip()
+            parsed["_phone_idx"] = i
+
+    if not parsed.get("order_id"):
+        return Order(
+            order_id="", service_type="", vehicle_type="", passenger_name="",
+            scheduled_time="", passenger_phone="", overseas_phone="",
+            flight_number="", pickup="", dropoff="", distance_km=None,
+            notes="", driver_notes="", additional_services="",
+            passenger_exit_minutes=None, third_party_contact="",
+            more_contacts="", raw_message=raw,
+        )
+
+    # Flight: between distance line and [预计抵达] line
+    dist_idx = parsed.get("_dist_idx")
+    eta_idx = parsed.get("_eta_idx")
+    flight = ""
+    if dist_idx is not None and eta_idx is not None and eta_idx - dist_idx == 2:
+        flight = lines[dist_idx + 1]
+
+    # Passenger name: between time line and phone line
+    phone_idx = parsed.get("_phone_idx")
+    name = ""
+    if time_idx is not None and phone_idx is not None and phone_idx - time_idx == 2:
+        name = lines[time_idx + 1]
+
+    # Vehicle type: second line (index 1)
+    vehicle = lines[1] if len(lines) > 1 else ""
+
+    return Order(
+        order_id=parsed.get("order_id", ""),
+        service_type=parsed.get("service_type", ""),
+        vehicle_type=vehicle,
+        passenger_name=name,
+        scheduled_time=parsed.get("scheduled_time", ""),
+        passenger_phone=parsed.get("passenger_phone", ""),
+        overseas_phone="",
+        flight_number=flight,
+        pickup=parsed.get("pickup", ""),
+        dropoff=parsed.get("dropoff", ""),
+        distance_km=parsed.get("distance_km"),
+        notes="",
+        driver_notes="",
+        additional_services="",
+        passenger_exit_minutes=None,
+        third_party_contact="",
+        more_contacts="",
+        raw_message=raw,
+    )
