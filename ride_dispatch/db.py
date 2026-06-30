@@ -148,6 +148,18 @@ def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_active_pickup_dates(db_path: str) -> list[str]:
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(scheduled_time, 1, 10) AS d FROM orders "
+            "WHERE service_type = '接机' AND flight_number != '' "
+            "AND coalesce(status,'active') = 'active' "
+            "AND coalesce(flight_status,'') != 'gate' "
+            "ORDER BY d",
+        ).fetchall()
+        return [r["d"] for r in rows]
+
+
 def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
     with _conn(db_path) as conn:
         rows = conn.execute(
