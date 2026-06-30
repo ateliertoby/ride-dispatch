@@ -52,6 +52,7 @@ def init_db(db_path: str):
             "flight_eta TEXT",
             "flight_gate TEXT",
             "flight_status TEXT",
+            "flight_hall TEXT",
             "source TEXT DEFAULT ''",
         ]:
             try:
@@ -190,7 +191,7 @@ def get_cached_arrival(db_path: str, flight_no: str) -> dict | None:
         return dict(row) if row else None
 
 
-def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None):
+def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None, hall: str | None = None):
     with _conn(db_path) as conn:
         sets = ["flight_scheduled = ?", "flight_status = ?"]
         params = [scheduled, status]
@@ -200,6 +201,9 @@ def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | N
         if gate is not None:
             sets.append("flight_gate = ?")
             params.append(gate)
+        if hall:
+            sets.append("flight_hall = ?")
+            params.append(hall)
         params.append(order_id)
         conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE order_id = ?", params)
         conn.commit()

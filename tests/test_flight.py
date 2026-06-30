@@ -42,6 +42,8 @@ SAMPLE_ARRIVALS = [
         "time": "13:00",
         "flight": [{"no": "CX 489", "airline": "CPA"}],
         "status": "Est at 14:26",
+        "hall": "A",
+        "baggage": "3",
     },
     {
         "time": "14:30",
@@ -50,11 +52,15 @@ SAMPLE_ARRIVALS = [
             {"no": "CX 505", "airline": "CPA"},
         ],
         "status": "Landed 14:35",
+        "hall": "B",
+        "baggage": "9",
     },
     {
         "time": "16:00",
         "flight": [{"no": "UO 117", "airline": "HKE"}],
         "status": "",
+        "hall": "",
+        "baggage": "",
     },
 ]
 
@@ -62,19 +68,19 @@ SAMPLE_ARRIVALS = [
 def test_match_direct_flight():
     orders = [{"order_id": "O1", "flight_number": "CX489"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O1": {"scheduled": "13:00", "eta": "14:26", "gate": None, "status": "est"}}
+    assert result == {"O1": {"scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"}}
 
 
 def test_match_codeshare():
     orders = [{"order_id": "O2", "flight_number": "CX505"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O2": {"scheduled": "14:30", "eta": "14:35", "gate": None, "status": "landed"}}
+    assert result == {"O2": {"scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"}}
 
 
 def test_match_no_status_still_returns_scheduled():
     orders = [{"order_id": "O3", "flight_number": "UO117"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O3": {"scheduled": "16:00", "eta": None, "gate": None, "status": None}}
+    assert result == {"O3": {"scheduled": "16:00", "hall": "", "baggage": "", "eta": None, "gate": None, "status": None}}
 
 
 def test_match_not_found():
@@ -91,6 +97,6 @@ def test_match_multiple_orders():
     ]
     result = match_flights(orders, SAMPLE_ARRIVALS)
     assert result == {
-        "O1": {"scheduled": "13:00", "eta": "14:26", "gate": None, "status": "est"},
-        "O2": {"scheduled": "14:30", "eta": "14:35", "gate": None, "status": "landed"},
+        "O1": {"scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"},
+        "O2": {"scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"},
     }

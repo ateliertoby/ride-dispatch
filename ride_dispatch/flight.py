@@ -62,7 +62,7 @@ def match_flights(orders: list[dict], arrivals: list[dict]) -> dict[str, dict]:
     for flight in arrivals:
         scheduled = flight.get("time", "")
         parsed = parse_status(flight.get("status", ""))
-        info = {"scheduled": scheduled, **parsed}
+        info = {"scheduled": scheduled, "hall": flight.get("hall", ""), "baggage": flight.get("baggage", ""), **parsed}
         for f in flight.get("flight", []):
             key = normalize_flight_no(f.get("no", ""))
             if key:
