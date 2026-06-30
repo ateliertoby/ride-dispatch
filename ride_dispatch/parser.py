@@ -14,7 +14,7 @@ class Order:
     flight_number: str
     pickup: str
     dropoff: str
-    distance_km: Optional[int]
+    distance_km: Optional[float]
     notes: str
     driver_notes: str
     additional_services: str
@@ -44,7 +44,8 @@ FIELD_MAP = {
     "更多联系方式": "more_contacts",
 }
 
-INT_FIELDS = {"distance_km", "passenger_exit_minutes"}
+INT_FIELDS = {"passenger_exit_minutes"}
+FLOAT_FIELDS = {"distance_km"}
 
 
 def _parse_int(val: str) -> Optional[int]:
@@ -67,6 +68,11 @@ def parse_order(raw: str) -> Order:
             field = FIELD_MAP[key]
             if field in INT_FIELDS:
                 parsed[field] = _parse_int(value) if value else None
+            elif field in FLOAT_FIELDS:
+                try:
+                    parsed[field] = float(value) if value else None
+                except ValueError:
+                    parsed[field] = None
             else:
                 parsed[field] = value
 
@@ -184,7 +190,7 @@ def parse_tongcheng(raw: str) -> Order:
 
 import re
 
-_FZ_DISTANCE_RE = re.compile(r"约(\d+)公里")
+_FZ_DISTANCE_RE = re.compile(r"约([\d.]+)公里")
 _FZ_SERVICE_RE = re.compile(r"【(接机|送机)】")
 
 
@@ -211,7 +217,7 @@ def parse_feizhu(raw: str) -> Order:
             parsed["dropoff"] = re.sub(r"[\[【]抵达[\]】]", "", line).strip()
 
         elif _FZ_DISTANCE_RE.search(line):
-            parsed["distance_km"] = int(_FZ_DISTANCE_RE.search(line).group(1))
+            parsed["distance_km"] = float(_FZ_DISTANCE_RE.search(line).group(1))
             parsed["_dist_idx"] = i
 
         elif line.startswith("[预计抵达]") or line.startswith("【预计抵达】"):
