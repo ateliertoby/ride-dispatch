@@ -457,7 +457,7 @@ async def _poll_and_notify(context):
 
             day_updates = match_flights(day_orders, day_arrivals)
             for order_id, info in day_updates.items():
-                update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"])
+                update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"], hall=info.get("hall"))
             all_updates.update(day_updates)
 
         save_arrivals_cache(DB_PATH, all_cache_entries)
@@ -467,24 +467,49 @@ async def _poll_and_notify(context):
             new = info["status"]
             if old == new:
                 continue
+            order_data = next((o for d in dates for o in get_orders_by_date(DB_PATH, d) if o["order_id"] == order_id), None)
             if new == "landed" and old != "landed":
                 eta = info["eta"] or "?"
-                order_data = next((o for d in dates for o in get_orders_by_date(DB_PATH, d) if o["order_id"] == order_id), None)
-                msg = f"已降落 {eta}\n航班: {order_data['flight_number']}" if order_data else f"已降落 {eta}"
-                if order_data and order_data.get("passenger_name"):
-                    msg += f"\n乘客: {order_data['passenger_name']}"
-                if order_data and order_data.get("passenger_exit_minutes"):
-                    h, m = int(eta[:2]), int(eta[3:5])
-                    total = h * 60 + m + order_data["passenger_exit_minutes"]
-                    svc = f"{total // 60 % 24:02d}:{total % 60:02d}"
-                    msg += f"\n用車 {svc}"
+                hall = info.get("hall")
+                msg = f"已降落 {eta}"
+                if hall:
+                    msg += f" | 大堂{hall}"
+                if order_data:
+                    msg += f"\n航班: {order_data['flight_number']}"
+                    if order_data.get("passenger_name"):
+                        msg += f"\n乘客: {order_data['passenger_name']}"
+                    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
+                    if phone:
+                        msg += f"\n電話: {phone}"
+                    if order_data.get("passenger_exit_minutes"):
+                        h, m = int(eta[:2]), int(eta[3:5])
+                        total = h * 60 + m + order_data["passenger_exit_minutes"]
+                        svc = f"{total // 60 % 24:02d}:{total % 60:02d}"
+                        msg += f"\n用車: {svc}"
+                    if "举牌" in (order_data.get("additional_services") or ""):
+                        msg += f"\n舉牌: {order_data.get('passenger_name', '')}"
                 await bot.send_message(chat_id=chat_id, text=msg)
             elif new == "gate":
-                gate = info["gate"] or "?"
-                order_data = next((o for d in dates for o in get_orders_by_date(DB_PATH, d) if o["order_id"] == order_id), None)
-                msg = f"已到閘口 {gate}\n航班: {order_data['flight_number']}" if order_data else f"已到閘口 {gate}"
-                if order_data and order_data.get("passenger_name"):
-                    msg += f"\n乘客: {order_data['passenger_name']}"
+                gate_time = info["gate"] or "?"
+                hall = info.get("hall")
+                msg = f"已到閘口 {gate_time}"
+                if hall:
+                    msg += f" | 大堂{hall}"
+                if order_data:
+                    msg += f"\n航班: {order_data['flight_number']}"
+                    if order_data.get("passenger_name"):
+                        msg += f"\n乘客: {order_data['passenger_name']}"
+                    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
+                    if phone:
+                        msg += f"\n電話: {phone}"
+                    landed_eta = order_data.get("flight_eta")
+                    if landed_eta and order_data.get("passenger_exit_minutes"):
+                        h, m = int(landed_eta[:2]), int(landed_eta[3:5])
+                        total = h * 60 + m + order_data["passenger_exit_minutes"]
+                        svc = f"{total // 60 % 24:02d}:{total % 60:02d}"
+                        msg += f"\n用車: {svc}"
+                    if "举牌" in (order_data.get("additional_services") or ""):
+                        msg += f"\n舉牌: {order_data.get('passenger_name', '')}"
                 await bot.send_message(chat_id=chat_id, text=msg)
 
         if all_updates:
