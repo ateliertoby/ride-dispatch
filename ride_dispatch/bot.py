@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
-from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_telegram_msg_id, get_pickup_flights, get_active_pickup_dates, update_flight_info, save_arrivals_cache
+from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_active_pickup_dates, update_flight_info, save_arrivals_cache
 from .flight import match_order_from_cache, fetch_arrivals, match_flights, build_cache_entries
 
 load_dotenv()
@@ -354,9 +354,7 @@ async def handle_start(update: Update, context):
     args = context.args
     if args and args[0].startswith("order_"):
         order_id = args[0][len("order_"):]
-        from datetime import date
-        orders = get_orders_by_date(DB_PATH, date.today().isoformat())
-        order = next((o for o in orders if o["order_id"] == order_id), None)
+        order = get_order_by_id(DB_PATH, order_id)
         if not order:
             await msg.reply_text("搵唔到呢張單。")
             return
