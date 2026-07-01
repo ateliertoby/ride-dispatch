@@ -141,6 +141,14 @@ def get_orders_by_date(db_path: str, date_str: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_order_by_id(db_path: str, order_id: str) -> dict | None:
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE order_id = ? AND coalesce(status,'active') = 'active'", (order_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:
     with _conn(db_path) as conn:
         row = conn.execute(
