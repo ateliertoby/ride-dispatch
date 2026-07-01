@@ -106,6 +106,7 @@ _TC_FIELD_MAP = {
     "用车时间": "scheduled_time",
     "出发地": "pickup",
     "目的地": "dropoff",
+    "航班号": "flight_number",
 }
 
 _TC_NO_COLON = {
@@ -165,6 +166,7 @@ def parse_tongcheng(raw: str) -> Order:
         service_type = ""
 
     phone = parsed.get("passenger_phone", "").replace("-", " ")
+    flight = parsed.get("flight_number", "").lstrip("￥").strip()
 
     return Order(
         order_id=parsed.get("order_id", ""),
@@ -174,7 +176,7 @@ def parse_tongcheng(raw: str) -> Order:
         scheduled_time=parsed.get("scheduled_time", ""),
         passenger_phone=phone,
         overseas_phone="",
-        flight_number="",
+        flight_number=flight,
         pickup=parsed.get("pickup", ""),
         dropoff=parsed.get("dropoff", ""),
         distance_km=None,

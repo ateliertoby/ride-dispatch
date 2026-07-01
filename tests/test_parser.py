@@ -111,10 +111,12 @@ def test_parse_tongcheng_pickup():
 用车时间：2026-06-28 14:00:00
 出发地：香港国际机场 T1
 目的地：尖沙咀
+航班号：￥ GJ8053
 乘客姓名LI,WEI
 乘客手机号86-13900001111"""
     order = parse_tongcheng(raw)
     assert order.service_type == "接机"
+    assert order.flight_number == "GJ8053"
 
 
 def test_tongcheng_no_pickup_from_standard():
