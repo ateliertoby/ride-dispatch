@@ -465,11 +465,14 @@ async def _poll_and_notify(context):
         for order_id, info in all_updates.items():
             old = old_statuses.get(order_id)
             new = info["status"]
+            if old != new:
+                logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
             if old == new:
                 continue
             order_data = next((o for d in dates for o in get_orders_by_date(DB_PATH, d) if o["order_id"] == order_id), None)
-            if new == "landed" and old != "landed":
-                eta = info["eta"] or "?"
+            should_notify_landed = (new == "landed" and old != "landed") or (new == "gate" and old not in ("landed", "gate"))
+            if should_notify_landed:
+                eta = info["eta"] or (order_data.get("flight_eta") if order_data else None) or "?"
                 hall = info.get("hall")
                 msg = f"已降落 {eta}"
                 if hall:
@@ -489,7 +492,7 @@ async def _poll_and_notify(context):
                     if "举牌" in (order_data.get("additional_services") or ""):
                         msg += f"\n舉牌: {order_data.get('passenger_name', '')}"
                 await bot.send_message(chat_id=chat_id, text=msg)
-            elif new == "gate":
+            if new == "gate" and old != "gate":
                 gate_time = info["gate"] or "?"
                 hall = info.get("hall")
                 msg = f"已到閘口 {gate_time}"
