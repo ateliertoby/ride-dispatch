@@ -1,6 +1,9 @@
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from .parser import Order
+
+COARSE_WINDOW_HOURS = 24
 
 
 @contextmanager
@@ -59,15 +62,6 @@ def init_db(db_path: str):
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS arrivals_cache (
-                flight_no TEXT PRIMARY KEY,
-                scheduled TEXT,
-                eta TEXT,
-                gate TEXT,
-                status TEXT
-            )
-        """)
         conn.commit()
 
 
@@ -157,14 +151,20 @@ def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def get_active_pickup_dates(db_path: str) -> list[str]:
+def get_tracking_dates(db_path: str, now: datetime | None = None) -> list[str]:
+    # Coarse time gate only — flight_status deliberately has no say here,
+    # so a stale/wrong status can never stop the poll loop (MU5017 2026-07-02).
+    # Fine-grained termination lives in flight.calc_next_interval.
+    now = now or datetime.now()
+    cutoff = (now - timedelta(hours=COARSE_WINDOW_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
     with _conn(db_path) as conn:
         rows = conn.execute(
             "SELECT DISTINCT substr(scheduled_time, 1, 10) AS d FROM orders "
             "WHERE service_type = '接机' AND flight_number != '' "
             "AND coalesce(status,'active') = 'active' "
-            "AND coalesce(flight_status,'') != 'gate' "
+            "AND scheduled_time >= ? "
             "ORDER BY d",
+            (cutoff,),
         ).fetchall()
         return [r["d"] for r in rows]
 
@@ -178,25 +178,6 @@ def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
             (f"{date_str}%",),
         ).fetchall()
         return [dict(r) for r in rows]
-
-
-def save_arrivals_cache(db_path: str, entries: list[tuple]):
-    with _conn(db_path) as conn:
-        conn.execute("DELETE FROM arrivals_cache")
-        conn.executemany(
-            "INSERT OR REPLACE INTO arrivals_cache (flight_no, scheduled, eta, gate, status) VALUES (?, ?, ?, ?, ?)",
-            entries,
-        )
-        conn.commit()
-
-
-def get_cached_arrival(db_path: str, flight_no: str) -> dict | None:
-    with _conn(db_path) as conn:
-        row = conn.execute(
-            "SELECT scheduled, eta, gate, status FROM arrivals_cache WHERE flight_no = ?",
-            (flight_no,),
-        ).fetchone()
-        return dict(row) if row else None
 
 
 def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None, hall: str | None = None):

@@ -1,7 +1,6 @@
 import logging
 import os
 import sqlite3
-from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,8 +11,8 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
-from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_active_pickup_dates, update_flight_info, save_arrivals_cache
-from .flight import match_order_from_cache, fetch_arrivals, match_flights, build_cache_entries
+from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info
+from .flight import fetch_arrivals, match_flights, calc_next_interval
 
 load_dotenv()
 
@@ -148,9 +147,6 @@ async def handle_callback(update: Update, context):
             sent = await query.message.reply_text(prompt)
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
             if order.service_type == "接机" and order.flight_number:
-                order_date = order.scheduled_time[:10] if order.scheduled_time else ""
-                if order_date == date.today().isoformat():
-                    match_order_from_cache(DB_PATH, order.order_id, order.flight_number)
                 context.application.job_queue.run_once(_poll_and_notify, 5)
             awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
             await query.message.edit_reply_markup(reply_markup=None)
@@ -393,33 +389,6 @@ async def handle_start(update: Update, context):
 logger = logging.getLogger("flight_poller")
 
 
-def _calc_next_interval(orders: list[dict]) -> int | None:
-    now = datetime.now()
-    active = [o for o in orders if o.get("service_type") == "接机" and o.get("flight_number") and o.get("flight_status") != "gate"]
-    if not active:
-        return None
-
-    if any(o.get("flight_status") == "landed" for o in active):
-        return 60
-
-    min_seconds = float("inf")
-    for o in active:
-        eta_str = o.get("flight_eta") or o.get("flight_scheduled")
-        if not eta_str:
-            continue
-        h, m = int(eta_str[:2]), int(eta_str[3:5])
-        target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if target < now - timedelta(hours=6):
-            target += timedelta(days=1)
-        diff = (target - now).total_seconds()
-        min_seconds = min(min_seconds, diff)
-
-    if min_seconds == float("inf"):
-        return 1800
-
-    return max(60, int(min_seconds / 2))
-
-
 async def _poll_and_notify(context):
     bot = context.application.bot
     chat_id = int(os.environ.get("NOTIFY_CHAT_ID", list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else "0"))
@@ -427,26 +396,23 @@ async def _poll_and_notify(context):
         return
 
     try:
-        dates = get_active_pickup_dates(DB_PATH)
+        dates = get_tracking_dates(DB_PATH)
         if not dates:
-            logger.info("No active pickup orders, polling stopped")
+            logger.info("No orders in tracking window, polling stopped")
             return
 
-        all_cache_entries = []
         all_updates = {}
         old_statuses = {}
 
         for d in dates:
+            day_orders = get_pickup_flights(DB_PATH, d)
+            if not day_orders:
+                continue
+
             try:
                 day_arrivals = fetch_arrivals(d)
             except Exception:
                 logger.exception("Failed to fetch arrivals for %s", d)
-                continue
-
-            all_cache_entries.extend(build_cache_entries(day_arrivals))
-
-            day_orders = get_pickup_flights(DB_PATH, d)
-            if not day_orders:
                 continue
 
             for o in get_orders_by_date(DB_PATH, d):
@@ -457,8 +423,6 @@ async def _poll_and_notify(context):
             for order_id, info in day_updates.items():
                 update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"], hall=info.get("hall"))
             all_updates.update(day_updates)
-
-        save_arrivals_cache(DB_PATH, all_cache_entries)
 
         for order_id, info in all_updates.items():
             old = old_statuses.get(order_id)
@@ -519,9 +483,9 @@ async def _poll_and_notify(context):
         enriched = []
         for d in dates:
             enriched.extend(get_orders_by_date(DB_PATH, d))
-        interval = _calc_next_interval(enriched)
+        interval = calc_next_interval(enriched)
         if interval is None:
-            logger.info("All flights at gate, polling stopped")
+            logger.info("All tracking windows closed, polling stopped")
         else:
             logger.info("Next poll in %ds", interval)
             context.application.job_queue.run_once(_poll_and_notify, interval)
