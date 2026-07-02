@@ -2,6 +2,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
-from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info
+from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time
 
 load_dotenv()
@@ -399,6 +400,7 @@ _JOB_KWARGS = {"misfire_grace_time": None, "coalesce": True}
 _next_poll_at: datetime | None = None
 _poll_running = False
 _last_state: str | None = None
+_warned_statuses: set[tuple[str, str]] = set()
 
 
 def _log_state(state: str | None):
@@ -482,6 +484,12 @@ async def _poll_and_notify(context) -> int:
     for order_id, info in all_updates.items():
         old = old_statuses.get(order_id)
         new = info["status"]
+        raw = info.get("raw_status", "")
+        if new is None and raw and (order_id, raw) not in _warned_statuses:
+            # Status HKIA sent but we don't parse — surface it instead of
+            # silently tracking a flight that may never arrive (e.g. Diverted).
+            _warned_statuses.add((order_id, raw))
+            logger.warning("Unrecognized flight status for %s: %r", order_id[-4:], raw)
         if old == new:
             continue
         logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
@@ -539,6 +547,11 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
         if order_data:
             msg += _order_lines(order_data, order_data.get("flight_eta"))
         await bot.send_message(chat_id=chat_id, text=msg)
+    if new == "cancelled" and old != "cancelled":
+        msg = "航班取消"
+        if order_data:
+            msg += _order_lines(order_data, None)
+        await bot.send_message(chat_id=chat_id, text=msg)
 
 
 async def _set_commands(app):
@@ -555,20 +568,30 @@ async def _post_init(app):
     app.job_queue.run_repeating(_poll_tick, interval=60, first=5, job_kwargs=_JOB_KWARGS)
 
 
+async def _on_error(update, context):
+    # Without a handler PTB dumps "No error handlers are registered" plus a
+    # full traceback for every transient network blip.
+    logging.getLogger("bot").error("Unhandled error", exc_info=context.error)
+
+
 def main():
     os.makedirs("logs", exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[
-            logging.FileHandler("logs/bot.log"),
-            logging.StreamHandler(),
+            RotatingFileHandler("logs/bot.log", maxBytes=5_000_000, backupCount=3),
         ],
     )
-    # The 60s heartbeat would otherwise log two INFO lines per tick;
-    # misfire warnings stay visible at WARNING.
+    # httpx logs every getUpdates URL — bot token included — at INFO, and the
+    # 60s heartbeat adds two apscheduler lines per tick. WARNING+ only;
+    # misfire warnings stay visible.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
     init_db(DB_PATH)
+    # Relative DB_PATH depends on cwd; if .env fails to load this line makes
+    # a silently-created empty DB obvious.
+    logging.getLogger("bot").info("DB: %s (%d active orders)", os.path.abspath(DB_PATH), count_active_orders(DB_PATH))
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("didi", handle_didi))
@@ -576,6 +599,7 @@ def main():
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_on_error)
     app.post_init = _post_init
     app.run_polling()
 

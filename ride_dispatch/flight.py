@@ -38,6 +38,8 @@ def parse_status(status: str) -> dict:
     if status.startswith("At gate "):
         m = _TIME_RE.search(status)
         return {"eta": None, "gate": m.group(1) if m else None, "status": "gate"}
+    if status.startswith("Cancelled"):
+        return {"eta": None, "gate": None, "status": "cancelled"}
     return {"eta": None, "gate": None, "status": None}
 
 
@@ -84,6 +86,7 @@ def match_flights(orders: list[dict], arrivals: list[dict]) -> dict[str, dict]:
             "scheduled": flight.get("time", ""),
             "hall": flight.get("hall", ""),
             "baggage": flight.get("baggage", ""),
+            "raw_status": flight.get("status", ""),
             **parsed,
         }
         for f in flight.get("flight", []):
@@ -152,12 +155,12 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
         return None
     if any(o.get("flight_status") == "landed" for o in tracking):
         return 60
-    if all(o.get("flight_status") == "gate" for o in tracking):
+    if all(o.get("flight_status") in ("gate", "cancelled") for o in tracking):
         return WATCHDOG_INTERVAL
 
     min_seconds = float("inf")
     for o in tracking:
-        if o.get("flight_status") == "gate":
+        if o.get("flight_status") in ("gate", "cancelled"):
             continue
         arrival = o.get("flight_eta") or o.get("flight_scheduled")
         if not arrival:

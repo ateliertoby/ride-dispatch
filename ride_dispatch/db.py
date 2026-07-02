@@ -126,6 +126,13 @@ def cancel_order(db_path: str, order_id: str):
         conn.commit()
 
 
+def count_active_orders(db_path: str) -> int:
+    with _conn(db_path) as conn:
+        return conn.execute(
+            "SELECT count(*) FROM orders WHERE coalesce(status,'active') = 'active'"
+        ).fetchone()[0]
+
+
 def get_orders_by_date(db_path: str, date_str: str) -> list[dict]:
     with _conn(db_path) as conn:
         rows = conn.execute(

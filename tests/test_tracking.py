@@ -144,6 +144,22 @@ def test_delayed_eta_extends_window():
     assert calc_next_interval(orders, now=NOW) == 900
 
 
+def test_cancelled_within_window_returns_watchdog():
+    # Cancelled is a final state like gate: slow to watchdog pace, never kill
+    orders = [order_dict(scheduled_time="2026-07-02 11:00:00", flight_status="cancelled", flight_scheduled="11:30")]
+    assert calc_next_interval(orders, now=NOW) == WATCHDOG_INTERVAL
+
+
+def test_cancelled_does_not_drag_down_est_halving():
+    # The cancelled flight's past scheduled time must not pull the interval
+    # to the 60s floor; only the live est flight sets the pace.
+    orders = [
+        order_dict(scheduled_time="2026-07-02 11:00:00", flight_status="cancelled", flight_scheduled="11:30"),
+        order_dict(scheduled_time="2026-07-02 14:30:00", flight_status="est", flight_eta="14:00"),
+    ]
+    assert calc_next_interval(orders, now=NOW) == 3600
+
+
 def test_non_pickup_orders_ignored():
     orders = [
         order_dict(service_type="滴滴", flight_number=""),

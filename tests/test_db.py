@@ -109,6 +109,14 @@ def test_get_pickup_flights(db_path):
     assert rows[0]["order_id"] == "P1"
 
 
+def test_count_active_orders(db_path):
+    from ride_dispatch.db import count_active_orders, cancel_order
+    save_order(db_path, make_order(order_id="C1"), 1)
+    save_order(db_path, make_order(order_id="C2"), 2)
+    cancel_order(db_path, "C2")
+    assert count_active_orders(db_path) == 1
+
+
 def test_get_pickup_flights_includes_scheduled_time(db_path):
     # match_flights needs pickup time to pick the right day's leg
     save_order(db_path, make_order(order_id="P1", scheduled_time="2026-06-27 11:00:00"), 1)

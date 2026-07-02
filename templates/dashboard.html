@@ -159,9 +159,8 @@ async function load() {
         phaseBadge = '<span class="phase est">Est</span>';
       } else if (o.flight_scheduled) {
         timeDisplay = o.flight_scheduled;
-      } else {
-        timeDisplay = '';
       }
+      // no flight data yet (not in feed / typo): keep booking time
       if (o.flight_status === 'gate' && o.flight_eta) {
         gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
       }

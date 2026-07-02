@@ -4,7 +4,7 @@ import time
 from datetime import date
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
-from .db import init_db, get_orders_by_date
+from .db import init_db, count_active_orders, get_orders_by_date
 
 load_dotenv()
 
@@ -62,6 +62,7 @@ def events():
 def main():
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
+    print(f"DB: {os.path.abspath(DB_PATH)} ({count_active_orders(DB_PATH)} active orders)", flush=True)
     port = int(os.environ.get("RIDE_WEB_PORT", "3200"))
     app.run(host="127.0.0.1", port=port)
 

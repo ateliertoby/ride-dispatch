@@ -37,6 +37,11 @@ def test_parse_status_diverted():
     assert parse_status("Diverted To Guangzhou") == {"eta": None, "gate": None, "status": None}
 
 
+def test_parse_status_cancelled():
+    # HKIA uses the bare string 'Cancelled' (verified against live feed 2026-07-02)
+    assert parse_status("Cancelled") == {"eta": None, "gate": None, "status": "cancelled"}
+
+
 SAMPLE_ARRIVALS = [
     {
         "date": "2026-07-02",
@@ -71,19 +76,19 @@ SAMPLE_ARRIVALS = [
 def test_match_direct_flight():
     orders = [{"order_id": "O1", "flight_number": "CX489", "scheduled_time": "2026-07-02 15:00:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"}}
+    assert result == {"O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "raw_status": "Est at 14:26", "eta": "14:26", "gate": None, "status": "est"}}
 
 
 def test_match_codeshare():
     orders = [{"order_id": "O2", "flight_number": "CX505", "scheduled_time": "2026-07-02 15:30:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"}}
+    assert result == {"O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "raw_status": "Landed 14:35", "eta": "14:35", "gate": None, "status": "landed"}}
 
 
 def test_match_no_status_still_returns_scheduled():
     orders = [{"order_id": "O3", "flight_number": "UO117", "scheduled_time": "2026-07-02 17:00:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O3": {"date": "2026-07-02", "scheduled": "16:00", "hall": "", "baggage": "", "eta": None, "gate": None, "status": None}}
+    assert result == {"O3": {"date": "2026-07-02", "scheduled": "16:00", "hall": "", "baggage": "", "raw_status": "", "eta": None, "gate": None, "status": None}}
 
 
 def test_match_not_found():
@@ -100,8 +105,8 @@ def test_match_multiple_orders():
     ]
     result = match_flights(orders, SAMPLE_ARRIVALS)
     assert result == {
-        "O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"},
-        "O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"},
+        "O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "raw_status": "Est at 14:26", "eta": "14:26", "gate": None, "status": "est"},
+        "O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "raw_status": "Landed 14:35", "eta": "14:35", "gate": None, "status": "landed"},
     }
 
 
@@ -175,3 +180,15 @@ def test_svc_time_unknown_eta_returns_none():
     assert svc_time("?", 40) is None
     assert svc_time(None, 40) is None
     assert svc_time("", 40) is None
+
+
+def test_match_preserves_raw_status_for_unknown():
+    # Unparsed statuses must stay visible so the poller can log them
+    arrivals = [
+        {"date": "2026-07-02", "time": "13:00", "flight": [{"no": "CX 489"}],
+         "status": "Diverted To Guangzhou", "hall": "A", "baggage": "3"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "CX489", "scheduled_time": "2026-07-02 15:00:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["status"] is None
+    assert result["A"]["raw_status"] == "Diverted To Guangzhou"
