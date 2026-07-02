@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,7 +13,7 @@ from telegram.ext import (
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info
-from .flight import fetch_arrivals, match_flights, calc_next_interval
+from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time
 
 load_dotenv()
 
@@ -147,7 +148,7 @@ async def handle_callback(update: Update, context):
             sent = await query.message.reply_text(prompt)
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
             if order.service_type == "接机" and order.flight_number:
-                context.application.job_queue.run_once(_poll_and_notify, 5)
+                _kick_poll(context)
             awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
@@ -388,110 +389,156 @@ async def handle_start(update: Update, context):
 
 logger = logging.getLogger("flight_poller")
 
+# Poll cadence is owned by an immortal 60s heartbeat (run_repeating), not a
+# self-chaining run_once: APScheduler discards jobs that fire >1s late
+# (default misfire_grace_time=1), which silently killed the old chain — see
+# "was missed by" warnings in bot.log. The heartbeat always ticks; these
+# globals decide whether a tick does real work.
+POLL_ERROR_BACKOFF = 300
+_JOB_KWARGS = {"misfire_grace_time": None, "coalesce": True}
+_next_poll_at: datetime | None = None
+_poll_running = False
+_last_state: str | None = None
 
-async def _poll_and_notify(context):
+
+def _log_state(state: str | None):
+    # Idle states recur every tick; log transitions only.
+    global _last_state
+    if state and state != _last_state:
+        logger.info(state)
+    _last_state = state
+
+
+def _kick_poll(context):
+    global _next_poll_at
+    _next_poll_at = None
+    context.application.job_queue.run_once(_poll_tick, 5, job_kwargs=_JOB_KWARGS)
+
+
+async def _poll_tick(context):
+    global _next_poll_at, _poll_running
+    if _poll_running:
+        return
+    if _next_poll_at and datetime.now() < _next_poll_at:
+        return
+    _poll_running = True
+    try:
+        interval = await _poll_and_notify(context)
+        _next_poll_at = datetime.now() + timedelta(seconds=interval)
+    except Exception:
+        logger.exception("Flight poll error")
+        _next_poll_at = datetime.now() + timedelta(seconds=POLL_ERROR_BACKOFF)
+    finally:
+        _poll_running = False
+
+
+def _orders_in(dates: list[str]) -> list[dict]:
+    orders = []
+    for d in dates:
+        orders.extend(get_orders_by_date(DB_PATH, d))
+    return orders
+
+
+async def _poll_and_notify(context) -> int:
+    """One polling pass; returns seconds until the next pass is due."""
     bot = context.application.bot
     chat_id = int(os.environ.get("NOTIFY_CHAT_ID", list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else "0"))
     if not chat_id:
-        return
+        _log_state("No NOTIFY_CHAT_ID/ALLOWED_CHAT_IDS configured, not polling")
+        return 3600
 
-    try:
-        dates = get_tracking_dates(DB_PATH)
-        if not dates:
-            logger.info("No orders in tracking window, polling stopped")
-            return
+    dates = get_tracking_dates(DB_PATH)
+    if not dates:
+        _log_state("idle: no orders in tracking window")
+        return 60
 
-        all_updates = {}
-        old_statuses = {}
+    enriched = _orders_in(dates)
+    if calc_next_interval(enriched) is None:
+        _log_state("idle: all tracking windows closed")
+        return 60
+    _log_state(None)
 
-        for d in dates:
-            day_orders = get_pickup_flights(DB_PATH, d)
-            if not day_orders:
-                continue
+    old_statuses = {
+        o["order_id"]: o.get("flight_status")
+        for o in enriched
+        if o.get("service_type") == "接机" and o.get("flight_number")
+    }
 
-            try:
-                day_arrivals = fetch_arrivals(d)
-            except Exception:
-                logger.exception("Failed to fetch arrivals for %s", d)
-                continue
+    all_updates = {}
+    for d in dates:
+        day_orders = get_pickup_flights(DB_PATH, d)
+        if not day_orders:
+            continue
+        try:
+            day_arrivals = fetch_arrivals(d)
+        except Exception:
+            logger.exception("Failed to fetch arrivals for %s", d)
+            continue
+        day_updates = match_flights(day_orders, day_arrivals)
+        for order_id, info in day_updates.items():
+            update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"], hall=info.get("hall"))
+        all_updates.update(day_updates)
 
-            for o in get_orders_by_date(DB_PATH, d):
-                if o.get("service_type") == "接机" and o.get("flight_number"):
-                    old_statuses[o["order_id"]] = o.get("flight_status")
+    for order_id, info in all_updates.items():
+        old = old_statuses.get(order_id)
+        new = info["status"]
+        if old == new:
+            continue
+        logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
+        try:
+            await _notify_status_change(bot, chat_id, order_id, info, old, new)
+        except Exception:
+            # One malformed order must not eat the other orders' pushes.
+            logger.exception("Notify failed for order %s", order_id[-4:])
 
-            day_updates = match_flights(day_orders, day_arrivals)
-            for order_id, info in day_updates.items():
-                update_flight_info(DB_PATH, order_id, info["scheduled"], info["eta"], info["gate"], info["status"], hall=info.get("hall"))
-            all_updates.update(day_updates)
+    if all_updates:
+        logger.info("Updated %d flight(s): %s", len(all_updates), list(all_updates.keys()))
 
-        for order_id, info in all_updates.items():
-            old = old_statuses.get(order_id)
-            new = info["status"]
-            if old != new:
-                logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
-            if old == new:
-                continue
-            order_data = next((o for d in dates for o in get_orders_by_date(DB_PATH, d) if o["order_id"] == order_id), None)
-            should_notify_landed = (new == "landed" and old != "landed") or (new == "gate" and old not in ("landed", "gate"))
-            if should_notify_landed:
-                eta = info["eta"] or (order_data.get("flight_eta") if order_data else None) or "?"
-                hall = info.get("hall")
-                msg = f"已降落 {eta}"
-                if hall:
-                    msg += f" | 大堂{hall}"
-                if order_data:
-                    msg += f"\n航班: {order_data['flight_number']}"
-                    if order_data.get("passenger_name"):
-                        msg += f"\n乘客: {order_data['passenger_name']}"
-                    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
-                    if phone:
-                        msg += f"\n電話: {phone}"
-                    if order_data.get("passenger_exit_minutes"):
-                        h, m = int(eta[:2]), int(eta[3:5])
-                        total = h * 60 + m + order_data["passenger_exit_minutes"]
-                        svc = f"{total // 60 % 24:02d}:{total % 60:02d}"
-                        msg += f"\n用車: {svc}"
-                    if "举牌" in (order_data.get("additional_services") or ""):
-                        msg += f"\n舉牌: {order_data.get('passenger_name', '')}"
-                await bot.send_message(chat_id=chat_id, text=msg)
-            if new == "gate" and old != "gate":
-                gate_time = info["gate"] or "?"
-                hall = info.get("hall")
-                msg = f"已到閘口 {gate_time}"
-                if hall:
-                    msg += f" | 大堂{hall}"
-                if order_data:
-                    msg += f"\n航班: {order_data['flight_number']}"
-                    if order_data.get("passenger_name"):
-                        msg += f"\n乘客: {order_data['passenger_name']}"
-                    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
-                    if phone:
-                        msg += f"\n電話: {phone}"
-                    landed_eta = order_data.get("flight_eta")
-                    if landed_eta and order_data.get("passenger_exit_minutes"):
-                        h, m = int(landed_eta[:2]), int(landed_eta[3:5])
-                        total = h * 60 + m + order_data["passenger_exit_minutes"]
-                        svc = f"{total // 60 % 24:02d}:{total % 60:02d}"
-                        msg += f"\n用車: {svc}"
-                    if "举牌" in (order_data.get("additional_services") or ""):
-                        msg += f"\n舉牌: {order_data.get('passenger_name', '')}"
-                await bot.send_message(chat_id=chat_id, text=msg)
+    interval = calc_next_interval(_orders_in(dates))
+    if interval is None:
+        _log_state("idle: all tracking windows closed")
+        return 60
+    logger.info("Next poll in %ds", interval)
+    return interval
 
-        if all_updates:
-            logger.info("Updated %d flight(s): %s", len(all_updates), list(all_updates.keys()))
 
-        enriched = []
-        for d in dates:
-            enriched.extend(get_orders_by_date(DB_PATH, d))
-        interval = calc_next_interval(enriched)
-        if interval is None:
-            logger.info("All tracking windows closed, polling stopped")
-        else:
-            logger.info("Next poll in %ds", interval)
-            context.application.job_queue.run_once(_poll_and_notify, interval)
-    except Exception:
-        logger.exception("Flight poll error")
-        context.application.job_queue.run_once(_poll_and_notify, 300)
+def _order_lines(order_data: dict, arrival_hhmm: str | None) -> str:
+    lines = f"\n航班: {order_data['flight_number']}"
+    if order_data.get("passenger_name"):
+        lines += f"\n乘客: {order_data['passenger_name']}"
+    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
+    if phone:
+        lines += f"\n電話: {phone}"
+    if order_data.get("passenger_exit_minutes"):
+        svc = svc_time(arrival_hhmm, order_data["passenger_exit_minutes"])
+        if svc:
+            lines += f"\n用車: {svc}"
+    if "举牌" in (order_data.get("additional_services") or ""):
+        lines += f"\n舉牌: {order_data.get('passenger_name', '')}"
+    return lines
+
+
+async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None):
+    order_data = get_order_by_id(DB_PATH, order_id)
+    should_notify_landed = (new == "landed" and old != "landed") or (new == "gate" and old not in ("landed", "gate"))
+    if should_notify_landed:
+        eta = info["eta"] or (order_data.get("flight_eta") if order_data else None) or "?"
+        hall = info.get("hall")
+        msg = f"已降落 {eta}"
+        if hall:
+            msg += f" | 大堂{hall}"
+        if order_data:
+            msg += _order_lines(order_data, eta)
+        await bot.send_message(chat_id=chat_id, text=msg)
+    if new == "gate" and old != "gate":
+        gate_time = info["gate"] or "?"
+        hall = info.get("hall")
+        msg = f"已到閘口 {gate_time}"
+        if hall:
+            msg += f" | 大堂{hall}"
+        if order_data:
+            msg += _order_lines(order_data, order_data.get("flight_eta"))
+        await bot.send_message(chat_id=chat_id, text=msg)
 
 
 async def _set_commands(app):
@@ -505,7 +552,7 @@ async def _set_commands(app):
 
 async def _post_init(app):
     await _set_commands(app)
-    app.job_queue.run_once(_poll_and_notify, 5)
+    app.job_queue.run_repeating(_poll_tick, interval=60, first=5, job_kwargs=_JOB_KWARGS)
 
 
 def main():
@@ -518,6 +565,9 @@ def main():
             logging.StreamHandler(),
         ],
     )
+    # The 60s heartbeat would otherwise log two INFO lines per tick;
+    # misfire warnings stay visible at WARNING.
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
     init_db(DB_PATH)
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))

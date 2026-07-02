@@ -1,4 +1,4 @@
-from ride_dispatch.flight import normalize_flight_no, match_flights, parse_status
+from ride_dispatch.flight import normalize_flight_no, match_flights, parse_status, svc_time
 
 
 def test_normalize_strips_spaces():
@@ -39,6 +39,7 @@ def test_parse_status_diverted():
 
 SAMPLE_ARRIVALS = [
     {
+        "date": "2026-07-02",
         "time": "13:00",
         "flight": [{"no": "CX 489", "airline": "CPA"}],
         "status": "Est at 14:26",
@@ -46,6 +47,7 @@ SAMPLE_ARRIVALS = [
         "baggage": "3",
     },
     {
+        "date": "2026-07-02",
         "time": "14:30",
         "flight": [
             {"no": "QR 3457", "airline": "QTR"},
@@ -56,6 +58,7 @@ SAMPLE_ARRIVALS = [
         "baggage": "9",
     },
     {
+        "date": "2026-07-02",
         "time": "16:00",
         "flight": [{"no": "UO 117", "airline": "HKE"}],
         "status": "",
@@ -66,37 +69,109 @@ SAMPLE_ARRIVALS = [
 
 
 def test_match_direct_flight():
-    orders = [{"order_id": "O1", "flight_number": "CX489"}]
+    orders = [{"order_id": "O1", "flight_number": "CX489", "scheduled_time": "2026-07-02 15:00:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O1": {"scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"}}
+    assert result == {"O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"}}
 
 
 def test_match_codeshare():
-    orders = [{"order_id": "O2", "flight_number": "CX505"}]
+    orders = [{"order_id": "O2", "flight_number": "CX505", "scheduled_time": "2026-07-02 15:30:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O2": {"scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"}}
+    assert result == {"O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"}}
 
 
 def test_match_no_status_still_returns_scheduled():
-    orders = [{"order_id": "O3", "flight_number": "UO117"}]
+    orders = [{"order_id": "O3", "flight_number": "UO117", "scheduled_time": "2026-07-02 17:00:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
-    assert result == {"O3": {"scheduled": "16:00", "hall": "", "baggage": "", "eta": None, "gate": None, "status": None}}
+    assert result == {"O3": {"date": "2026-07-02", "scheduled": "16:00", "hall": "", "baggage": "", "eta": None, "gate": None, "status": None}}
 
 
 def test_match_not_found():
-    orders = [{"order_id": "O4", "flight_number": "XX999"}]
+    orders = [{"order_id": "O4", "flight_number": "XX999", "scheduled_time": "2026-07-02 15:00:00"}]
     result = match_flights(orders, SAMPLE_ARRIVALS)
     assert result == {}
 
 
 def test_match_multiple_orders():
     orders = [
-        {"order_id": "O1", "flight_number": "CX489"},
-        {"order_id": "O2", "flight_number": "CX505"},
-        {"order_id": "O4", "flight_number": "XX999"},
+        {"order_id": "O1", "flight_number": "CX489", "scheduled_time": "2026-07-02 15:00:00"},
+        {"order_id": "O2", "flight_number": "CX505", "scheduled_time": "2026-07-02 15:30:00"},
+        {"order_id": "O4", "flight_number": "XX999", "scheduled_time": "2026-07-02 15:00:00"},
     ]
     result = match_flights(orders, SAMPLE_ARRIVALS)
     assert result == {
-        "O1": {"scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"},
-        "O2": {"scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"},
+        "O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "eta": "14:26", "gate": None, "status": "est"},
+        "O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "eta": "14:35", "gate": None, "status": "landed"},
     }
+
+
+# --- date-aware matching: HKIA span=1 returns the previous day too, and
+# --- flight numbers repeat daily (MU5017 2026-07-02) ---
+
+
+def test_match_prefers_same_day_over_adjacent_day_final():
+    # Yesterday's same-number flight sits earlier in the feed at final 'gate'
+    # status; today's leg must win regardless of feed order.
+    arrivals = [
+        {"date": "2026-07-01", "time": "08:15", "flight": [{"no": "MU 5017"}],
+         "status": "At gate 08:20", "hall": "A", "baggage": "1"},
+        {"date": "2026-07-02", "time": "08:15", "flight": [{"no": "MU 5017"}],
+         "status": "Est at 08:30", "hall": "B", "baggage": "2"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "MU5017", "scheduled_time": "2026-07-02 09:00:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["status"] == "est"
+    assert result["A"]["date"] == "2026-07-02"
+
+
+def test_match_rejects_candidate_over_12h_away():
+    # Tomorrow's leg not yet published; only yesterday's final entry present.
+    # No match beats writing yesterday's 'gate' into tomorrow's order.
+    arrivals = [
+        {"date": "2026-07-02", "time": "08:15", "flight": [{"no": "MU 5017"}],
+         "status": "At gate 08:20", "hall": "A", "baggage": "1"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "MU5017", "scheduled_time": "2026-07-03 09:00:00"}]
+    assert match_flights(orders, arrivals) == {}
+
+
+def test_match_red_eye_previous_day_within_window():
+    # 00:30 pickup, flight lands 23:50 the previous calendar day — must match.
+    arrivals = [
+        {"date": "2026-07-02", "time": "23:50", "flight": [{"no": "UO 623"}],
+         "status": "Landed 23:55", "hall": "A", "baggage": "4"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "UO623", "scheduled_time": "2026-07-03 00:30:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["status"] == "landed"
+
+
+def test_match_same_day_duplicate_number_picks_closest():
+    # Feed order deliberately puts the wrong leg last so last-wins would fail.
+    arrivals = [
+        {"date": "2026-07-02", "time": "20:00", "flight": [{"no": "XX 100"}],
+         "status": "Est at 20:10", "hall": "B", "baggage": "2"},
+        {"date": "2026-07-02", "time": "08:00", "flight": [{"no": "XX 100"}],
+         "status": "At gate 08:05", "hall": "A", "baggage": "1"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "XX100", "scheduled_time": "2026-07-02 21:00:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["status"] == "est"
+
+
+# --- svc_time: 用車時間 = arrival + passenger exit minutes; must never crash
+# --- on unknown arrival time ("?" reached production via est→gate jump) ---
+
+
+def test_svc_time_adds_exit_minutes():
+    assert svc_time("14:23", 40) == "15:03"
+
+
+def test_svc_time_wraps_midnight():
+    assert svc_time("23:50", 30) == "00:20"
+
+
+def test_svc_time_unknown_eta_returns_none():
+    assert svc_time("?", 40) is None
+    assert svc_time(None, 40) is None
+    assert svc_time("", 40) is None

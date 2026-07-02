@@ -10,7 +10,7 @@
 
 **HKIA undocumented endpoint for flight data.** The official public API (data.gov.hk) only provides D-1 historical data — useless for real-time scheduling. The endpoint used here is the same one powering HKIA's own website: public, no auth, no API key. It's undocumented, so it could break without notice. The system degrades gracefully — if the endpoint fails, the dashboard just shows no flight data; orders and revenue are unaffected.
 
-**Flight poller as a daemon thread.** The poller runs inside the web server process as a `threading.Thread(daemon=True)`, polling every 5 minutes. No separate process, no extra launchd service. When the web server exits, the poller dies automatically. The bot is a separate process and does not poll flights.
+**Flight poller as an immortal heartbeat in the bot.** The poller lives in the bot process on a 60s `run_repeating` heartbeat (`misfire_grace_time=None`, so late ticks run instead of being discarded). Each tick is cheap: it checks the time-gated tracking window from the DB and only hits HKIA when a poll is actually due, at the tier interval computed by `calc_next_interval` (60s landed / 600s watchdog / ETA-halving / 1800s no-data). Termination is time-based only — flight status can slow polling but can never stop it; a wrong or stale status self-corrects on the next poll. Flight matching is date-aware: the HKIA feed spans adjacent days and flight numbers repeat daily, so each order matches the candidate closest to its pickup time within ±12h.
 
 **SSE for live updates.** The dashboard uses server-sent events to push updates rather than polling on a fixed interval. Currently unstable — not fully debugged yet. The dashboard still works without it via manual refresh.
 
@@ -26,9 +26,10 @@ WeChat order message
   → dashboard.html renders
 
 HKIA endpoint
-  → flight.py polls every 5 min (daemon thread in web.py)
-  → matches flights to orders by flight number + date
+  → bot.py heartbeat (60s tick, tier-gated fetch)
+  → flight.py matches flights to orders by flight number + closest date/time
   → db.py updates flight columns (scheduled, ETA, gate, status)
+  → bot.py pushes 已降落/已到閘口 notifications on status transitions
   → dashboard.html shows landing time + computed 用車時間
 ```
 
@@ -37,6 +38,6 @@ HKIA endpoint
 - `ride_dispatch/parser.py` — Order dataclass and field parser. Two parsers: key-value pairs (standard format) and comma-separated (Tongcheng format).
 - `ride_dispatch/bot.py` — Telegram bot handlers. Confirm/cancel flow, price input, cost tracking, banner fee detection.
 - `ride_dispatch/db.py` — SQLite schema and queries. Auto-migrates columns on startup.
-- `ride_dispatch/flight.py` — HKIA flight fetcher. Polls the undocumented endpoint, matches flights to orders, writes structured data (scheduled/ETA/gate/status).
-- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream. Starts flight poller as daemon thread.
+- `ride_dispatch/flight.py` — HKIA flight fetcher and matcher. Date-aware flight matching, poll tier calculation, tracking window logic.
+- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream.
 - `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step. Shows flight phase, landing time, and computed 用車時間.

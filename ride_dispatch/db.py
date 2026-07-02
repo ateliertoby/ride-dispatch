@@ -172,7 +172,7 @@ def get_tracking_dates(db_path: str, now: datetime | None = None) -> list[str]:
 def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
     with _conn(db_path) as conn:
         rows = conn.execute(
-            "SELECT order_id, flight_number FROM orders "
+            "SELECT order_id, flight_number, scheduled_time FROM orders "
             "WHERE scheduled_time LIKE ? AND service_type = '接机' "
             "AND flight_number != '' AND coalesce(status,'active') = 'active'",
             (f"{date_str}%",),

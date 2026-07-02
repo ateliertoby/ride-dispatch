@@ -109,6 +109,13 @@ def test_get_pickup_flights(db_path):
     assert rows[0]["order_id"] == "P1"
 
 
+def test_get_pickup_flights_includes_scheduled_time(db_path):
+    # match_flights needs pickup time to pick the right day's leg
+    save_order(db_path, make_order(order_id="P1", scheduled_time="2026-06-27 11:00:00"), 1)
+    rows = get_pickup_flights(db_path, "2026-06-27")
+    assert rows[0]["scheduled_time"] == "2026-06-27 11:00:00"
+
+
 def test_update_flight_info_est(db_path):
     save_order(db_path, make_order(order_id="F1"), 1)
     update_flight_info(db_path, "F1", scheduled="14:40", eta="14:26", gate=None, status="est")
