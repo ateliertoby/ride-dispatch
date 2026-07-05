@@ -87,6 +87,14 @@ async def handle_message(update: Update, context):
     if not (order.order_id and order.pickup):
         order = parse_feizhu(msg.text)
         source = "飛豬"
+        for line in msg.text.strip().splitlines():
+            line_s = line.strip()
+            if line_s.startswith("订单编号") and ("：" in line_s or ":" in line_s):
+                sep = "：" if "：" in line_s else ":"
+                oid_full = line_s.partition(sep)[2].strip()
+                if "-" in oid_full:
+                    source = oid_full.split("-", 1)[1]
+                break
     if not order.order_id:
         order = parse_tongcheng(msg.text)
         source = "同程"
