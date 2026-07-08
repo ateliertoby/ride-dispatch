@@ -2,7 +2,9 @@
 
 ## Design decisions
 
-**Telegram bot for input, web for viewing.** Building a custom input UI would take longer than the problem is worth. Telegram handles the UX — message parsing, confirmation buttons, inline replies — and I just use what's there. The dashboard is read-only: no forms, no auth, no input complexity.
+**Telegram bot for parsing, web for everything else.** Telegram is where WeChat order messages get pasted, so parsing lives there — message in, confirm button, saved. Everything after the save (price, fees, time corrections, cancellation) happens on the dashboard: tapping a card opens an edit sheet instead of deep-linking back into Telegram, which used to cost an app switch per correction. The dashboard also creates quick orders directly (Didi/Uber/foodpanda — time, money, done) so a missed order can be backfilled onto any date being viewed, which the bot's today/yesterday inference can't do. `/didi` and `/uber` remain in the bot as an alternative path for just-finished trips.
+
+**Write ops behind a PIN, reads stay open.** The dashboard is exposed via Cloudflare Tunnel, so mutation endpoints can't be anonymous. A single PIN (`RIDE_WEB_PIN` in `.env`; unset = read-only dashboard) exchanges for a stateless HMAC token on first write — stored in localStorage, survives server restarts, nothing persisted server-side. Failed attempts are rate-limited. Reads stay unauthenticated so opening the dashboard mid-drive costs zero friction.
 
 **Manual price and cost entry.** The dispatch platform gives a flat price per order. Costs (tunnel fees, parking) are variable but predictable. Encoding cost logic upfront would slow down shipping. Manual entry is fast enough for 3-7 orders/day, and rules can be added incrementally.
 
@@ -25,6 +27,13 @@ WeChat order message
   → web.py serves dashboard + API
   → dashboard.html renders
 
+Dashboard edit / quick order (Didi, Uber, foodpanda)
+  → PIN → /api/auth → HMAC token (once, cached in localStorage)
+  → PATCH /api/orders/<id> (price, fees, time, cancel)
+    or POST /api/orders (type + date + time + money)
+  → db.py writes to SQLite
+  → SSE fingerprint changes → other open dashboards refresh
+
 HKIA endpoint
   → bot.py heartbeat (60s tick, tier-gated fetch)
   → flight.py matches flights to orders by flight number + closest date/time
@@ -39,5 +48,5 @@ HKIA endpoint
 - `ride_dispatch/bot.py` — Telegram bot handlers. Confirm/cancel flow, price input, cost tracking, banner fee detection.
 - `ride_dispatch/db.py` — SQLite schema and queries. Auto-migrates columns on startup.
 - `ride_dispatch/flight.py` — HKIA flight fetcher and matcher. Date-aware flight matching, poll tier calculation, tracking window logic.
-- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream.
-- `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step. Shows flight phase, landing time, and computed 用車時間.
+- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + PIN-gated write endpoints (quick order create, field patch, cancel).
+- `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step, dark-first auto theme. Shows flight phase, landing time, and computed 用車時間. Bottom-sheet editing, numpad input, platform filter chips (接送/滴滴/Uber/foodpanda).

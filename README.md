@@ -15,8 +15,9 @@ This bot parses pasted order messages into structured records and stores them in
 1. Paste an order message from WeChat into the Telegram bot
 2. Bot parses it and shows a summary card — tap Confirm to save
 3. Type the price directly after confirming
-4. Add costs (tunnel/parking fees) via the order detail view
-5. Dashboard shows daily orders, revenue, net income, and flight landing times
+4. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm). First edit asks for the PIN once.
+5. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
+6. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
 
 ## Run
 
@@ -24,6 +25,7 @@ This bot parses pasted order messages into structured records and stores them in
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # add your Telegram bot token
+                      # set RIDE_WEB_PIN to enable dashboard editing (unset = read-only)
 ```
 
 Bot and dashboard are separate processes:
