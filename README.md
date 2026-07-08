@@ -24,9 +24,18 @@ This bot parses pasted order messages into structured records and stores them in
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # add your Telegram bot token
-                      # set RIDE_WEB_PIN to enable dashboard editing (unset = read-only)
+cp .env.example .env
 ```
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | From BotFather |
+| `RIDE_DB_PATH` | No | SQLite path (default: `orders.db`; use an absolute path outside cloud-synced dirs) |
+| `RIDE_WEB_PORT` | No | Dashboard port (default: `3200`) |
+| `RIDE_WEB_PIN` | No | PIN for dashboard edit/create/cancel. Unset = read-only dashboard |
+| `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs. Empty = allow all |
+
+Tests: `pytest tests/`
 
 Bot and dashboard are separate processes:
 
