@@ -120,6 +120,24 @@ def update_cost(db_path: str, order_id: str, cost_type: str, amount: float):
         conn.commit()
 
 
+UPDATABLE_FIELDS = {"price", "tunnel_fee", "parking_fee", "banner_fee", "scheduled_time", "status"}
+
+
+def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
+    bad = set(fields) - UPDATABLE_FIELDS
+    if bad:
+        raise ValueError(f"non-updatable fields: {sorted(bad)}")
+    if not fields:
+        return False
+    cols = sorted(fields)
+    sets = ", ".join(f"{c} = ?" for c in cols)
+    params = [fields[c] for c in cols] + [order_id]
+    with _conn(db_path) as conn:
+        cur = conn.execute(f"UPDATE orders SET {sets} WHERE order_id = ?", params)
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def cancel_order(db_path: str, order_id: str):
     with _conn(db_path) as conn:
         conn.execute("UPDATE orders SET status = 'cancelled' WHERE order_id = ?", (order_id,))

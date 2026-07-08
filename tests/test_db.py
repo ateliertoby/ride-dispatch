@@ -154,6 +154,27 @@ def test_update_flight_info_scheduled_only(db_path):
     assert rows[0]["flight_status"] is None
 
 
+def test_update_order_fields(db_path):
+    from ride_dispatch.db import update_order_fields
+    save_order(db_path, make_order(), 1)
+    assert update_order_fields(db_path, "TEST001", {"price": 300.0, "scheduled_time": "2026-06-27 12:30:00"}) is True
+    rows = get_orders_by_date(db_path, "2026-06-27")
+    assert rows[0]["price"] == 300.0
+    assert rows[0]["scheduled_time"] == "2026-06-27 12:30:00"
+
+
+def test_update_order_fields_rejects_non_whitelisted(db_path):
+    from ride_dispatch.db import update_order_fields
+    save_order(db_path, make_order(), 1)
+    with pytest.raises(ValueError):
+        update_order_fields(db_path, "TEST001", {"order_id": "HAX"})
+
+
+def test_update_order_fields_unknown_order(db_path):
+    from ride_dispatch.db import update_order_fields
+    assert update_order_fields(db_path, "NOPE", {"price": 1.0}) is False
+
+
 def test_flight_columns_null_by_default(db_path):
     save_order(db_path, make_order(order_id="F4"), 1)
     rows = get_orders_by_date(db_path, "2026-06-27")
