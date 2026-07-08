@@ -2,198 +2,866 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0f14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f3f5" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Ride Dispatch</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0c0f14;
+    --surface: #171c24;
+    --surface-press: #1e242f;
+    --sheet-bg: #1a202a;
+    --key-bg: #232a36;
+    --key-press: #2c3442;
+    --text: #e8ebf0;
+    --text-2: #9aa3b2;
+    --text-3: #626c7c;
+    --line: #242b37;
+    --amber: #ffb02e;
+    --red: #ff6161;
+    --green: #3ddc84;
+    --scrim: rgba(0,0,0,.55);
+    --pickup-bg: rgba(77,163,255,.16);  --pickup-fg: #6ab2ff;
+    --dropoff-bg: rgba(255,159,74,.16); --dropoff-fg: #ffb066;
+    --didi-bg: rgba(61,220,132,.14);    --didi-fg: #52d98b;
+    --uber-bg: rgba(186,140,255,.16);   --uber-fg: #c9a2ff;
+    --fp-bg: rgba(255,63,133,.16);      --fp-fg: #ff6ba3;
+    --transfer-bg: rgba(150,160,175,.14); --transfer-fg: #a8b1c0;
+    --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f2f3f5;
+      --surface: #ffffff;
+      --surface-press: #f4f5f7;
+      --sheet-bg: #ffffff;
+      --key-bg: #eef0f3;
+      --key-press: #e2e5e9;
+      --text: #1a1d23;
+      --text-2: #6b7482;
+      --text-3: #9aa2af;
+      --line: #e6e8ec;
+      --amber: #c77800;
+      --red: #d63030;
+      --green: #1d9e57;
+      --scrim: rgba(0,0,0,.35);
+      --pickup-bg: #e8f4fd;  --pickup-fg: #0a84ff;
+      --dropoff-bg: #fff3e0; --dropoff-fg: #f57c00;
+      --didi-bg: #e8f5e9;    --didi-fg: #2e9e52;
+      --uber-bg: #f3e5f5;    --uber-fg: #8e24aa;
+      --fp-bg: #fce4ef;      --fp-fg: #d70f64;
+      --transfer-bg: #f0f1f3; --transfer-fg: #666;
+      --banner-bg: #fff8e1;  --banner-fg: #c77800;
+    }
+  }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #f0f0f0; max-width: 480px; margin: 0 auto;
+    background: var(--bg); color: var(--text);
+    max-width: 480px; margin: 0 auto;
+    padding-bottom: env(safe-area-inset-bottom);
   }
+  button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+
   .header {
     position: sticky; top: 0; z-index: 10;
-    background: #fff; padding: 12px 16px;
-    display: flex; justify-content: space-between; align-items: center;
-    border-bottom: 1px solid #e0e0e0;
+    background: var(--bg); padding: 10px 14px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line);
   }
-  .date-nav { display: flex; gap: 12px; align-items: center; }
-  .date-nav button {
-    background: none; border: 1px solid #ccc; border-radius: 8px;
-    padding: 6px 14px; font-size: 16px; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
+  .nav-btn, .icon-btn {
+    background: var(--surface); border: none; border-radius: 10px;
+    width: 42px; height: 40px; font-size: 17px; cursor: pointer;
+    color: var(--text-2); flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
   }
-  .refresh-btn {
-    background: none; border: 1px solid #ccc; border-radius: 8px;
-    padding: 6px 12px; font-size: 18px; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
+  .nav-btn:active, .icon-btn:active { background: var(--surface-press); }
+  .date-btn {
+    background: none; border: none; cursor: pointer;
+    font-size: 17px; font-weight: 650; color: var(--text);
+    font-variant-numeric: tabular-nums;
+    flex: 1; text-align: center; height: 40px;
   }
-  .date { font-size: 17px; font-weight: 600; min-width: 120px; text-align: center; }
-  .revenue {
-    font-size: 28px; font-weight: 700; text-align: center;
-    padding: 20px 16px 12px; color: #1a1a1a;
+  .date-btn small { display: block; font-size: 11px; font-weight: 500; color: var(--text-3); }
+  .add-btn { background: var(--surface); color: var(--text); font-size: 22px; font-weight: 400; }
+
+  .hero { text-align: center; padding: 22px 16px 4px; }
+  .hero .label { font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
+  .hero .amount { font-size: 38px; font-weight: 750; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+  .hero .sub { font-size: 13px; color: var(--text-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .hero .sub .warn { color: var(--amber); }
+
+  .chips {
+    display: flex; gap: 8px; padding: 14px 14px 4px;
   }
-  .revenue small { font-size: 14px; font-weight: 400; color: #888; display: block; margin-bottom: 4px; }
-  .orders { padding: 0 12px 24px; }
-  a.card {
-    display: block; text-decoration: none; color: inherit;
-    background: #fff; border-radius: 12px; padding: 14px 16px;
-    margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
-    -webkit-tap-highlight-color: rgba(0,0,0,.05);
+  .chip {
+    flex: 1; border: none; border-radius: 10px; cursor: pointer;
+    background: var(--surface); color: var(--text-2);
+    padding: 8px 0 7px; font-size: 13px; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
   }
+  .chip small { font-size: 11px; font-weight: 500; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .chip.on { background: var(--text); color: var(--bg); }
+  .chip.on small { color: var(--bg); opacity: .65; }
+  .chip.zero { opacity: .4; }
+
+  .orders { padding: 12px 12px 32px; }
+  .card {
+    width: 100%; text-align: left; border: none; cursor: pointer;
+    background: var(--surface); border-radius: 14px; padding: 13px 15px;
+    margin-bottom: 9px; display: block; font-size: 15px;
+  }
+  .card:active { background: var(--surface-press); }
+  .card.flash { animation: flash 1.2s ease-out; }
+  @keyframes flash { 0% { outline: 2px solid var(--green); outline-offset: 2px; } 100% { outline: 2px solid transparent; outline-offset: 2px; } }
   .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .badge {
-    font-size: 13px; font-weight: 600; padding: 2px 8px;
-    border-radius: 4px; display: inline-block;
+    font-size: 12px; font-weight: 650; padding: 3px 8px;
+    border-radius: 6px; display: inline-block;
   }
-  .badge.pickup { background: #e8f4fd; color: #0a84ff; }
-  .badge.dropoff { background: #fff3e0; color: #f57c00; }
-  .badge.didi { background: #e8f5e9; color: #43a047; }
-  .badge.uber { background: #f3e5f5; color: #8e24aa; }
-  .badge.transfer { background: #f5f5f5; color: #666; }
-  .badge.banner { background: #fff8e1; color: #f9a825; margin-left: 4px; }
-  .time { font-size: 15px; font-weight: 600; color: #333; }
+  .badge.pickup { background: var(--pickup-bg); color: var(--pickup-fg); }
+  .badge.dropoff { background: var(--dropoff-bg); color: var(--dropoff-fg); }
+  .badge.didi { background: var(--didi-bg); color: var(--didi-fg); }
+  .badge.uber { background: var(--uber-bg); color: var(--uber-fg); }
+  .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
+  .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
+  .badge.banner { background: var(--banner-bg); color: var(--banner-fg); margin-left: 5px; }
+  .time { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .phase { font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 3px; }
+  .phase.est { background: var(--pickup-bg); color: var(--pickup-fg); }
+  .phase.landed, .phase.gate { background: var(--didi-bg); color: var(--green); }
   .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
-  .flight { font-size: 13px; color: #888; margin-bottom: 8px; }
-  .route { font-size: 13px; color: #555; line-height: 1.5; }
-  .route .arrow { color: #aaa; }
-  .price { font-size: 15px; font-weight: 600; margin-top: 8px; color: #1a1a1a; }
-  .price.none { color: #ccc; font-weight: 400; }
-  .empty { text-align: center; color: #999; padding: 60px 0; font-size: 15px; }
-  .count { font-size: 13px; color: #888; text-align: center; padding-bottom: 8px; }
-  .phase { font-size: 11px; font-weight: 600; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
-  .phase.est { background: #e8f4fd; color: #0a84ff; }
-  .phase.landed { background: #e8f5e9; color: #43a047; }
-  .phase.gate { background: #e8f5e9; color: #43a047; }
-  .flight-gate { font-size: 13px; color: #43a047; margin-top: 2px; }
-  .svc-time { font-size: 12px; color: #aaa; margin-top: 2px; }
+  .flight { font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+  .flight-gate { font-size: 13px; color: var(--green); margin-bottom: 2px; }
+  .svc-time { font-size: 12px; color: var(--text-3); margin-bottom: 2px; }
+  .route { font-size: 13px; color: var(--text-2); line-height: 1.5; }
+  .route .arrow { color: var(--text-3); }
+  .price { font-size: 15px; font-weight: 650; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .price .calc { font-weight: 400; color: var(--text-2); font-size: 13px; }
+  .price.none { color: var(--amber); font-weight: 500; font-size: 13px; }
+  .empty { text-align: center; color: var(--text-3); padding: 60px 0; font-size: 15px; }
+
+  /* ---- sheet ---- */
+  .scrim {
+    position: fixed; inset: 0; z-index: 20; background: var(--scrim);
+    opacity: 0; transition: opacity .25s; pointer-events: none;
+  }
+  .scrim.show { opacity: 1; pointer-events: auto; }
+  .sheet {
+    position: fixed; z-index: 21; left: 0; right: 0; bottom: 0;
+    max-width: 480px; margin: 0 auto;
+    background: var(--sheet-bg); border-radius: 18px 18px 0 0;
+    padding: 6px 18px calc(20px + env(safe-area-inset-bottom));
+    transform: translateY(105%); transition: transform .3s cubic-bezier(.32,.72,.35,1);
+    max-height: 88vh; overflow-y: auto;
+  }
+  .sheet.show { transform: translateY(0); }
+  @media (prefers-reduced-motion: reduce) {
+    .sheet, .scrim { transition: none; }
+    .card.flash { animation: none; }
+  }
+  .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 6px auto 2px; }
+  .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 0 2px; }
+  .sheet-title { font-size: 17px; font-weight: 700; }
+  .sheet-x {
+    background: var(--key-bg); border: none; border-radius: 50%;
+    width: 32px; height: 32px; font-size: 15px; color: var(--text-2); cursor: pointer;
+  }
+  .sheet-sub { font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
+
+  .info { padding: 10px 0 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .info-row { display: flex; gap: 10px; font-size: 14px; line-height: 1.65; }
+  .info-row .k { color: var(--text-3); flex-shrink: 0; width: 3.2em; }
+  .info-row .v { color: var(--text); word-break: break-all; }
+  .info-row .v a { color: var(--pickup-fg); text-decoration: none; }
+
+  .field-row {
+    display: flex; align-items: center; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 14px 2px; font-size: 16px; cursor: pointer; text-align: left;
+  }
+  .field-row:active { background: var(--surface-press); }
+  .field-row .fk { color: var(--text-2); flex: 1; }
+  .field-row .fv { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .field-row .fv.unset { color: var(--amber); font-weight: 500; }
+  .field-row .chev { color: var(--text-3); margin-left: 10px; font-size: 14px; }
+
+  .danger-btn {
+    width: 100%; margin-top: 18px; padding: 14px; border: none; border-radius: 12px;
+    background: none; color: var(--red); font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  .danger-btn.armed { background: var(--red); color: #fff; }
+  .tg-link { display: block; text-align: center; margin-top: 10px; font-size: 13px; color: var(--text-3); text-decoration: none; padding: 8px; }
+
+  .numpad-display {
+    text-align: center; font-size: 40px; font-weight: 700;
+    font-variant-numeric: tabular-nums; padding: 18px 0 6px; letter-spacing: 1px;
+    min-height: 74px;
+  }
+  .numpad-display .dim { color: var(--text-3); }
+  .numpad-hint { text-align: center; font-size: 13px; color: var(--text-3); min-height: 20px; }
+  .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 0 4px; }
+  .key {
+    background: var(--key-bg); border: none; border-radius: 12px;
+    font-size: 24px; font-weight: 550; padding: 15px 0; cursor: pointer;
+  }
+  .key:active { background: var(--key-press); }
+  .key.fn { font-size: 18px; color: var(--text-2); }
+  .primary-btn {
+    width: 100%; margin-top: 12px; padding: 16px; border: none; border-radius: 12px;
+    background: var(--text); color: var(--bg); font-size: 17px; font-weight: 700; cursor: pointer;
+  }
+  .primary-btn:disabled { opacity: .35; }
+  .ghost-btn {
+    width: 100%; margin-top: 8px; padding: 13px; border: none; border-radius: 12px;
+    background: var(--key-bg); color: var(--text); font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+
+  .type-grid { display: grid; gap: 10px; padding: 12px 0 4px; }
+  .type-btn {
+    border: none; border-radius: 14px; padding: 18px; cursor: pointer;
+    font-size: 18px; font-weight: 700; text-align: center;
+  }
+  .type-btn.didi { background: var(--didi-bg); color: var(--didi-fg); }
+  .type-btn.uber { background: var(--uber-bg); color: var(--uber-fg); }
+  .type-btn.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
+  .type-btn:active { filter: brightness(1.2); }
+
+  .sum-rows { padding: 8px 0; }
+  .sum-row { display: flex; justify-content: space-between; padding: 9px 2px; font-size: 16px; }
+  .sum-row .k { color: var(--text-2); }
+  .sum-row .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
+
+  .toast {
+    position: fixed; z-index: 30; left: 50%; transform: translateX(-50%) translateY(20px);
+    bottom: calc(30px + env(safe-area-inset-bottom));
+    background: var(--text); color: var(--bg);
+    padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none;
+    max-width: 85%;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
 <div class="header">
-  <div class="date-nav">
-    <button onclick="go(-1)">&larr;</button>
-    <span class="date" id="date"></span>
-    <button onclick="go(1)">&rarr;</button>
-  </div>
-  <button class="refresh-btn" onclick="load()">&circlearrowright;</button>
+  <button class="nav-btn" onclick="go(-1)" aria-label="前一日">&larr;</button>
+  <button class="date-btn" id="dateBtn" onclick="goToday()"></button>
+  <button class="nav-btn" onclick="go(1)" aria-label="後一日">&rarr;</button>
+  <button class="icon-btn" onclick="load()" aria-label="重新載入">&circlearrowright;</button>
+  <button class="icon-btn add-btn" onclick="openAdd()" aria-label="入單">+</button>
 </div>
-<div class="revenue" id="revenue"></div>
-<div class="count" id="count"></div>
+<div class="hero" id="hero"></div>
+<div class="chips" id="chips"></div>
 <div class="orders" id="orders"></div>
+<div class="scrim" id="scrim" onclick="closeSheet()"></div>
+<div class="sheet" id="sheet"></div>
+<div class="toast" id="toast"></div>
+
 <script>
-function fmt(d) {
+'use strict';
+
+// ---- state ----
+let cur = fmtDate(new Date());
+let filter = null;            // null | 'ride' | 'didi' | 'uber' | 'foodpanda'
+let orders = [];
+let sheetStack = [];          // stack of view render fns
+let sheetOrderId = null;      // order shown in detail view, if any
+let flashId = null;           // order_id to flash after next render
+
+const PLATFORMS = [
+  { key: 'ride',      label: '接送' },
+  { key: 'didi',      label: '滴滴' },
+  { key: 'uber',      label: 'Uber' },
+  { key: 'foodpanda', label: '熊貓' },
+];
+const TYPE_META = {
+  didi:      { label: '滴滴',      priceLabel: '車費',    tunnelLabel: '隧道費', hasTunnel: true },
+  uber:      { label: 'Uber',      priceLabel: '行程收入', tunnelLabel: '通行費', hasTunnel: true },
+  foodpanda: { label: 'foodpanda', priceLabel: '價錢',                          hasTunnel: false },
+};
+
+// ---- utils ----
+function fmtDate(d) {
   return d.getFullYear() + '-' +
     String(d.getMonth() + 1).padStart(2, '0') + '-' +
     String(d.getDate()).padStart(2, '0');
 }
+function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+function platform(o) {
+  if (o.service_type === '滴滴') return 'didi';
+  if (o.service_type === 'Uber') return 'uber';
+  if (o.service_type === 'foodpanda') return 'foodpanda';
+  return 'ride';
+}
+function orderTime(o) {
+  const t = (o.scheduled_time || '').split(' ')[1];
+  return t ? t.slice(0, 5) : '';
+}
+function shortId(id) {
+  return id.includes('_') ? id.split('_').pop() : id.slice(-6);
+}
+function weekday(dateStr) {
+  return ['日', '一', '二', '三', '四', '五', '六'][new Date(dateStr + 'T00:00:00').getDay()];
+}
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+}
 
-let cur = fmt(new Date());
+// ---- api ----
+async function apiWrite(method, path, body) {
+  const doFetch = () => fetch(path, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + (localStorage.getItem('ride_token') || ''),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!localStorage.getItem('ride_token')) {
+    await requirePin();
+  }
+  let res = await doFetch();
+  if (res.status === 401) {
+    localStorage.removeItem('ride_token');
+    await requirePin();
+    res = await doFetch();
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || ('HTTP ' + res.status));
+  }
+  return res.json();
+}
 
+// ---- nav / load ----
 function go(d) {
   const dt = new Date(cur + 'T00:00:00');
   dt.setDate(dt.getDate() + d);
-  cur = fmt(dt);
+  cur = fmtDate(dt);
+  load();
+}
+function goToday() {
+  cur = fmtDate(new Date());
   load();
 }
 
 async function load() {
-  document.getElementById('date').textContent = cur;
-  const res = await fetch('/api/orders?date=' + cur);
-  const data = await res.json();
-  const orders = data.orders;
+  document.getElementById('dateBtn').innerHTML =
+    esc(cur) + '<small>星期' + weekday(cur) + (cur === fmtDate(new Date()) ? ' · 今日' : '') + '</small>';
+  try {
+    const res = await fetch('/api/orders?date=' + cur);
+    orders = (await res.json()).orders;
+  } catch (e) {
+    toast('載入失敗');
+    return;
+  }
+  render();
+  if (sheetOrderId) {
+    const o = orders.find(x => x.order_id === sheetOrderId);
+    if (o && sheetStack.length === 1) renderSheet();  // refresh detail view only
+    if (!o) closeSheet();
+  }
+}
 
+// ---- render ----
+function stats(list) {
   let total = 0, costs = 0, priced = 0;
-  orders.forEach(o => {
+  list.forEach(o => {
     if (o.price) { total += o.price + (o.banner_fee || 0); priced++; }
     costs += (o.tunnel_fee || 0) + (o.parking_fee || 0);
   });
-  const net = total - costs;
+  return { total, costs, net: total - costs, priced };
+}
 
-  document.getElementById('revenue').innerHTML =
-    '<small>總收入</small>$' + $(total) +
-    (costs ? '<small style="margin-top:6px">淨收入</small>$' + $(net) : '');
-  document.getElementById('count').textContent =
-    orders.length ? orders.length + ' 單' + (priced < orders.length ? ' · ' + (orders.length - priced) + ' 單未入價' : '') : '';
+function render() {
+  const visible = filter ? orders.filter(o => platform(o) === filter) : orders;
+  const s = stats(visible);
+  const label = filter ? PLATFORMS.find(p => p.key === filter).label + '收入' : '總收入';
+  const unpriced = visible.length - s.priced;
+  document.getElementById('hero').innerHTML =
+    '<div class="label">' + esc(cur === fmtDate(new Date()) ? '今日' + label : label) + '</div>' +
+    '<div class="amount">$' + $(s.total) + '</div>' +
+    '<div class="sub">' +
+      (s.costs ? '淨收入 $' + $(s.net) + ' · ' : '') +
+      visible.length + ' 單' +
+      (unpriced > 0 ? ' · <span class="warn">' + unpriced + ' 未入價</span>' : '') +
+    '</div>';
 
-  if (!orders.length) {
-    document.getElementById('orders').innerHTML = '<div class="empty">冇訂單</div>';
+  document.getElementById('chips').innerHTML = PLATFORMS.map(p => {
+    const n = orders.filter(o => platform(o) === p.key).length;
+    return '<button class="chip' + (filter === p.key ? ' on' : '') + (n ? '' : ' zero') + '"' +
+      ' onclick="toggleFilter(\'' + p.key + '\')">' + p.label + '<small>' + n + ' 單</small></button>';
+  }).join('');
+
+  const box = document.getElementById('orders');
+  if (!visible.length) {
+    box.innerHTML = '<div class="empty">冇' + (filter ? PLATFORMS.find(p => p.key === filter).label : '') + '訂單</div>';
     return;
   }
+  box.innerHTML = visible.map(cardHtml).join('');
+  if (flashId) {
+    const el = box.querySelector('[data-oid="' + CSS.escape(flashId) + '"]');
+    if (el) { el.classList.add('flash'); el.scrollIntoView({ block: 'nearest' }); }
+    flashId = null;
+  }
+}
 
-  document.getElementById('orders').innerHTML = orders.map(o => {
-    const isDidi = o.service_type === '滴滴';
-    const isUber = o.service_type === 'Uber';
-    const isPickup = o.service_type === '接机';
-    const isDropoff = o.service_type === '送机';
-    const badge = isDidi ? 'didi' : isUber ? 'uber' : isPickup ? 'pickup' : isDropoff ? 'dropoff' : 'transfer';
-    const label = isDidi ? '滴滴' : isUber ? 'Uber' : isPickup ? '接機' : isDropoff ? '送機' : '單程';
-    const t = (o.scheduled_time || '').split(' ')[1];
-    const time = t ? t.slice(0, 5) : '';
-    const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
-    const banner = o.banner_fee || 0;
-    let priceDetail = '';
-    if (o.price) {
-      const gross = o.price + banner;
-      priceDetail = '<div class="price">$' + $(o.price);
-      if (banner) priceDetail += ' + $' + $(banner);
-      if (costTotal) priceDetail += ' <span style="font-weight:400;color:#888;font-size:13px">- $' + $(costTotal) + ' = $' + $(gross - costTotal) + '</span>';
-      priceDetail += '</div>';
+function toggleFilter(key) {
+  filter = filter === key ? null : key;
+  render();
+}
+
+function cardHtml(o) {
+  const p = platform(o);
+  const isPickup = o.service_type === '接机';
+  const isDropoff = o.service_type === '送机';
+  const badge = p !== 'ride' ? p : isPickup ? 'pickup' : isDropoff ? 'dropoff' : 'transfer';
+  const label = p === 'didi' ? '滴滴' : p === 'uber' ? 'Uber' : p === 'foodpanda' ? 'foodpanda'
+    : isPickup ? '接機' : isDropoff ? '送機' : '單程';
+  const banner = o.banner_fee || 0;
+  const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
+
+  let priceHtml;
+  if (o.price) {
+    const gross = o.price + banner;
+    priceHtml = '<div class="price">$' + $(o.price);
+    if (banner) priceHtml += ' + $' + $(banner);
+    if (costTotal) priceHtml += ' <span class="calc">&minus; $' + $(costTotal) + ' = $' + $(gross - costTotal) + '</span>';
+    priceHtml += '</div>';
+  } else {
+    priceHtml = '<div class="price none">未入價</div>';
+  }
+
+  let timeDisplay = orderTime(o);
+  let phaseBadge = '', gateHtml = '', svcTimeHtml = '';
+  if (isPickup) {
+    if (o.flight_status === 'gate' && o.flight_gate) {
+      timeDisplay = o.flight_gate;
+      phaseBadge = '<span class="phase gate">At gate</span>';
+    } else if (o.flight_status === 'landed' && o.flight_eta) {
+      timeDisplay = o.flight_eta;
+      phaseBadge = '<span class="phase landed">Landed</span>';
+    } else if (o.flight_status === 'est' && o.flight_eta) {
+      timeDisplay = o.flight_eta;
+      phaseBadge = '<span class="phase est">Est</span>';
+    } else if (o.flight_scheduled) {
+      timeDisplay = o.flight_scheduled;
+    }
+    // no flight data yet (not in feed / typo): keep booking time
+    if (o.flight_status === 'gate' && o.flight_eta) {
+      gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
+    }
+    const landingTime = o.flight_eta || o.flight_scheduled;
+    if (landingTime && o.passenger_exit_minutes) {
+      const [h, m] = landingTime.split(':').map(Number);
+      const total = h * 60 + m + o.passenger_exit_minutes;
+      svcTimeHtml = '<div class="svc-time">用車 ' +
+        String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0') + '</div>';
+    }
+  }
+
+  return '<button class="card" data-oid="' + esc(o.order_id) + '" onclick="openDetail(this.dataset.oid)">' +
+    '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' +
+    (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div>' +
+    '<span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
+    (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
+    (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') +
+      (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
+    gateHtml + svcTimeHtml +
+    (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
+    priceHtml +
+    '</button>';
+}
+
+// ---- sheet infra ----
+function openSheet(viewFn) {
+  sheetStack = [viewFn];
+  renderSheet();
+  document.getElementById('scrim').classList.add('show');
+  document.getElementById('sheet').classList.add('show');
+}
+function pushView(viewFn) { sheetStack.push(viewFn); renderSheet(); }
+function popView() {
+  rejectPendingPin();
+  if (sheetStack.length > 1) { sheetStack.pop(); renderSheet(); }
+  else closeSheet();
+}
+function renderSheet() {
+  const sheet = document.getElementById('sheet');
+  sheet.innerHTML = '<div class="grab"></div>';
+  sheetStack[sheetStack.length - 1](sheet);
+}
+function closeSheet() {
+  rejectPendingPin();
+  sheetStack = [];
+  sheetOrderId = null;
+  addState = null;
+  document.getElementById('scrim').classList.remove('show');
+  document.getElementById('sheet').classList.remove('show');
+}
+function sheetHead(title, sub) {
+  return '<div class="sheet-head"><div class="sheet-title">' + title + '</div>' +
+    '<button class="sheet-x" onclick="popView()">&#10005;</button></div>' +
+    (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
+}
+
+// ---- detail view ----
+function openDetail(orderId) {
+  sheetOrderId = orderId;
+  openSheet(detailView);
+}
+
+function editableFields(o) {
+  const p = platform(o);
+  if (p === 'didi') return [['price', '車費'], ['tunnel_fee', '隧道費'], ['time', '時間']];
+  if (p === 'uber') return [['price', '總收入'], ['tunnel_fee', '通行費'], ['time', '時間']];
+  if (p === 'foodpanda') return [['price', '價錢'], ['time', '時間']];
+  return [['price', '價錢'], ['tunnel_fee', '隧道費'], ['parking_fee', '停車費'], ['banner_fee', '舉牌費'], ['time', '時間']];
+}
+
+function detailView(sheet) {
+  cancelArmed = false;  // a re-render must never leave an invisible armed state
+  const o = orders.find(x => x.order_id === sheetOrderId);
+  if (!o) { closeSheet(); return; }
+  const p = platform(o);
+  const isPickup = o.service_type === '接机';
+  const label = p === 'didi' ? '滴滴' : p === 'uber' ? 'Uber' : p === 'foodpanda' ? 'foodpanda'
+    : isPickup ? '接機' : o.service_type === '送机' ? '送機' : '單程';
+
+  let info = '';
+  if (p === 'ride') {
+    const phone = o.passenger_phone || o.overseas_phone;
+    const rows = [];
+    if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
+    if (phone) rows.push(['電話', '<a href="tel:' + esc(phone.replace(/\s+/g, '')) + '">' + esc(phone) + '</a>']);
+    if (o.flight_number) {
+      let f = esc(o.flight_number);
+      if (o.flight_status === 'gate' && o.flight_gate) f += ' · 已到閘 ' + esc(o.flight_gate);
+      else if (o.flight_status === 'landed' && o.flight_eta) f += ' · 已降落 ' + esc(o.flight_eta);
+      else if (o.flight_eta) f += ' · 預計 ' + esc(o.flight_eta);
+      else if (o.flight_scheduled) f += ' · 預定 ' + esc(o.flight_scheduled);
+      rows.push(['航班', f]);
+    }
+    if (o.vehicle_type) rows.push(['車型', esc(o.vehicle_type)]);
+    if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span style="color:var(--text-3)">&rarr;</span> ' + esc(o.dropoff)]);
+    if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
+    if (rows.length) {
+      info = '<div class="info">' + rows.map(r =>
+        '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
+      ).join('') + '</div>';
+    }
+  }
+
+  const fields = editableFields(o).map(([key, fLabel]) => {
+    let value, unset = false;
+    if (key === 'time') {
+      value = orderTime(o);
     } else {
-      priceDetail = '<div class="price none">未入價</div>';
+      const v = o[key];
+      if (key === 'price' && !v) { value = '未入價'; unset = true; }
+      else value = '$' + $(v || 0);
     }
-    let priceHtml = priceDetail;
-    const tgLink = 'https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id);
-    let timeDisplay = time;
-    let phaseBadge = '';
-    let gateHtml = '';
-    let svcTimeHtml = '';
-    if (isPickup) {
-      if (o.flight_status === 'gate' && o.flight_gate) {
-        timeDisplay = o.flight_gate;
-        phaseBadge = '<span class="phase gate">At gate</span>';
-      } else if (o.flight_status === 'landed' && o.flight_eta) {
-        timeDisplay = o.flight_eta;
-        phaseBadge = '<span class="phase landed">Landed</span>';
-      } else if (o.flight_status === 'est' && o.flight_eta) {
-        timeDisplay = o.flight_eta;
-        phaseBadge = '<span class="phase est">Est</span>';
-      } else if (o.flight_scheduled) {
-        timeDisplay = o.flight_scheduled;
-      }
-      // no flight data yet (not in feed / typo): keep booking time
-      if (o.flight_status === 'gate' && o.flight_eta) {
-        gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
-      }
-      const landingTime = o.flight_eta || o.flight_scheduled;
-      if (landingTime && o.passenger_exit_minutes) {
-        const [h, m] = landingTime.split(':').map(Number);
-        const total = h * 60 + m + o.passenger_exit_minutes;
-        const svcH = String(Math.floor(total / 60) % 24).padStart(2, '0');
-        const svcM = String(total % 60).padStart(2, '0');
-        svcTimeHtml = '<div class="svc-time">用車 ' + svcH + ':' + svcM + '</div>';
-      }
-    }
-    return '<a href="' + tgLink + '" class="card">' +
-      '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' + (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div><span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
-      (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
-      (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') + (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
-      gateHtml +
-      svcTimeHtml +
-      (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
-      priceHtml +
-      '</a>';
+    return '<button class="field-row" onclick="editField(\'' + key + '\')">' +
+      '<span class="fk">' + fLabel + '</span>' +
+      '<span class="fv' + (unset ? ' unset' : '') + '">' + esc(value) + '</span>' +
+      '<span class="chev">&#9998;</span></button>';
   }).join('');
+
+  sheet.insertAdjacentHTML('beforeend',
+    sheetHead('<span class="badge ' + (p !== 'ride' ? p : isPickup ? 'pickup' : o.service_type === '送机' ? 'dropoff' : 'transfer') + '">' + label + '</span> ' +
+      '<span style="font-variant-numeric:tabular-nums">' + esc(orderTime(o)) + '</span>',
+      '#' + esc(shortId(o.order_id))) +
+    info + fields +
+    '<button class="danger-btn" id="cancelBtn" onclick="armCancel()">取消訂單</button>' +
+    (p === 'ride' ? '<a class="tg-link" href="https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '')
+  );
 }
 
-function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+function editField(key) {
+  const o = orders.find(x => x.order_id === sheetOrderId);
+  if (!o) return;
+  const fLabel = editableFields(o).find(f => f[0] === key)[1];
+  if (key === 'time') {
+    pushView(numpadView({
+      title: '改時間', hint: '而家 ' + orderTime(o), mode: 'time',
+      onConfirm: v => patchOrder({ time: v }),
+    }));
+  } else {
+    pushView(numpadView({
+      title: '改' + fLabel, hint: '而家 $' + $(o[key] || 0), mode: 'money',
+      onConfirm: v => patchOrder({ [key]: v }),
+    }));
+  }
 }
 
+// Returns false on failure so the numpad resets for retry.
+async function patchOrder(body) {
+  try {
+    await apiWrite('PATCH', '/api/orders/' + encodeURIComponent(sheetOrderId), body);
+  } catch (e) {
+    if (e.message !== 'PIN_CANCELLED') toast(e.message);
+    return false;
+  }
+  await load();
+  if (sheetStack.length > 1) popView();
+  return true;
+}
+
+let cancelArmed = false;
+let cancelArmedAt = 0;
+function armCancel() {
+  const btn = document.getElementById('cancelBtn');
+  if (!cancelArmed) {
+    cancelArmed = true;
+    cancelArmedAt = Date.now();
+    btn.textContent = '再撳一次確認取消';
+    btn.classList.add('armed');
+    setTimeout(() => {
+      cancelArmed = false;
+      const b = document.getElementById('cancelBtn');
+      if (b) { b.textContent = '取消訂單'; b.classList.remove('armed'); }
+    }, 3000);
+    return;
+  }
+  if (Date.now() - cancelArmedAt < 250) return;  // accidental double-tap, not a decision
+  cancelArmed = false;
+  const id = sheetOrderId;
+  apiWrite('PATCH', '/api/orders/' + encodeURIComponent(id), { status: 'cancelled' })
+    .then(() => { closeSheet(); toast('已取消 #' + shortId(id)); load(); })
+    .catch(e => { if (e.message !== 'PIN_CANCELLED') toast(e.message); });
+}
+
+// ---- numpad ----
+// mode: 'money' (digits + dot) | 'time' (HHMM) | 'pin' (digits, masked)
+// onConfirm may be async; returning false means "stay here and reset for retry"
+function numpadView({ title, hint, mode, onConfirm, quick }) {
+  let input = '';
+  return function view(sheet) {
+    sheet.insertAdjacentHTML('beforeend',
+      sheetHead(esc(title), '') +
+      '<div class="numpad-display" id="npDisplay"></div>' +
+      '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
+      '<div class="numpad" id="npKeys"></div>' +
+      (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
+      '<button class="primary-btn" id="npOk" disabled>確認</button>'
+    );
+    const keys = mode === 'money'
+      ? ['1','2','3','4','5','6','7','8','9','.','0','⌫']
+      : ['1','2','3','4','5','6','7','8','9','','0','⌫'];
+    document.getElementById('npKeys').innerHTML = keys.map(k =>
+      k === '' ? '<div></div>' :
+      '<button class="key' + (k === '⌫' || k === '.' ? ' fn' : '') + '" data-k="' + k + '">' + k + '</button>'
+    ).join('');
+
+    const display = document.getElementById('npDisplay');
+    const ok = document.getElementById('npOk');
+
+    function valid() {
+      if (mode === 'money') return input !== '' && input !== '.' && !isNaN(parseFloat(input));
+      if (mode === 'time') {
+        if (input.length !== 4) return false;
+        return +input.slice(0, 2) <= 23 && +input.slice(2) <= 59;
+      }
+      return input.length >= 4;  // pin
+    }
+    function paint() {
+      if (mode === 'money') {
+        display.innerHTML = input ? '$' + esc(input) : '<span class="dim">$0</span>';
+      } else if (mode === 'time') {
+        const dim = '<span class="dim">&#8211;</span>';
+        const digit = i => i < input.length ? esc(input[i]) : dim;
+        display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
+      } else {
+        display.innerHTML = input ? '&#8226;'.repeat(input.length) : '<span class="dim">PIN</span>';
+      }
+      ok.disabled = !valid();
+    }
+    document.getElementById('npKeys').addEventListener('click', e => {
+      const k = e.target.dataset && e.target.dataset.k;
+      if (!k) return;
+      if (k === '⌫') input = input.slice(0, -1);
+      else if (k === '.') { if (!input.includes('.')) input += input ? '.' : '0.'; }
+      else {
+        if (mode === 'time' && input.length >= 4) return;
+        if (mode === 'pin' && input.length >= 8) return;
+        if (mode === 'money' && input.length >= 7) return;
+        input += k;
+      }
+      paint();
+    });
+    ok.addEventListener('click', async () => {
+      if (!valid()) return;
+      ok.disabled = true;
+      const value = mode === 'money' ? parseFloat(input)
+        : mode === 'time' ? input.slice(0, 2) + ':' + input.slice(2)
+        : input;
+      const result = await onConfirm(value);
+      if (result === false) {
+        input = '';
+        paint();
+      }
+    });
+    if (quick) document.getElementById('npQuick').addEventListener('click', quick.onTap);
+    paint();
+  };
+}
+
+// ---- add flow ----
+let addState = null;
+
+function openAdd() {
+  addState = { date: cur };
+  openSheet(addTypeView);
+}
+
+function addTypeView(sheet) {
+  sheet.insertAdjacentHTML('beforeend',
+    sheetHead('入單', esc(addState.date) + ' 星期' + weekday(addState.date)) +
+    '<div class="type-grid">' +
+    Object.keys(TYPE_META).map(t =>
+      '<button class="type-btn ' + t + '" data-t="' + t + '">' + TYPE_META[t].label + '</button>'
+    ).join('') +
+    '</div>'
+  );
+  sheet.querySelectorAll('.type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      addState.type = btn.dataset.t;
+      pushView(addTimeView());
+    });
+  });
+}
+
+function addTimeView() {
+  const meta = TYPE_META[addState.type];
+  return numpadView({
+    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time',
+    onConfirm: v => { addState.time = v; pushView(addPriceView()); },
+  });
+}
+
+function addPriceView() {
+  const meta = TYPE_META[addState.type];
+  return numpadView({
+    title: meta.label + ' · ' + meta.priceLabel, hint: addState.time, mode: 'money',
+    onConfirm: v => {
+      addState.price = v;
+      if (meta.hasTunnel) pushView(addTunnelView());
+      else { addState.tunnel = 0; pushView(addConfirmView); }
+    },
+  });
+}
+
+function addTunnelView() {
+  const meta = TYPE_META[addState.type];
+  return numpadView({
+    title: meta.label + ' · ' + meta.tunnelLabel, mode: 'money',
+    quick: { label: '冇' + meta.tunnelLabel, onTap: () => { addState.tunnel = 0; pushView(addConfirmView); } },
+    onConfirm: v => { addState.tunnel = v; pushView(addConfirmView); },
+  });
+}
+
+function addConfirmView(sheet) {
+  const meta = TYPE_META[addState.type];
+  // Uber model follows the bot: price stored = trip income + toll (toll is reimbursed)
+  const price = addState.type === 'uber' ? addState.price + addState.tunnel : addState.price;
+  const net = addState.type === 'uber' ? addState.price : addState.price - addState.tunnel;
+  const rows = [
+    ['日子', addState.date + ' 星期' + weekday(addState.date)],
+    ['時間', addState.time],
+    [meta.priceLabel, '$' + $(addState.price)],
+  ];
+  if (meta.hasTunnel) rows.push([meta.tunnelLabel, addState.tunnel ? '$' + $(addState.tunnel) : '冇']);
+  sheet.insertAdjacentHTML('beforeend',
+    sheetHead(meta.label + ' · 確認', '') +
+    '<div class="sum-rows">' +
+    rows.map(r => '<div class="sum-row"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>').join('') +
+    (addState.tunnel ? '<div class="sum-row total"><span class="k">' +
+      (addState.type === 'uber' ? '總收入' : '淨收入') + '</span><span class="v">$' +
+      $(addState.type === 'uber' ? price : net) + '</span></div>' : '') +
+    '</div>' +
+    '<button class="primary-btn" id="addSave">儲存</button>' +
+    '<button class="ghost-btn" onclick="popView()">返上一步</button>'
+  );
+  document.getElementById('addSave').addEventListener('click', async function () {
+    this.disabled = true;
+    this.textContent = '儲存緊…';
+    try {
+      const res = await apiWrite('POST', '/api/orders', {
+        type: addState.type, date: addState.date, time: addState.time,
+        price: price, tunnel_fee: addState.tunnel,
+      });
+      if (filter && filter !== addState.type) filter = null;  // keep the new card visible
+      flashId = res.order_id;
+      closeSheet();
+      toast(meta.label + ' 已入單');
+      load();
+    } catch (e) {
+      if (e.message !== 'PIN_CANCELLED') toast(e.message);
+      this.disabled = false;
+      this.textContent = '儲存';
+    }
+  });
+}
+
+// ---- pin ----
+let pinReject = null;
+function rejectPendingPin() {
+  if (pinReject) {
+    const r = pinReject;
+    pinReject = null;
+    r(new Error('PIN_CANCELLED'));
+  }
+}
+function requirePin() {
+  return new Promise((resolve, reject) => {
+    pinReject = reject;
+    pushView(numpadView({
+      title: '輸入 PIN', hint: '解鎖修改功能', mode: 'pin',
+      onConfirm: async pin => {
+        try {
+          const res = await fetch('/api/auth', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            toast(data.error === 'wrong pin' ? 'PIN 唔啱' : (data.error || 'auth 失敗'));
+            return false;  // numpad resets for retry
+          }
+          localStorage.setItem('ride_token', (await res.json()).token);
+          pinReject = null;
+          popView();
+          resolve();
+          return true;
+        } catch (e) {
+          toast('連唔到 server');
+          return false;
+        }
+      },
+    }));
+  });
+}
+
+// ---- init ----
 load();
-
 const es = new EventSource('/api/events');
 es.onmessage = () => load();
 </script>
