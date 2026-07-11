@@ -13,11 +13,12 @@ This bot parses pasted order messages into structured records and stores them in
 ## How it works
 
 1. Paste an order message from WeChat into the Telegram bot
-2. Bot parses it and shows a summary card — tap Confirm to save
-3. Type the price directly after confirming
-4. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm). First edit asks for the PIN once.
-5. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
-6. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
+2. Bot parses it and shows a summary card with Confirm/Cancel buttons
+3. Type the price directly — saves the order and price in one step
+4. Alternatively, tap Confirm first to save, then type the price separately
+5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm). First edit asks for the PIN once.
+6. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
+7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
 
 ## Run
 
@@ -46,4 +47,9 @@ python -m ride_dispatch.web   # Web dashboard + flight poller (default port 3200
 
 ## Deploy
 
-The dashboard is exposed via Cloudflare Tunnel for mobile access on any network. Example launchd plist files are in `deploy/` for running both processes as macOS services.
+The dashboard is exposed via a named Cloudflare Tunnel (`~/.cloudflared/ride-dispatch.yml`) with **Cloudflare Access** (email OTP, 1-month session) as perimeter auth. The tunnel runs as a launchd service; example plist files for all three processes (bot, web, tunnel) are in `deploy/`.
+
+Two gotchas:
+
+- **`--config` is required** on every `cloudflared tunnel` command — the default `~/.cloudflared/config.yml` `tunnel:` key silently overrides the positional tunnel name (especially `route dns`, which will CNAME to the wrong tunnel).
+- **`protocol: http2`** in the tunnel config — QUIC flaps on some networks.
