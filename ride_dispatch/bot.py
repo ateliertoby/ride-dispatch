@@ -55,6 +55,15 @@ def format_card(order) -> str:
     return "\n".join(lines)
 
 
+def _latest_pending_for_chat(pending_dict: dict, chat_id: int) -> tuple[int, tuple] | None:
+    """Return (card_msg_id, entry) for the newest pending card in a chat, or None."""
+    result = None
+    for msg_id, entry in pending_dict.items():
+        if entry[2] == chat_id:
+            result = (msg_id, entry)
+    return result
+
+
 async def handle_message(update: Update, context):
     msg = update.message
     if not msg or not msg.text:
@@ -123,6 +132,37 @@ async def handle_message(update: Update, context):
             except ValueError:
                 pass
             return
+        # 直接入價捷徑：pending card + 數字 = 確認 + 入價一步過
+        text = msg.text.strip()
+        try:
+            price = float(text)
+        except ValueError:
+            return
+        hit = _latest_pending_for_chat(pending, chat_id)
+        if not hit:
+            return
+        card_msg_id, entry = hit
+        pending.pop(card_msg_id)
+        pending_order, source, _ = entry
+        parking = 32.0 if source == "携程" and pending_order.service_type == "接机" else 0.0
+        banner_fee = 40.0 if "举牌" in (pending_order.additional_services or "") else 0.0
+        try:
+            save_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
+            update_price(DB_PATH, pending_order.order_id, price)
+            if pending_order.service_type == "接机" and pending_order.flight_number:
+                _kick_poll(context)
+            reply = f"已入單 #{pending_order.order_id[-4:]}: ${price:g}"
+            if banner_fee:
+                reply += "（+舉牌$40）"
+            await msg.reply_text(reply)
+        except sqlite3.IntegrityError:
+            await msg.reply_text("呢張單已經存在。")
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=card_msg_id, reply_markup=None
+            )
+        except Exception:
+            pass
         return
 
     text = format_card(order)
@@ -133,7 +173,7 @@ async def handle_message(update: Update, context):
         ]]
     )
     sent = await msg.reply_text(text, reply_markup=keyboard)
-    pending[sent.message_id] = (order, source)
+    pending[sent.message_id] = (order, source, chat_id)
 
 
 async def handle_callback(update: Update, context):
@@ -147,7 +187,7 @@ async def handle_callback(update: Update, context):
         if not entry:
             await query.answer("訂單已過期")
             return
-        order, source = entry
+        order, source, _ = entry
         try:
             parking = 32.0 if source == "携程" and order.service_type == "接机" else 0.0
             banner_fee = 40.0 if "举牌" in (order.additional_services or "") else 0.0
