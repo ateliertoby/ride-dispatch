@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import os
 import re
 import secrets
@@ -20,9 +18,6 @@ from .db import (
 load_dotenv()
 
 DB_PATH = os.environ.get("RIDE_DB_PATH", "orders.db")
-# Web write ops are gated behind this PIN; unset means the dashboard is
-# read-only, same as before writes existed.
-WEB_PIN = os.environ.get("RIDE_WEB_PIN", "")
 
 app = Flask(
     __name__,
@@ -40,43 +35,6 @@ def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
     return jsonify({"orders": orders, "date": date_str})
-
-
-# ---- Auth ----
-# Single user, so no sessions: the token is a stable HMAC derived from the
-# PIN. Verifying recomputes it — nothing stored, restarts don't log out.
-
-_auth_fails: list[float] = []
-AUTH_FAIL_LIMIT = 5
-AUTH_FAIL_WINDOW = 60.0
-
-
-def _token() -> str:
-    return hmac.new(WEB_PIN.encode(), b"ride-dispatch-web-auth", hashlib.sha256).hexdigest()
-
-
-def _require_auth():
-    if not WEB_PIN:
-        return jsonify({"error": "RIDE_WEB_PIN not configured"}), 403
-    header = request.headers.get("Authorization", "")
-    if not (header.startswith("Bearer ") and hmac.compare_digest(header[7:], _token())):
-        return jsonify({"error": "auth required"}), 401
-    return None
-
-
-@app.post("/api/auth")
-def api_auth():
-    if not WEB_PIN:
-        return jsonify({"error": "RIDE_WEB_PIN not configured"}), 403
-    now = time.monotonic()
-    _auth_fails[:] = [t for t in _auth_fails if now - t < AUTH_FAIL_WINDOW]
-    if len(_auth_fails) >= AUTH_FAIL_LIMIT:
-        return jsonify({"error": "too many attempts"}), 429
-    pin = str((request.get_json(silent=True) or {}).get("pin", ""))
-    if not hmac.compare_digest(pin, WEB_PIN):
-        _auth_fails.append(now)
-        return jsonify({"error": "wrong pin"}), 401
-    return jsonify({"token": _token()})
 
 
 # ---- Write ops ----
@@ -102,9 +60,6 @@ def _parse_money(value, field: str) -> tuple[float | None, tuple | None]:
 
 @app.post("/api/orders")
 def api_create_order():
-    err = _require_auth()
-    if err:
-        return err
     body = request.get_json(silent=True) or {}
     qtype = body.get("type")
     if qtype not in QUICK_TYPES:
@@ -133,9 +88,6 @@ def api_create_order():
 
 @app.patch("/api/orders/<order_id>")
 def api_update_order(order_id):
-    err = _require_auth()
-    if err:
-        return err
     body = request.get_json(silent=True) or {}
     fields = {}
     for key in ("price", "tunnel_fee", "parking_fee", "banner_fee"):
@@ -199,8 +151,6 @@ def main():
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     print(f"DB: {os.path.abspath(DB_PATH)} ({count_active_orders(DB_PATH)} active orders)", flush=True)
-    if not WEB_PIN:
-        print("RIDE_WEB_PIN not set — dashboard is read-only", flush=True)
     port = int(os.environ.get("RIDE_WEB_PORT", "3200"))
     app.run(host="127.0.0.1", port=port)
 

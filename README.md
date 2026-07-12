@@ -16,7 +16,7 @@ This bot parses pasted order messages into structured records and stores them in
 2. Bot parses it and shows a summary card with Confirm/Cancel buttons
 3. Type the price directly — saves the order and price in one step
 4. Alternatively, tap Confirm first to save, then type the price separately
-5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm). First edit asks for the PIN once.
+5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm).
 6. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
 7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
 
@@ -33,7 +33,6 @@ cp .env.example .env
 | `TELEGRAM_BOT_TOKEN` | Yes | From BotFather |
 | `RIDE_DB_PATH` | No | SQLite path (default: `orders.db`; use an absolute path outside cloud-synced dirs) |
 | `RIDE_WEB_PORT` | No | Dashboard port (default: `3200`) |
-| `RIDE_WEB_PIN` | No | PIN for dashboard edit/create/cancel. Unset = read-only dashboard |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs. Empty = allow all |
 
 Tests: `pytest tests/`

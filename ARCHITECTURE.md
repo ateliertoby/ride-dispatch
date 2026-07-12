@@ -4,7 +4,7 @@
 
 **Telegram bot for parsing, web for everything else.** Telegram is where WeChat order messages get pasted, so parsing lives there — message in, confirm button, saved. Everything after the save (price, fees, time corrections, cancellation) happens on the dashboard: tapping a card opens an edit sheet instead of deep-linking back into Telegram, which used to cost an app switch per correction. The dashboard also creates quick orders directly (Didi/Uber/foodpanda — time, money, done) so a missed order can be backfilled onto any date being viewed, which the bot's today/yesterday inference can't do. `/didi` and `/uber` remain in the bot as an alternative path for just-finished trips.
 
-**Write ops behind a PIN, reads behind Cloudflare Access.** The dashboard is exposed via a named Cloudflare Tunnel with Cloudflare Access (email OTP, 1-month session) as perimeter auth — reads are no longer anonymous-open, but require no in-app action beyond passing Access. Mutation endpoints have a second layer: a single PIN (`RIDE_WEB_PIN` in `.env`; unset = read-only dashboard) exchanges for a stateless HMAC token on first write — stored in localStorage, survives server restarts, nothing persisted server-side. Failed attempts are rate-limited. Defense in depth: Access guards the perimeter, PIN guards writes.
+**All auth at the perimeter via Cloudflare Access.** The dashboard is exposed via a named Cloudflare Tunnel with Cloudflare Access (email OTP, 1-month session) as the single auth layer — both reads and writes require passing Access, with no in-app auth. This is a single-user system; anyone who passes Cloudflare Access is the operator and can read, edit, create, and cancel orders. The Flask app itself binds to localhost and trusts that the tunnel enforces identity.
 
 **Manual price and cost entry.** The dispatch platform gives a flat price per order. Costs (tunnel fees, parking) are variable but predictable. Encoding cost logic upfront would slow down shipping. Manual entry is fast enough for 3-7 orders/day, and rules can be added incrementally.
 
@@ -28,7 +28,6 @@ WeChat order message
   → dashboard.html renders
 
 Dashboard edit / quick order (Didi, Uber, foodpanda)
-  → PIN → /api/auth → HMAC token (once, cached in localStorage)
   → PATCH /api/orders/<id> (price, fees, time, cancel)
     or POST /api/orders (type + date + time + money)
   → db.py writes to SQLite
@@ -48,5 +47,5 @@ HKIA endpoint
 - `ride_dispatch/bot.py` — Telegram bot handlers. Confirm/cancel flow, price input, cost tracking, banner fee detection.
 - `ride_dispatch/db.py` — SQLite schema and queries. Auto-migrates columns on startup.
 - `ride_dispatch/flight.py` — HKIA flight fetcher and matcher. Date-aware flight matching, poll tier calculation, tracking window logic.
-- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + PIN-gated write endpoints (quick order create, field patch, cancel).
+- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (quick order create, field patch, cancel).
 - `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step, dark-first auto theme. Shows flight phase, landing time, and computed 用車時間. Bottom-sheet editing, numpad input, platform filter chips (接送/滴滴/Uber/foodpanda).

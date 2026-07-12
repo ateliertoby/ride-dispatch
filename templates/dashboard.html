@@ -326,23 +326,11 @@ function toast(msg) {
 
 // ---- api ----
 async function apiWrite(method, path, body) {
-  const doFetch = () => fetch(path, {
+  const res = await fetch(path, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + (localStorage.getItem('ride_token') || ''),
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!localStorage.getItem('ride_token')) {
-    await requirePin();
-  }
-  let res = await doFetch();
-  if (res.status === 401) {
-    localStorage.removeItem('ride_token');
-    await requirePin();
-    res = await doFetch();
-  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || ('HTTP ' + res.status));
@@ -499,7 +487,6 @@ function openSheet(viewFn) {
 }
 function pushView(viewFn) { sheetStack.push(viewFn); renderSheet(); }
 function popView() {
-  rejectPendingPin();
   if (sheetStack.length > 1) { sheetStack.pop(); renderSheet(); }
   else closeSheet();
 }
@@ -509,7 +496,6 @@ function renderSheet() {
   sheetStack[sheetStack.length - 1](sheet);
 }
 function closeSheet() {
-  rejectPendingPin();
   sheetStack = [];
   sheetOrderId = null;
   addState = null;
@@ -616,7 +602,7 @@ async function patchOrder(body) {
   try {
     await apiWrite('PATCH', '/api/orders/' + encodeURIComponent(sheetOrderId), body);
   } catch (e) {
-    if (e.message !== 'PIN_CANCELLED') toast(e.message);
+    toast(e.message);
     return false;
   }
   await load();
@@ -645,11 +631,11 @@ function armCancel() {
   const id = sheetOrderId;
   apiWrite('PATCH', '/api/orders/' + encodeURIComponent(id), { status: 'cancelled' })
     .then(() => { closeSheet(); toast('已取消 #' + shortId(id)); load(); })
-    .catch(e => { if (e.message !== 'PIN_CANCELLED') toast(e.message); });
+    .catch(e => toast(e.message));
 }
 
 // ---- numpad ----
-// mode: 'money' (digits + dot) | 'time' (HHMM) | 'pin' (digits, masked)
+// mode: 'money' (digits + dot) | 'time' (HHMM)
 // onConfirm may be async; returning false means "stay here and reset for retry"
 function numpadView({ title, hint, mode, onConfirm, quick }) {
   let input = '';
@@ -675,21 +661,16 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
 
     function valid() {
       if (mode === 'money') return input !== '' && input !== '.' && !isNaN(parseFloat(input));
-      if (mode === 'time') {
-        if (input.length !== 4) return false;
-        return +input.slice(0, 2) <= 23 && +input.slice(2) <= 59;
-      }
-      return input.length >= 4;  // pin
+      if (input.length !== 4) return false;
+      return +input.slice(0, 2) <= 23 && +input.slice(2) <= 59;
     }
     function paint() {
       if (mode === 'money') {
         display.innerHTML = input ? '$' + esc(input) : '<span class="dim">$0</span>';
-      } else if (mode === 'time') {
+      } else {
         const dim = '<span class="dim">&#8211;</span>';
         const digit = i => i < input.length ? esc(input[i]) : dim;
         display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
-      } else {
-        display.innerHTML = input ? '&#8226;'.repeat(input.length) : '<span class="dim">PIN</span>';
       }
       ok.disabled = !valid();
     }
@@ -700,7 +681,6 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
       else if (k === '.') { if (!input.includes('.')) input += input ? '.' : '0.'; }
       else {
         if (mode === 'time' && input.length >= 4) return;
-        if (mode === 'pin' && input.length >= 8) return;
         if (mode === 'money' && input.length >= 7) return;
         input += k;
       }
@@ -710,8 +690,7 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
       if (!valid()) return;
       ok.disabled = true;
       const value = mode === 'money' ? parseFloat(input)
-        : mode === 'time' ? input.slice(0, 2) + ':' + input.slice(2)
-        : input;
+        : input.slice(0, 2) + ':' + input.slice(2);
       const result = await onConfirm(value);
       if (result === false) {
         input = '';
@@ -813,50 +792,10 @@ function addConfirmView(sheet) {
       toast(meta.label + ' 已入單');
       load();
     } catch (e) {
-      if (e.message !== 'PIN_CANCELLED') toast(e.message);
+      toast(e.message);
       this.disabled = false;
       this.textContent = '儲存';
     }
-  });
-}
-
-// ---- pin ----
-let pinReject = null;
-function rejectPendingPin() {
-  if (pinReject) {
-    const r = pinReject;
-    pinReject = null;
-    r(new Error('PIN_CANCELLED'));
-  }
-}
-function requirePin() {
-  return new Promise((resolve, reject) => {
-    pinReject = reject;
-    pushView(numpadView({
-      title: '輸入 PIN', hint: '解鎖修改功能', mode: 'pin',
-      onConfirm: async pin => {
-        try {
-          const res = await fetch('/api/auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pin }),
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            toast(data.error === 'wrong pin' ? 'PIN 唔啱' : (data.error || 'auth 失敗'));
-            return false;  // numpad resets for retry
-          }
-          localStorage.setItem('ride_token', (await res.json()).token);
-          pinReject = null;
-          popView();
-          resolve();
-          return true;
-        } catch (e) {
-          toast('連唔到 server');
-          return false;
-        }
-      },
-    }));
   });
 }
 
