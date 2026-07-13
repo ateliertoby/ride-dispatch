@@ -19,6 +19,7 @@ This bot parses pasted order messages into structured records and stores them in
 5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm).
 6. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
 7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
+8. On landing, pickup orders with 舉牌 service automatically generate a whiteboard sign photo (via GPT-Image-2) and push it to chat. `/board` regenerates manually for any pickup
 
 ## Run
 
@@ -34,6 +35,7 @@ cp .env.example .env
 | `RIDE_DB_PATH` | No | SQLite path (default: `orders.db`; use an absolute path outside cloud-synced dirs) |
 | `RIDE_WEB_PORT` | No | Dashboard port (default: `3200`) |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs. Empty = allow all |
+| `FAL_KEY` | No | fal.ai API key for whiteboard sign photo generation. Unset = feature off |
 
 Tests: `pytest tests/`
 

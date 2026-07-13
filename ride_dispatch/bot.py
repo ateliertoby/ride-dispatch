@@ -16,6 +16,7 @@ from .parser import parse_order, parse_feizhu, parse_tongcheng
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval
 from .phone import format_phone_e164
+from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, is_configured as whiteboard_configured, WhiteboardError
 
 load_dotenv()
 
@@ -240,6 +241,22 @@ async def handle_callback(update: Update, context):
             await _save_uber(query.message, chat_id, 0)
         await query.answer()
 
+    elif query.data.startswith("board:"):
+        order_id = query.data.split(":", 1)[1]
+        order = get_order_by_id(DB_PATH, order_id)
+        if not order:
+            await query.answer("搵唔到呢張單")
+            return
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer()
+        await query.message.reply_text("生成中…")
+        context.application.create_task(
+            _send_whiteboard(
+                context.bot, query.message.chat_id, order_id, order,
+                fail_text=f"舉牌相生成失敗 #{order_id[-4:]}，手動準備。",
+            ),
+        )
+
     elif query.data.startswith("waive:"):
         _, cost_type, order_id = query.data.split(":", 2)
         update_cost(DB_PATH, order_id, cost_type, 0)
@@ -392,6 +409,30 @@ async def handle_cancel(update: Update, context):
         label = f"{t} {o['passenger_name']}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"cancel:{o['order_id']}")])
     await msg.reply_text("撳邊張要取消：", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def handle_board(update: Update, context):
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    if not whiteboard_configured():
+        await msg.reply_text("舉牌相功能需要設定 FAL_KEY。")
+        return
+    from datetime import date
+    orders = get_orders_by_date(DB_PATH, date.today().isoformat())
+    pickups = [o for o in orders if o.get("service_type") == "接机"]
+    if not pickups:
+        await msg.reply_text("今日冇接機單。")
+        return
+    buttons = []
+    for o in pickups:
+        t = o["scheduled_time"].split(" ")[1][:5] if " " in o["scheduled_time"] else ""
+        flight = o.get("flight_number") or ""
+        label = f"{t} {o['passenger_name']}"
+        if flight:
+            label += f" {flight}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"board:{o['order_id']}")])
+    await msg.reply_text("揀邊張生成舉牌相：", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def handle_start(update: Update, context):
@@ -609,7 +650,7 @@ async def _poll_and_notify(context) -> int:
             continue
         logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
         try:
-            await _notify_status_change(bot, chat_id, order_id, info, old, new)
+            await _notify_status_change(bot, chat_id, order_id, info, old, new, context.application)
         except Exception:
             # One malformed order must not eat the other orders' pushes.
             logger.exception("Notify failed for order %s", order_id[-4:])
@@ -656,7 +697,26 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
     return lines
 
 
-async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None):
+async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
+                           fail_text: str | None = None):
+    """Fire-and-forget: generate whiteboard image and send to chat."""
+    name = order_data.get("passenger_name", "")
+    flight = order_data.get("flight_number", "")
+    if fail_text is None:
+        fail_text = f"舉牌相自動生成失敗 #{order_id[-4:]}，用 /board 重試。"
+    try:
+        img_bytes = await generate_whiteboard(name, flight)
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=img_bytes,
+            caption=f"舉牌 | {name} {flight}",
+        )
+    except Exception:
+        logging.getLogger("whiteboard").exception("Whiteboard gen failed for %s", order_id[-4:])
+        await bot.send_message(chat_id=chat_id, text=fail_text)
+
+
+async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None, application=None):
     order_data = get_order_by_id(DB_PATH, order_id)
     should_notify_landed = (new == "landed" and old != "landed") or (new == "gate" and old not in ("landed", "gate"))
     if should_notify_landed:
@@ -668,6 +728,12 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
         if order_data:
             msg += _order_lines(order_data, eta)
         await bot.send_message(chat_id=chat_id, text=msg)
+        # Auto whiteboard on landing
+        if order_data and application and qualifies_for_auto(order_data):
+            mark_reminder_sent(DB_PATH, order_id, "whiteboard")
+            application.create_task(
+                _send_whiteboard(bot, chat_id, order_id, order_data),
+            )
     if new == "gate" and old != "gate":
         gate_time = info["gate"] or "?"
         hall = info.get("hall")
@@ -690,6 +756,7 @@ async def _set_commands(app):
         BotCommand("didi", "滴滴快速入單"),
         BotCommand("uber", "Uber 快速入單"),
         BotCommand("cancel", "取消訂單"),
+        BotCommand("board", "生成舉牌相"),
     ])
 
 
@@ -727,6 +794,7 @@ def main():
     app.add_handler(CommandHandler("didi", handle_didi))
     app.add_handler(CommandHandler("uber", handle_uber))
     app.add_handler(CommandHandler("cancel", handle_cancel))
+    app.add_handler(CommandHandler("board", handle_board))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)
