@@ -13,8 +13,9 @@ from telegram.ext import (
     filters,
 )
 from .parser import parse_order, parse_feizhu, parse_tongcheng
-from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info
-from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time
+from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
+from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval
+from .phone import format_phone_e164
 
 load_dotenv()
 
@@ -489,6 +490,59 @@ def _orders_in(dates: list[str]) -> list[dict]:
     return orders
 
 
+async def _check_svc_reminders(bot, chat_id: int, now: datetime):
+    dates = get_tracking_dates(DB_PATH, now=now)
+    if not dates:
+        return
+    for order in _orders_in(dates):
+        try:
+            svc_hhmm = svc_reminder_due(order, now)
+            if not svc_hhmm:
+                continue
+            # No arrival_hhmm: the headline already carries the 用車 time.
+            msg = f"用車時間到 {svc_hhmm}"
+            msg += _order_lines(order)
+            await bot.send_message(chat_id=chat_id, text=msg)
+            mark_reminder_sent(DB_PATH, order['order_id'], 'svc')
+            logger.info("svc reminder sent for %s", order['order_id'][-4:])
+        except Exception:
+            logger.exception("svc reminder failed for %s", order.get('order_id', '?')[-4:])
+
+
+async def _check_departure_reminders(bot, chat_id: int, now: datetime):
+    for order in get_departure_reminders(DB_PATH, now):
+        try:
+            tags = departure_milestones_due(order, now)
+            if not tags:
+                continue
+            sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+            t = sched.strftime('%H:%M')
+            svc_type = order.get('service_type')
+            if svc_type == '送机':
+                headline = f"送機提醒 {t} 出發"
+            else:
+                headline = f"接送提醒 {t} 出發"
+            # A late-entered order can have both milestones due at once —
+            # one push, mark them all, no duplicate messages.
+            msg = headline + _order_lines(order)
+            await bot.send_message(chat_id=chat_id, text=msg)
+            for tag in tags:
+                mark_reminder_sent(DB_PATH, order['order_id'], tag)
+            logger.info("departure reminder %s sent for %s", "+".join(tags), order['order_id'][-4:])
+        except Exception:
+            logger.exception("departure reminder failed for %s", order.get('order_id', '?')[-4:])
+
+
+def _clamp_for_reminders(interval: int, now: datetime) -> int:
+    all_orders: list[dict] = []
+    dates = get_tracking_dates(DB_PATH, now=now)
+    if dates:
+        all_orders.extend(_orders_in(dates))
+    all_orders.extend(get_departure_reminders(DB_PATH, now))
+    pending = pending_reminder_times(all_orders, now)
+    return clamp_interval(interval, pending, now)
+
+
 async def _poll_and_notify(context) -> int:
     """One polling pass; returns seconds until the next pass is due."""
     bot = context.application.bot
@@ -497,15 +551,28 @@ async def _poll_and_notify(context) -> int:
         _log_state("No NOTIFY_CHAT_ID/ALLOWED_CHAT_IDS configured, not polling")
         return 3600
 
+    now = datetime.now()
+
+    # Reminders run every tick, before flight-tracking early returns
+    try:
+        await _check_svc_reminders(bot, chat_id, now)
+    except Exception:
+        logger.exception("svc reminder check error")
+    try:
+        await _check_departure_reminders(bot, chat_id, now)
+    except Exception:
+        logger.exception("departure reminder check error")
+
+    # Flight tracking
     dates = get_tracking_dates(DB_PATH)
     if not dates:
         _log_state("idle: no orders in tracking window")
-        return 60
+        return _clamp_for_reminders(60, now)
 
     enriched = _orders_in(dates)
     if calc_next_interval(enriched) is None:
         _log_state("idle: all tracking windows closed")
-        return 60
+        return _clamp_for_reminders(60, now)
     _log_state(None)
 
     old_statuses = {
@@ -553,24 +620,39 @@ async def _poll_and_notify(context) -> int:
     interval = calc_next_interval(_orders_in(dates))
     if interval is None:
         _log_state("idle: all tracking windows closed")
-        return 60
+        return _clamp_for_reminders(60, now)
     logger.info("Next poll in %ds", interval)
-    return interval
+    return _clamp_for_reminders(interval, now)
 
 
-def _order_lines(order_data: dict, arrival_hhmm: str | None) -> str:
-    lines = f"\n航班: {order_data['flight_number']}"
+def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
+    lines = ""
+    flight = order_data.get("flight_number")
+    if flight:
+        lines += f"\n航班: {flight}"
     if order_data.get("passenger_name"):
         lines += f"\n乘客: {order_data['passenger_name']}"
-    phone = order_data.get("passenger_phone") or order_data.get("overseas_phone")
-    if phone:
-        lines += f"\n電話: {phone}"
-    if order_data.get("passenger_exit_minutes"):
-        svc = svc_time(arrival_hhmm, order_data["passenger_exit_minutes"])
-        if svc:
-            lines += f"\n用車: {svc}"
-    if "举牌" in (order_data.get("additional_services") or ""):
-        lines += f"\n舉牌: {order_data.get('passenger_name', '')}"
+    p_phone = order_data.get("passenger_phone")
+    o_phone = order_data.get("overseas_phone")
+    if p_phone:
+        lines += f"\n電話: {format_phone_e164(p_phone)}"
+    if o_phone:
+        lines += f"\n境外: {format_phone_e164(o_phone)}"
+    svc_type = order_data.get("service_type")
+    if svc_type == "接机":
+        if order_data.get("passenger_exit_minutes") and arrival_hhmm:
+            svc = svc_time(arrival_hhmm, order_data["passenger_exit_minutes"])
+            if svc:
+                lines += f"\n用車: {svc}"
+        if "举牌" in (order_data.get("additional_services") or ""):
+            lines += f"\n舉牌: {order_data.get('passenger_name', '')}"
+        if order_data.get("dropoff"):
+            lines += f"\n目的地: {order_data['dropoff']}"
+    else:
+        if order_data.get("pickup"):
+            lines += f"\n上車: {order_data['pickup']}"
+        if order_data.get("dropoff"):
+            lines += f"\n目的地: {order_data['dropoff']}"
     return lines
 
 

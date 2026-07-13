@@ -172,3 +172,87 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
     if min_seconds == float("inf"):
         return FALLBACK_INTERVAL
     return max(60, int(min_seconds / 2))
+
+
+# ---- Reminder pure logic (no IO) ----
+
+_DEPARTURE_TYPES = ('送机', '单程接送')
+
+
+def svc_reminder_due(order: dict, now: datetime) -> str | None:
+    """Return svc HH:MM if the 用車時間 reminder should fire, else None."""
+    if order.get('service_type') != '接机':
+        return None
+    if order.get('flight_status') not in ('landed', 'gate'):
+        return None
+    sent = set(filter(None, (order.get('reminders_sent') or '').split(',')))
+    if 'svc' in sent:
+        return None
+    eta = order.get('flight_eta')
+    exit_min = order.get('passenger_exit_minutes')
+    if not eta or not exit_min:
+        return None
+    svc_hhmm = svc_time(eta, exit_min)
+    if not svc_hhmm:
+        return None
+    sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+    svc_dt = _attach_date(svc_hhmm, sched)
+    if now < svc_dt:
+        return None
+    if (now - svc_dt).total_seconds() >= 7200:
+        return None  # staleness guard
+    return svc_hhmm
+
+
+def departure_milestones_due(order: dict, now: datetime) -> list[str]:
+    """Return list of milestone tags (dep30, dep10) that should fire now."""
+    if order.get('service_type') not in _DEPARTURE_TYPES:
+        return []
+    sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+    sent = set(filter(None, (order.get('reminders_sent') or '').split(',')))
+    result = []
+    for tag, minutes in [('dep30', 30), ('dep10', 10)]:
+        if tag in sent:
+            continue
+        if now >= sched - timedelta(minutes=minutes) and now < sched:
+            result.append(tag)
+    return result
+
+
+def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
+    """Return future datetimes when pending reminders will come due."""
+    times: list[datetime] = []
+    for o in orders:
+        sent = set(filter(None, (o.get('reminders_sent') or '').split(',')))
+        # svc reminder
+        if o.get('service_type') == '接机' and o.get('flight_status') in ('landed', 'gate'):
+            if 'svc' not in sent:
+                eta = o.get('flight_eta')
+                exit_min = o.get('passenger_exit_minutes')
+                if eta and exit_min:
+                    svc_hhmm = svc_time(eta, exit_min)
+                    if svc_hhmm:
+                        sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+                        svc_dt = _attach_date(svc_hhmm, sched)
+                        if svc_dt > now:
+                            times.append(svc_dt)
+        # departure milestones
+        if o.get('service_type') in _DEPARTURE_TYPES:
+            sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+            for tag, minutes in [('dep30', 30), ('dep10', 10)]:
+                if tag not in sent:
+                    due = sched - timedelta(minutes=minutes)
+                    if due > now:
+                        times.append(due)
+    return times
+
+
+def clamp_interval(interval: int, pending_times: list[datetime], now: datetime) -> int:
+    """Clamp poll interval so the next tick fires before the earliest pending reminder."""
+    if not pending_times:
+        return interval
+    earliest = min(pending_times)
+    seconds_until = (earliest - now).total_seconds()
+    if seconds_until <= 0:
+        return interval  # due now, fires this tick
+    return max(30, min(interval, int(seconds_until)))

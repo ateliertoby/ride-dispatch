@@ -57,6 +57,7 @@ def init_db(db_path: str):
             "flight_status TEXT",
             "flight_hall TEXT",
             "source TEXT DEFAULT ''",
+            "reminders_sent TEXT DEFAULT ''",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -201,6 +202,38 @@ def get_pickup_flights(db_path: str, date_str: str) -> list[dict]:
             "WHERE scheduled_time LIKE ? AND service_type = '接机' "
             "AND flight_number != '' AND coalesce(status,'active') = 'active'",
             (f"{date_str}%",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_reminder_sent(db_path: str, order_id: str, tag: str):
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT reminders_sent FROM orders WHERE order_id = ?", (order_id,)
+        ).fetchone()
+        if not row:
+            return
+        current = row["reminders_sent"] or ""
+        tags = set(filter(None, current.split(",")))
+        tags.add(tag)
+        conn.execute(
+            "UPDATE orders SET reminders_sent = ? WHERE order_id = ?",
+            (",".join(sorted(tags)), order_id),
+        )
+        conn.commit()
+
+
+def get_departure_reminders(db_path: str, now: datetime) -> list[dict]:
+    low = now.strftime("%Y-%m-%d %H:%M:%S")
+    high = (now + timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM orders "
+            "WHERE service_type IN ('送机', '单程接送') "
+            "AND coalesce(status,'active') = 'active' "
+            "AND scheduled_time >= ? AND scheduled_time <= ? "
+            "ORDER BY scheduled_time",
+            (low, high),
         ).fetchall()
         return [dict(r) for r in rows]
 
