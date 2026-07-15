@@ -2,6 +2,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
+from .ingest import banner_fee
 
 COARSE_WINDOW_HOURS = 24
 
@@ -79,7 +80,7 @@ _INSERT_SQL = """
 
 
 def save_order(db_path: str, order: Order, telegram_msg_id: int, parking: float = 0.0, source: str = "") -> int:
-    banner = 40.0 if "举牌" in (order.additional_services or "") else 0.0
+    banner = banner_fee(order.additional_services)
     with _conn(db_path) as conn:
         cur = conn.execute(
             _INSERT_SQL,
@@ -167,6 +168,12 @@ def get_order_by_id(db_path: str, order_id: str) -> dict | None:
             "SELECT * FROM orders WHERE order_id = ? AND coalesce(status,'active') = 'active'", (order_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+def order_id_exists(db_path: str, order_id: str) -> bool:
+    with _conn(db_path) as conn:
+        row = conn.execute("SELECT 1 FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+        return row is not None
 
 
 def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:

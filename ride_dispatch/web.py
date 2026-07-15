@@ -1,8 +1,10 @@
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import time
+from dataclasses import asdict
 from datetime import date, datetime
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
@@ -11,9 +13,13 @@ from .db import (
     count_active_orders,
     get_orders_by_date,
     get_order_by_id,
+    order_id_exists,
+    save_order,
     save_quick_order,
     update_order_fields,
+    update_price,
 )
+from .ingest import parse_any, parking_fee, banner_fee
 
 load_dotenv()
 
@@ -58,10 +64,30 @@ def _parse_money(value, field: str) -> tuple[float | None, tuple | None]:
     return amount, None
 
 
+@app.post("/api/orders/parse")
+def api_parse_order():
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("text", "")).strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    order, source = parse_any(text)
+    if not order.order_id:
+        return jsonify({"error": "認唔到格式"}), 400
+    return jsonify({
+        "order": asdict(order),
+        "source": source,
+        "parking_fee": parking_fee(order, source),
+        "banner_fee": banner_fee(order.additional_services),
+        "duplicate": order_id_exists(DB_PATH, order.order_id),
+    })
+
+
 @app.post("/api/orders")
 def api_create_order():
     body = request.get_json(silent=True) or {}
     qtype = body.get("type")
+    if qtype == "paste":
+        return _create_paste_order(body)
     if qtype not in QUICK_TYPES:
         return jsonify({"error": f"type must be one of {sorted(QUICK_TYPES)}"}), 400
     date_str = str(body.get("date", ""))
@@ -84,6 +110,55 @@ def api_create_order():
     order_id = f"{qtype}_{date_str.replace('-', '')}{time_str.replace(':', '')}_{secrets.token_hex(2)}"
     save_quick_order(DB_PATH, order_id, service_type, scheduled, price, tunnel, source=source)
     return jsonify({"order_id": order_id}), 201
+
+
+def _create_paste_order(body):
+    text = str(body.get("text", "")).strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    order, source = parse_any(text)
+    if not order.order_id:
+        return jsonify({"error": "認唔到格式"}), 400
+    if not order.scheduled_time or " " not in order.scheduled_time:
+        return jsonify({"error": "單冇用車時間"}), 400
+    price = None
+    if body.get("price") is not None:
+        price, perr = _parse_money(body.get("price"), "price")
+        if perr:
+            return perr
+    try:
+        save_order(DB_PATH, order, telegram_msg_id=None,
+                   parking=parking_fee(order, source), source=source)
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "訂單已存在"}), 409
+    if price is not None:
+        update_price(DB_PATH, order.order_id, price)
+    _kick_bot()
+    return jsonify({"order_id": order.order_id,
+                    "date": order.scheduled_time.split(" ")[0]}), 201
+
+
+def _sock_path():
+    # Resolved per call, not at import: tests monkeypatch DB_PATH, and the
+    # socket path must follow it — a path frozen at import would point at
+    # the real bot's socket during test runs.
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "bot.sock")
+
+
+def _kick_bot():
+    """Ask the bot to poll now (flight tracking / reminders).
+
+    Best-effort: if the bot is down this is a silent no-op — its first
+    poll on startup covers whatever this kick would have triggered.
+    """
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect(_sock_path())
+        s.sendall(b"kick\n")
+        s.close()
+    except OSError:
+        pass
 
 
 @app.patch("/api/orders/<order_id>")

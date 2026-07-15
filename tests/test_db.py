@@ -182,3 +182,14 @@ def test_flight_columns_null_by_default(db_path):
     assert rows[0]["flight_eta"] is None
     assert rows[0]["flight_gate"] is None
     assert rows[0]["flight_status"] is None
+
+
+def test_order_id_exists(tmp_path):
+    from ride_dispatch.db import init_db, save_quick_order, order_id_exists, update_order_fields
+    path = str(tmp_path / "t.db")
+    init_db(path)
+    assert order_id_exists(path, "Q9") is False
+    save_quick_order(path, "Q9", "滴滴", "2026-07-01 10:00:00", 100.0, 0.0)
+    assert order_id_exists(path, "Q9") is True
+    update_order_fields(path, "Q9", {"status": "cancelled"})
+    assert order_id_exists(path, "Q9") is True  # cancelled orders still hold the order_id (UNIQUE column)

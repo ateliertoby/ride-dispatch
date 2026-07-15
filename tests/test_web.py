@@ -130,3 +130,98 @@ def test_patch_rejects_bad_input(client):
 def test_patch_unknown_order_404(client):
     assert client.patch("/api/orders/NOPE", json={"price": 1}).status_code == 404
     assert client.patch("/api/orders/NOPE", json={"time": "10:00"}).status_code == 404
+
+
+PASTE_MSG = """服务类型: 接机
+接单车型: 经济5座
+乘客姓名: WONG/SIUMING
+用车时间: 2026-07-22 12:35:00
+航班号: CX477
+上车点: 香港国际机场1号航站楼
+下车点: 九龙塘又一城
+订单号: 1128000000000099
+附加服务: 举牌服务
+乘客出场时长: 30
+乘客电话: 86 13800000003"""
+
+
+# ---- parse preview ----
+
+def test_parse_preview(client):
+    res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["source"] == "携程"
+    assert data["order"]["order_id"] == "1128000000000099"
+    assert data["order"]["service_type"] == "接机"
+    assert data["parking_fee"] == 32.0
+    assert data["banner_fee"] == 40.0
+    assert data["duplicate"] is False
+
+
+def test_parse_preview_duplicate_flag(client):
+    seed_order(order_id="1128000000000099")
+    res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
+    assert res.get_json()["duplicate"] is True
+
+
+def test_parse_preview_rejects_garbage(client):
+    assert client.post("/api/orders/parse", json={"text": "唔係單"}).status_code == 400
+    assert client.post("/api/orders/parse", json={}).status_code == 400
+
+
+TC_MSG = """订单号：TC9876543-同程用车
+车型：舒适5座
+用车时间：2026-07-21 09:00:00
+出发地：尖沙咀九龙酒店
+目的地：香港国际机场T1
+乘客姓名CHAN TAI MAN
+乘客手机号852-62222222
+航班号：UO123"""
+
+NO_TIME_MSG = """订单号：TC0000001-同程用车
+出发地：尖沙咀九龙酒店
+目的地：香港国际机场T1
+乘客姓名CHAN TAI MAN"""
+
+
+# ---- paste save ----
+
+def test_paste_save_with_price(client):
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    assert res.status_code == 201
+    data = res.get_json()
+    assert data["order_id"] == "1128000000000099"
+    assert data["date"] == "2026-07-22"
+    row = get_order_by_id(web.DB_PATH, "1128000000000099")
+    assert row["source"] == "携程"
+    assert row["price"] == 500
+    assert row["parking_fee"] == 32.0
+    assert row["banner_fee"] == 40.0
+    assert row["telegram_msg_id"] is None
+
+
+def test_paste_save_without_price(client):
+    res = client.post("/api/orders", json={"type": "paste", "text": TC_MSG})
+    assert res.status_code == 201
+    row = get_order_by_id(web.DB_PATH, "TC9876543")
+    assert row["price"] is None
+    assert row["source"] == "同程"
+    assert row["parking_fee"] == 0
+
+
+def test_paste_duplicate_409(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    assert res.status_code == 409
+
+
+def test_paste_rejects_bad_input(client):
+    assert client.post("/api/orders", json={"type": "paste", "text": "唔係單"}).status_code == 400
+    assert client.post("/api/orders", json={"type": "paste"}).status_code == 400
+    assert client.post("/api/orders", json={"type": "paste", "text": NO_TIME_MSG}).status_code == 400
+    assert client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": -1}).status_code == 400
+
+
+def test_kick_bot_noop_when_socket_missing(client):
+    web._kick_bot()  # no bot.sock next to the tmp DB; must be a silent no-op

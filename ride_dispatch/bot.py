@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sqlite3
@@ -12,7 +13,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from .parser import parse_order, parse_feizhu, parse_tongcheng
+from .ingest import parse_any, parking_fee, banner_fee
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval
 from .phone import format_phone_e164
@@ -93,22 +94,7 @@ async def handle_message(update: Update, context):
         await _handle_uber_step(msg, chat_id)
         return
 
-    order = parse_order(msg.text)
-    source = "携程"
-    if not (order.order_id and order.pickup):
-        order = parse_feizhu(msg.text)
-        source = "飛豬"
-        for line in msg.text.strip().splitlines():
-            line_s = line.strip()
-            if line_s.startswith("订单编号") and ("：" in line_s or ":" in line_s):
-                sep = "：" if "：" in line_s else ":"
-                oid_full = line_s.partition(sep)[2].strip()
-                if "-" in oid_full:
-                    source = oid_full.split("-", 1)[1]
-                break
-    if not order.order_id:
-        order = parse_tongcheng(msg.text)
-        source = "同程"
+    order, source = parse_any(msg.text)
     if not order.order_id:
         if chat_id in awaiting_cost:
             text = msg.text.strip()
@@ -125,16 +111,16 @@ async def handle_message(update: Update, context):
             text = msg.text.strip()
             try:
                 price = float(text)
-                order_id, banner_fee = awaiting_price.pop(chat_id)
+                order_id, banner = awaiting_price.pop(chat_id)
                 update_price(DB_PATH, order_id, price)
-                if banner_fee:
-                    await msg.reply_text(f"已更新價錢: ${price:g}（+舉牌${banner_fee:g}）")
+                if banner:
+                    await msg.reply_text(f"已更新價錢: ${price:g}（+舉牌${banner:g}）")
                 else:
                     await msg.reply_text(f"已更新價錢: ${price:g}")
             except ValueError:
                 pass
             return
-        # 直接入價捷徑：pending card + 數字 = 確認 + 入價一步過
+        # Shortcut: a bare number while a card is pending = confirm + price in one step
         text = msg.text.strip()
         try:
             price = float(text)
@@ -146,15 +132,14 @@ async def handle_message(update: Update, context):
         card_msg_id, entry = hit
         pending.pop(card_msg_id)
         pending_order, source, _ = entry
-        parking = 32.0 if source == "携程" and pending_order.service_type == "接机" else 0.0
-        banner_fee = 40.0 if "举牌" in (pending_order.additional_services or "") else 0.0
+        parking = parking_fee(pending_order, source)
+        banner = banner_fee(pending_order.additional_services)
         try:
             save_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
             update_price(DB_PATH, pending_order.order_id, price)
-            if pending_order.service_type == "接机" and pending_order.flight_number:
-                _kick_poll(context)
+            _kick_poll(context)
             reply = f"已入單 #{pending_order.order_id[-4:]}: ${price:g}"
-            if banner_fee:
+            if banner:
                 reply += "（+舉牌$40）"
             await msg.reply_text(reply)
         except sqlite3.IntegrityError:
@@ -191,16 +176,15 @@ async def handle_callback(update: Update, context):
             return
         order, source, _ = entry
         try:
-            parking = 32.0 if source == "携程" and order.service_type == "接机" else 0.0
-            banner_fee = 40.0 if "举牌" in (order.additional_services or "") else 0.0
+            parking = parking_fee(order, source)
+            banner = banner_fee(order.additional_services)
             prompt = f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
-            if banner_fee:
-                prompt += f"（會自動加${banner_fee:g}舉牌費）"
+            if banner:
+                prompt += f"（會自動加${banner:g}舉牌費）"
             sent = await query.message.reply_text(prompt)
             save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
-            if order.service_type == "接机" and order.flight_number:
-                _kick_poll(context)
-            awaiting_price[query.message.chat_id] = (order.order_id, banner_fee)
+            _kick_poll(context)
+            awaiting_price[query.message.chat_id] = (order.order_id, banner)
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("已確認")
         except sqlite3.IntegrityError:
@@ -491,6 +475,7 @@ _next_poll_at: datetime | None = None
 _poll_running = False
 _last_state: str | None = None
 _warned_statuses: set[tuple[str, str]] = set()
+_kick_server = None
 
 
 def _log_state(state: str | None):
@@ -760,8 +745,49 @@ async def _set_commands(app):
     ])
 
 
+def _sock_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "bot.sock")
+
+
+async def _start_kick_server(app):
+    """Wake the poller the moment another process inserts an order.
+
+    Without this, an order written directly to the DB (web paste) sits
+    unnoticed until _next_poll_at expires — up to the full poll interval.
+    """
+    global _kick_server
+    path = _sock_path()
+    try:
+        os.unlink(path)  # stale socket left behind by a crash
+    except FileNotFoundError:
+        pass
+
+    async def handle(reader, writer):
+        global _next_poll_at
+        try:
+            line = await reader.readline()
+            if line.strip() == b"kick":
+                _next_poll_at = None
+                app.job_queue.run_once(_poll_tick, 0, job_kwargs=_JOB_KWARGS)
+                logger.info("kick received via socket")
+        finally:
+            writer.close()
+
+    _kick_server = await asyncio.start_unix_server(handle, path=path)
+
+
+async def _post_shutdown(app):
+    if _kick_server:
+        _kick_server.close()
+    try:
+        os.unlink(_sock_path())
+    except FileNotFoundError:
+        pass
+
+
 async def _post_init(app):
     await _set_commands(app)
+    await _start_kick_server(app)
     app.job_queue.run_repeating(_poll_tick, interval=60, first=5, job_kwargs=_JOB_KWARGS)
 
 
@@ -799,6 +825,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)
     app.post_init = _post_init
+    app.post_shutdown = _post_shutdown
     app.run_polling()
 
 
