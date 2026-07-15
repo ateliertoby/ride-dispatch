@@ -119,6 +119,24 @@
   .card:active { background: var(--surface-press); }
   .card.flash { animation: flash 1.2s ease-out; }
   @keyframes flash { 0% { outline: 2px solid var(--green); outline-offset: 2px; } 100% { outline: 2px solid transparent; outline-offset: 2px; } }
+  /* Done cards collapse to one dim row (badge+time | passenger | price);
+     full details remain available in the detail sheet */
+  .card.done { opacity: .5; padding: 8px 15px; display: flex; align-items: center; gap: 10px; }
+  .card.done .card-top { margin-bottom: 0; flex-shrink: 0; }
+  .card.done .time { font-size: 14px; }
+  .card.done .phase { display: none; }
+  .card.done .passenger {
+    font-size: 13px; margin-bottom: 0; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card.done .flight, .card.done .route, .card.done .flight-gate, .card.done .svc-time { display: none; }
+  .card.done .price { font-size: 13px; margin-top: 0; margin-left: auto; flex-shrink: 0; }
+  .card.done .price .calc { display: none; }
+  .card.next { border: 2px solid var(--green); padding: 11px 13px; }
+  .next-tag {
+    font-size: 11px; font-weight: 750; padding: 3px 8px; border-radius: 6px;
+    background: var(--didi-bg); color: var(--green); margin-left: 5px;
+  }
   .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .badge {
     font-size: 12px; font-weight: 650; padding: 3px 8px;
@@ -161,8 +179,18 @@
     max-height: 88vh; overflow-y: auto;
   }
   .sheet.show { transform: translateY(0); }
+  /* Paste panel drops from the top: it opens right under the finger that
+     tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
+  .drop {
+    position: fixed; z-index: 21; left: 0; right: 0; top: 0;
+    max-width: 480px; margin: 0 auto;
+    background: var(--sheet-bg); border-radius: 0 0 18px 18px;
+    padding: calc(12px + env(safe-area-inset-top)) 18px 16px;
+    transform: translateY(-105%); transition: transform .3s cubic-bezier(.32,.72,.35,1);
+  }
+  .drop.show { transform: translateY(0); }
   @media (prefers-reduced-motion: reduce) {
-    .sheet, .scrim { transition: none; }
+    .sheet, .scrim, .drop { transition: none; }
     .card.flash { animation: none; }
   }
   .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 6px auto 2px; }
@@ -222,15 +250,48 @@
     background: var(--key-bg); color: var(--text); font-size: 15px; font-weight: 600; cursor: pointer;
   }
 
-  .type-grid { display: grid; gap: 10px; padding: 12px 0 4px; }
-  .type-btn {
-    border: none; border-radius: 14px; padding: 18px; cursor: pointer;
-    font-size: 18px; font-weight: 700; text-align: center;
+  .paste-box {
+    width: 100%; margin-top: 12px; padding: 12px;
+    background: var(--key-bg); color: var(--text);
+    /* 16px floor: iOS Safari auto-zooms the page when focusing any
+       input/textarea whose font-size is below 16px */
+    border: none; border-radius: 12px; font-size: 16px; font-family: inherit;
+    resize: vertical; min-height: 150px;
   }
-  .type-btn.didi { background: var(--didi-bg); color: var(--didi-fg); }
-  .type-btn.uber { background: var(--uber-bg); color: var(--uber-fg); }
-  .type-btn.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
-  .type-btn:active { filter: brightness(1.2); }
+  .quick-types { display: flex; gap: 8px; margin-top: 14px; }
+  .quick-type-btn {
+    flex: 1; border: none; border-radius: 10px; padding: 10px 0;
+    background: var(--key-bg); font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .quick-type-btn.didi { color: var(--didi-fg); }
+  .quick-type-btn.uber { color: var(--uber-fg); }
+  .quick-type-btn.foodpanda { color: var(--fp-fg); }
+  .paste-preview {
+    padding: 4px 0 0; border-bottom: 1px solid var(--line); margin-bottom: 2px;
+    max-height: 28vh; overflow-y: auto;
+  }
+  .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
+  .paste-preview .sum-row .v { text-align: right; }
+  /* Pay layout: the sheet becomes a non-scrolling flex column — the preview
+     flexes and scrolls internally. (A scrolling, CSS-transformed sheet
+     mis-registers taps on iOS Safari.) The confirm button sits between the
+     preview and the amount so neither neighbour is tappable, and the keypad
+     is bottommost with nothing below 0/⌫ to hit by accident. */
+  .np-sheet { display: flex; flex-direction: column; }
+  .np-sheet .paste-preview { flex: 1 1 auto; max-height: none; min-height: 66px; }
+  .np-sheet .np-ok { flex-shrink: 0; margin-top: 10px; padding: 12px; }
+  .np-sheet .numpad-display { flex-shrink: 0; padding: 6px 0 2px; min-height: 44px; font-size: 28px; }
+  .np-sheet .numpad { flex-shrink: 0; padding: 6px 0 0; gap: 6px; }
+  .np-sheet .key { padding: 10px 0; font-size: 20px; }
+  .np-skip {
+    background: none; border: none; color: var(--text-3); font-size: 13px;
+    padding: 0; cursor: pointer; text-decoration: underline;
+  }
+  .dup-warn {
+    background: rgba(255,97,97,.12); color: var(--red);
+    border-radius: 10px; padding: 10px 12px; font-size: 14px;
+    font-weight: 600; margin-top: 10px;
+  }
 
   .sum-rows { padding: 8px 0; }
   .sum-row { display: flex; justify-content: space-between; padding: 9px 2px; font-size: 16px; }
@@ -260,7 +321,8 @@
 <div class="hero" id="hero"></div>
 <div class="chips" id="chips"></div>
 <div class="orders" id="orders"></div>
-<div class="scrim" id="scrim" onclick="closeSheet()"></div>
+<div class="scrim" id="scrim" onclick="closeOverlays()"></div>
+<div class="drop" id="drop"></div>
 <div class="sheet" id="sheet"></div>
 <div class="toast" id="toast"></div>
 
@@ -274,6 +336,7 @@ let orders = [];
 let sheetStack = [];          // stack of view render fns
 let sheetOrderId = null;      // order shown in detail view, if any
 let flashId = null;           // order_id to flash after next render
+let scrollToNext = false;     // scroll only on user navigation; SSE/timer re-renders must not fight manual scrolling
 
 const PLATFORMS = [
   { key: 'ride',      label: '接送' },
@@ -309,6 +372,39 @@ function orderTime(o) {
   const t = (o.scheduled_time || '').split(' ')[1];
   return t ? t.slice(0, 5) : '';
 }
+// When an order counts as done: pickups (接机) at service time + 60min —
+// service time = flight ETA (or scheduled arrival) + passenger exit minutes,
+// falling back to the booked time when there is no flight data; every other
+// order at its scheduled time + 30min. Display-only; never persisted.
+function doneAt(o) {
+  const day = (o.scheduled_time || '').split(' ')[0];
+  if (!day) return null;
+  let hhmm, extraMin;
+  if (o.service_type === '接机') {
+    hhmm = o.flight_eta || o.flight_scheduled || orderTime(o);
+    extraMin = (o.passenger_exit_minutes || 0) + 60;
+  } else {
+    hhmm = orderTime(o);
+    extraMin = 30;
+  }
+  if (!hhmm) return null;
+  const d = new Date(day + 'T' + hhmm + ':00');
+  if (isNaN(d)) return null;
+  // Flight ETA is HH:MM only, so a delay past midnight (23:30 → 00:10) would
+  // be built as the same day's early morning. But an ETA *earlier* than the
+  // booked time is the normal case (booking time = scheduled landing + exit
+  // buffer), so a plain d < sched check would push whole batches of
+  // early-landing orders a day forward — only a gap above 12h counts as a
+  // midnight crossing.
+  const sched = new Date(day + 'T' + (orderTime(o) || '00:00') + ':00');
+  if (!isNaN(sched) && sched - d > 12 * 3600 * 1000) d.setDate(d.getDate() + 1);
+  d.setMinutes(d.getMinutes() + extraMin);
+  return d;
+}
+function isDone(o) {
+  const d = doneAt(o);
+  return d ? Date.now() > d.getTime() : false;
+}
 function shortId(id) {
   return id.includes('_') ? id.split('_').pop() : id.slice(-6);
 }
@@ -343,10 +439,12 @@ function go(d) {
   const dt = new Date(cur + 'T00:00:00');
   dt.setDate(dt.getDate() + d);
   cur = fmtDate(dt);
+  scrollToNext = true;
   load();
 }
 function goToday() {
   cur = fmtDate(new Date());
+  scrollToNext = true;
   load();
 }
 
@@ -403,12 +501,19 @@ function render() {
     box.innerHTML = '<div class="empty">冇' + (filter ? PLATFORMS.find(p => p.key === filter).label : '') + '訂單</div>';
     return;
   }
-  box.innerHTML = visible.map(cardHtml).join('');
+  const isToday = cur === fmtDate(new Date());
+  const nextOrder = isToday ? visible.find(o => !isDone(o)) : null;
+  const nextId = nextOrder ? nextOrder.order_id : null;
+  box.innerHTML = visible.map(o => cardHtml(o, nextId)).join('');
   if (flashId) {
     const el = box.querySelector('[data-oid="' + CSS.escape(flashId) + '"]');
     if (el) { el.classList.add('flash'); el.scrollIntoView({ block: 'nearest' }); }
     flashId = null;
+  } else if (scrollToNext && nextId) {
+    const el = box.querySelector('[data-oid="' + CSS.escape(nextId) + '"]');
+    if (el) el.scrollIntoView({ block: 'center' });
   }
+  scrollToNext = false;
 }
 
 function toggleFilter(key) {
@@ -416,8 +521,10 @@ function toggleFilter(key) {
   render();
 }
 
-function cardHtml(o) {
+function cardHtml(o, nextId) {
   const p = platform(o);
+  const done = isDone(o);
+  const isNext = o.order_id === nextId;
   const isPickup = o.service_type === '接机';
   const isDropoff = o.service_type === '送机';
   const badge = p !== 'ride' ? p : isPickup ? 'pickup' : isDropoff ? 'dropoff' : 'transfer';
@@ -465,9 +572,11 @@ function cardHtml(o) {
     }
   }
 
-  return '<button class="card" data-oid="' + esc(o.order_id) + '" onclick="openDetail(this.dataset.oid)">' +
+  return '<button class="card' + (done ? ' done' : '') + (isNext ? ' next' : '') +
+    '" data-oid="' + esc(o.order_id) + '" onclick="openDetail(this.dataset.oid)">' +
     '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' +
-    (banner ? '<span class="badge banner">舉牌</span>' : '') + '</div>' +
+    (banner ? '<span class="badge banner">舉牌</span>' : '') +
+    (isNext ? '<span class="next-tag">NEXT</span>' : '') + '</div>' +
     '<span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
     (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
     (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') +
@@ -492,6 +601,7 @@ function popView() {
 }
 function renderSheet() {
   const sheet = document.getElementById('sheet');
+  sheet.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
   sheet.innerHTML = '<div class="grab"></div>';
   sheetStack[sheetStack.length - 1](sheet);
 }
@@ -637,16 +747,26 @@ function armCancel() {
 // ---- numpad ----
 // mode: 'money' (digits + dot) | 'time' (HHMM)
 // onConfirm may be async; returning false means "stay here and reset for retry"
-function numpadView({ title, hint, mode, onConfirm, quick }) {
+// layout 'pay' (paste pricing): the sheet becomes a flex column (.np-sheet)
+// ordered preview → confirm → amount → keypad, so the confirm button has no
+// tappable neighbours and nothing sits below the keypad.
+function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, onRender }) {
   let input = '';
+  const pay = layout === 'pay';
   return function view(sheet) {
+    if (pay) sheet.classList.add('np-sheet');
     sheet.insertAdjacentHTML('beforeend',
-      sheetHead(esc(title), '') +
-      '<div class="numpad-display" id="npDisplay"></div>' +
-      '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
-      '<div class="numpad" id="npKeys"></div>' +
-      (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
-      '<button class="primary-btn" id="npOk" disabled>確認</button>'
+      sheetHead(esc(title), sub || '') +
+      (above || '') +
+      (pay
+        ? '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
+          '<div class="numpad-display" id="npDisplay"></div>' +
+          '<div class="numpad" id="npKeys"></div>'
+        : '<div class="numpad-display" id="npDisplay"></div>' +
+          '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
+          '<div class="numpad" id="npKeys"></div>' +
+          (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
+          '<button class="primary-btn" id="npOk" disabled>確認</button>')
     );
     const keys = mode === 'money'
       ? ['1','2','3','4','5','6','7','8','9','.','0','⌫']
@@ -673,6 +793,7 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
         display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
       }
       ok.disabled = !valid();
+      if (pay) ok.textContent = valid() ? '確認 $' + input : '確認';
     }
     document.getElementById('npKeys').addEventListener('click', e => {
       const k = e.target.dataset && e.target.dataset.k;
@@ -697,7 +818,9 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
         paint();
       }
     });
-    if (quick) document.getElementById('npQuick').addEventListener('click', quick.onTap);
+    const quickEl = document.getElementById('npQuick');
+    if (quick && quickEl) quickEl.addEventListener('click', quick.onTap);
+    if (onRender) onRender(sheet);
     paint();
   };
 }
@@ -705,26 +828,56 @@ function numpadView({ title, hint, mode, onConfirm, quick }) {
 // ---- add flow ----
 let addState = null;
 
-function openAdd() {
-  addState = { date: cur };
-  openSheet(addTypeView);
+function closeOverlays() { closeSheet(); closeDrop(); }
+
+function closeDrop() {
+  document.getElementById('drop').classList.remove('show');
+  // the scrim is shared with the bottom sheet — keep it while the sheet is open
+  if (!document.getElementById('sheet').classList.contains('show')) {
+    document.getElementById('scrim').classList.remove('show');
+  }
 }
 
-function addTypeView(sheet) {
-  sheet.insertAdjacentHTML('beforeend',
-    sheetHead('入單', esc(addState.date) + ' 星期' + weekday(addState.date)) +
-    '<div class="type-grid">' +
+function openAdd() {
+  addState = { date: cur };
+  const drop = document.getElementById('drop');
+  drop.innerHTML =
+    '<div class="sheet-head"><div class="sheet-title">入單</div>' +
+    '<button class="sheet-x" onclick="closeDrop()">&#10005;</button></div>' +
+    '<div class="sheet-sub">' + esc(addState.date) + ' 星期' + weekday(addState.date) + '</div>' +
+    '<textarea class="paste-box" id="pasteBox" placeholder="喺度貼訂單 message"></textarea>' +
+    '<button class="primary-btn" id="parseBtn">解析</button>' +
+    '<div class="quick-types">' +
     Object.keys(TYPE_META).map(t =>
-      '<button class="type-btn ' + t + '" data-t="' + t + '">' + TYPE_META[t].label + '</button>'
+      '<button class="quick-type-btn ' + t + '" data-t="' + t + '">' + TYPE_META[t].label + '</button>'
     ).join('') +
-    '</div>'
-  );
-  sheet.querySelectorAll('.type-btn').forEach(btn => {
+    '</div>';
+  document.getElementById('pasteBox').value = addState.pasteText || '';
+  document.getElementById('parseBtn').addEventListener('click', async function () {
+    const text = document.getElementById('pasteBox').value.trim();
+    if (!text) return;
+    addState.pasteText = text;
+    this.disabled = true;
+    this.textContent = '解析緊…';
+    try {
+      addState.preview = await apiWrite('POST', '/api/orders/parse', { text });
+      closeDrop();
+      openSheet(pastePriceView());  // pricing continues in the bottom sheet, where the typing thumb already is
+    } catch (e) {
+      toast(e.message);
+      this.disabled = false;
+      this.textContent = '解析';
+    }
+  });
+  drop.querySelectorAll('.quick-type-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       addState.type = btn.dataset.t;
-      pushView(addTimeView());
+      closeDrop();
+      openSheet(addTimeView());
     });
   });
+  document.getElementById('scrim').classList.add('show');
+  drop.classList.add('show');
 }
 
 function addTimeView() {
@@ -799,10 +952,73 @@ function addConfirmView(sheet) {
   });
 }
 
+// ---- paste flow (message entry lives in the top drop panel; see openAdd) ----
+// After a successful parse, preview and price keypad share one view: the
+// operator verifies the parsed fields by eye and the confirm tap both prices
+// and saves — there is deliberately no separate confirmation step.
+function pastePriceView() {
+  const p = addState.preview, o = p.order;
+  const svc = o.service_type === '接机' ? '接機' : o.service_type === '送机' ? '送機' : '單程';
+  const phone = o.passenger_phone || o.overseas_phone;
+  const rows = [['平台', p.source + ' · ' + svc]];
+  if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16)]);
+  if (o.passenger_name) rows.push(['乘客', o.passenger_name]);
+  if (phone) rows.push(['電話', phone]);
+  if (o.flight_number) rows.push(['航班', o.flight_number]);
+  if (o.vehicle_type) rows.push(['車型', o.vehicle_type]);
+  if (o.pickup) rows.push(['路線', o.pickup + ' → ' + o.dropoff]);
+  if (o.driver_notes) rows.push(['備註', o.driver_notes]);
+  if (p.parking_fee) rows.push(['停車費', '$' + $(p.parking_fee)]);
+  if (p.banner_fee) rows.push(['舉牌費', '$' + $(p.banner_fee)]);
+  const rowsHtml = '<div class="paste-preview">' + rows.map(r =>
+    '<div class="sum-row"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>'
+  ).join('') + '</div>';
+
+  if (p.duplicate) {
+    return function view(sheet) {
+      sheet.insertAdjacentHTML('beforeend',
+        sheetHead('貼單 · 已入過', '#' + esc(shortId(o.order_id))) +
+        '<div class="dup-warn">呢張單已經入過</div>' + rowsHtml);
+    };
+  }
+  return numpadView({
+    title: '#' + shortId(o.order_id) + ' · 入價',
+    sub: '<button class="np-skip" id="npSkip">先唔入價，直接儲存</button>',
+    above: rowsHtml, mode: 'money', layout: 'pay',
+    onConfirm: v => savePaste(v),
+    onRender: () => {
+      document.getElementById('npSkip').addEventListener('click', async function () {
+        this.disabled = true;
+        if (await savePaste(null) === false) this.disabled = false;
+      });
+    },
+  });
+}
+
+// Returns false on failure so numpadView resets for retry.
+async function savePaste(price) {
+  const body = { type: 'paste', text: addState.pasteText };
+  if (price != null) body.price = price;
+  try {
+    const res = await apiWrite('POST', '/api/orders', body);
+    if (res.date && res.date !== cur) cur = res.date;  // a pasted order carries its own date — navigate to it
+    if (filter && filter !== 'ride') filter = null;    // pasted orders are platform rides; drop any filter that would hide the new card
+    flashId = res.order_id;
+    closeSheet();
+    toast('已入單 #' + shortId(res.order_id));
+    load();
+  } catch (e) {
+    toast(e.message);
+    return false;
+  }
+}
+
 // ---- init ----
+scrollToNext = true;
 load();
 const es = new EventSource('/api/events');
 es.onmessage = () => load();
+setInterval(render, 60000);   // re-render each minute so cards dim as time passes; SSE only fires on DB changes
 </script>
 </body>
 </html>
