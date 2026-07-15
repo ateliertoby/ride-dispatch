@@ -2,7 +2,7 @@ import re
 
 # ITU country codes we're confident about — covers all patterns seen in prod DB.
 KNOWN_CC = {
-    '1', '7', '44', '61', '63', '65', '66',
+    '1', '7', '44', '61', '62', '63', '65', '66',
     '81', '82', '86', '852', '853', '886', '971',
 }
 
