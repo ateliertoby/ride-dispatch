@@ -941,7 +941,11 @@ function addFormView(el) {
     ).join('') +
     '</div>');
   // Restored on pop so backing out of the price stage keeps the pasted message
-  document.getElementById('pasteBox').value = addState.pasteText || '';
+  const box = document.getElementById('pasteBox');
+  box.value = addState.pasteText || '';
+  // Focus synchronously: this render happens inside the tap's call chain, and
+  // iOS only raises the keyboard for focus() made within a user gesture.
+  box.focus({ preventScroll: true });
   document.getElementById('parseBtn').addEventListener('click', async function () {
     const text = document.getElementById('pasteBox').value.trim();
     if (!text) return;
