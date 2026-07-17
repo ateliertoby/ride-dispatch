@@ -186,9 +186,23 @@
     max-width: 480px; margin: 0 auto;
     background: var(--sheet-bg); border-radius: 0 0 18px 18px;
     padding: calc(12px + env(safe-area-inset-top)) 18px 16px;
-    transform: translateY(-105%); transition: transform .3s cubic-bezier(.32,.72,.35,1);
+    overflow: hidden;
+    transform: translateY(-105%);
+    transition: transform .3s cubic-bezier(.32,.72,.35,1), height .3s cubic-bezier(.32,.72,.35,1);
   }
   .drop.show { transform: translateY(0); }
+  /* Later add-flow stages fill the screen: the panel the user is already in
+     grows downward, so paste → price reads as one continuous surface instead
+     of a top panel retracting while a bottom sheet rises from below. */
+  .drop-full {
+    height: 100vh; height: 100dvh; border-radius: 0;
+    display: flex; flex-direction: column;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+  /* Bottom-anchor the input zone in the grown panel so the keypad and primary
+     actions sit at the thumb, matching where a bottom sheet would put them */
+  .drop-full .numpad-display { margin-top: auto; }
+  .drop-full .sum-rows { margin-top: auto; }
   @media (prefers-reduced-motion: reduce) {
     .sheet, .scrim, .drop { transition: none; }
     .card.flash { animation: none; }
@@ -218,6 +232,14 @@
   .field-row .fv { font-weight: 650; font-variant-numeric: tabular-nums; }
   .field-row .fv.unset { color: var(--amber); font-weight: 500; }
   .field-row .chev { color: var(--text-3); margin-left: 10px; font-size: 14px; }
+  .fr-split { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+  .fr-split .field-row { border-bottom: none; }
+  .fr-waive {
+    flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
+    background: var(--key-bg); color: var(--green);
+    font-size: 14px; font-weight: 650; padding: 9px 16px;
+  }
+  .fr-waive:active { background: var(--key-press); }
 
   .danger-btn {
     width: 100%; margin-top: 18px; padding: 14px; border: none; border-radius: 12px;
@@ -272,11 +294,11 @@
   }
   .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
   .paste-preview .sum-row .v { text-align: right; }
-  /* Pay layout: the sheet becomes a non-scrolling flex column — the preview
-     flexes and scrolls internally. (A scrolling, CSS-transformed sheet
-     mis-registers taps on iOS Safari.) The confirm button sits between the
-     preview and the amount so neither neighbour is tappable, and the keypad
-     is bottommost with nothing below 0/⌫ to hit by accident. */
+  /* Pay layout: the host panel becomes a non-scrolling flex column — the
+     preview flexes and scrolls internally. (A scrolling, CSS-transformed
+     panel mis-registers taps on iOS Safari.) The confirm button sits between
+     the preview and the amount so neither neighbour is tappable, and the
+     keypad is bottommost with nothing below 0/⌫ to hit by accident. */
   .np-sheet { display: flex; flex-direction: column; }
   .np-sheet .paste-preview { flex: 1 1 auto; max-height: none; min-height: 66px; }
   .np-sheet .np-ok { flex-shrink: 0; margin-top: 10px; padding: 12px; }
@@ -334,6 +356,7 @@ let cur = fmtDate(new Date());
 let filter = null;            // null | 'ride' | 'didi' | 'uber' | 'foodpanda'
 let orders = [];
 let sheetStack = [];          // stack of view render fns
+let stackHost = 'sheet';      // element the stack renders into: 'sheet' | 'drop'
 let sheetOrderId = null;      // order shown in detail view, if any
 let flashId = null;           // order_id to flash after next render
 let scrollToNext = false;     // scroll only on user navigation; SSE/timer re-renders must not fight manual scrolling
@@ -588,7 +611,10 @@ function cardHtml(o, nextId) {
 }
 
 // ---- sheet infra ----
+// One view stack serves two hosts: the bottom sheet (detail flow) and the top
+// drop panel (add flow). Only one host is ever open at a time.
 function openSheet(viewFn) {
+  stackHost = 'sheet';
   sheetStack = [viewFn];
   renderSheet();
   document.getElementById('scrim').classList.add('show');
@@ -597,20 +623,48 @@ function openSheet(viewFn) {
 function pushView(viewFn) { sheetStack.push(viewFn); renderSheet(); }
 function popView() {
   if (sheetStack.length > 1) { sheetStack.pop(); renderSheet(); }
+  else if (stackHost === 'drop') closeDrop();
   else closeSheet();
 }
 function renderSheet() {
-  const sheet = document.getElementById('sheet');
-  sheet.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
-  sheet.innerHTML = '<div class="grab"></div>';
-  sheetStack[sheetStack.length - 1](sheet);
+  const el = document.getElementById(stackHost);
+  el.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
+  const view = sheetStack[sheetStack.length - 1];
+  if (stackHost === 'sheet') {
+    el.innerHTML = '<div class="grab"></div>';
+    view(el);
+    return;
+  }
+  // Drop host: views marked .full grow the panel to the whole screen; animate
+  // the height change so the flow reads as one surface extending downward.
+  const h0 = el.offsetHeight;
+  el.innerHTML = '';
+  el.classList.toggle('drop-full', !!view.full);
+  view(el);
+  if (el.classList.contains('show')) animateDropHeight(el, h0);
+  else el.style.height = '';
+}
+// CSS cannot transition height to/from auto, so snap between measured pixel
+// heights and release the inline height once the transition lands (a
+// persistent transitionend listener in init clears it).
+function animateDropHeight(el, h0) {
+  el.style.height = '';
+  const h1 = el.offsetHeight;
+  if (h1 === h0) return;
+  if (!parseFloat(getComputedStyle(el).transitionDuration)) return;  // reduced motion: no transitionend will fire to clean up
+  el.style.transition = 'none';
+  el.style.height = h0 + 'px';
+  el.offsetHeight;  // commit the start height so the next change transitions
+  el.style.transition = '';
+  el.style.height = h1 + 'px';
 }
 function closeSheet() {
-  sheetStack = [];
+  if (stackHost === 'sheet') sheetStack = [];
   sheetOrderId = null;
-  addState = null;
-  document.getElementById('scrim').classList.remove('show');
   document.getElementById('sheet').classList.remove('show');
+  if (!document.getElementById('drop').classList.contains('show')) {
+    document.getElementById('scrim').classList.remove('show');
+  }
 }
 function sheetHead(title, sub) {
   return '<div class="sheet-head"><div class="sheet-title">' + title + '</div>' +
@@ -674,10 +728,18 @@ function detailView(sheet) {
       if (key === 'price' && !v) { value = '未入價'; unset = true; }
       else value = '$' + $(v || 0);
     }
-    return '<button class="field-row" onclick="editField(\'' + key + '\')">' +
+    const row = '<button class="field-row" onclick="editField(\'' + key + '\')">' +
       '<span class="fk">' + fLabel + '</span>' +
       '<span class="fv' + (unset ? ' unset' : '') + '">' + esc(value) + '</span>' +
       '<span class="chev">&#9998;</span></button>';
+    // Waiving the parking fee is the everyday action (the pickup default often
+    // turns out not to be charged), so it gets a one-tap pill; any other
+    // amount is rare and goes through the numpad as usual.
+    if (key === 'parking_fee' && o.parking_fee > 0) {
+      return '<div class="fr-split">' + row +
+        '<button class="fr-waive" onclick="waiveParking()">免</button></div>';
+    }
+    return row;
   }).join('');
 
   sheet.insertAdjacentHTML('beforeend',
@@ -700,12 +762,17 @@ function editField(key) {
       onConfirm: v => patchOrder({ time: v }),
     }));
   } else {
+    const quick = key === 'parking_fee' && o.parking_fee > 0
+      ? { label: '免停車費', onTap: () => patchOrder({ parking_fee: 0 }) }
+      : null;
     pushView(numpadView({
-      title: '改' + fLabel, hint: '而家 $' + $(o[key] || 0), mode: 'money',
+      title: '改' + fLabel, hint: '而家 $' + $(o[key] || 0), mode: 'money', quick,
       onConfirm: v => patchOrder({ [key]: v }),
     }));
   }
 }
+
+function waiveParking() { patchOrder({ parking_fee: 0 }); }
 
 // Returns false on failure so the numpad resets for retry.
 async function patchOrder(body) {
@@ -747,13 +814,14 @@ function armCancel() {
 // ---- numpad ----
 // mode: 'money' (digits + dot) | 'time' (HHMM)
 // onConfirm may be async; returning false means "stay here and reset for retry"
-// layout 'pay' (paste pricing): the sheet becomes a flex column (.np-sheet)
+// layout 'pay' (paste pricing): the host becomes a flex column (.np-sheet)
 // ordered preview → confirm → amount → keypad, so the confirm button has no
 // tappable neighbours and nothing sits below the keypad.
-function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, onRender }) {
+// full: mark the view so the drop host grows to the whole screen for it.
+function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, onRender, full }) {
   let input = '';
   const pay = layout === 'pay';
-  return function view(sheet) {
+  function view(sheet) {
     if (pay) sheet.classList.add('np-sheet');
     sheet.insertAdjacentHTML('beforeend',
       sheetHead(esc(title), sub || '') +
@@ -771,13 +839,17 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
     const keys = mode === 'money'
       ? ['1','2','3','4','5','6','7','8','9','.','0','⌫']
       : ['1','2','3','4','5','6','7','8','9','','0','⌫'];
-    document.getElementById('npKeys').innerHTML = keys.map(k =>
+    // Lookups must be scoped to the host: both the drop panel and the bottom
+    // sheet can hold a numpad's markup at the same time (one of them hidden),
+    // so document-wide ids would resolve to the wrong copy.
+    const keysEl = sheet.querySelector('#npKeys');
+    keysEl.innerHTML = keys.map(k =>
       k === '' ? '<div></div>' :
       '<button class="key' + (k === '⌫' || k === '.' ? ' fn' : '') + '" data-k="' + k + '">' + k + '</button>'
     ).join('');
 
-    const display = document.getElementById('npDisplay');
-    const ok = document.getElementById('npOk');
+    const display = sheet.querySelector('#npDisplay');
+    const ok = sheet.querySelector('#npOk');
 
     function valid() {
       if (mode === 'money') return input !== '' && input !== '.' && !isNaN(parseFloat(input));
@@ -795,7 +867,7 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
       ok.disabled = !valid();
       if (pay) ok.textContent = valid() ? '確認 $' + input : '確認';
     }
-    document.getElementById('npKeys').addEventListener('click', e => {
+    keysEl.addEventListener('click', e => {
       const k = e.target.dataset && e.target.dataset.k;
       if (!k) return;
       if (k === '⌫') input = input.slice(0, -1);
@@ -818,20 +890,31 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
         paint();
       }
     });
-    const quickEl = document.getElementById('npQuick');
+    const quickEl = sheet.querySelector('#npQuick');
     if (quick && quickEl) quickEl.addEventListener('click', quick.onTap);
     if (onRender) onRender(sheet);
     paint();
-  };
+  }
+  view.full = !!full;
+  return view;
 }
 
 // ---- add flow ----
+// The whole flow (paste form → preview/price, or quick-type → time → price →
+// tunnel → confirm) lives in the top drop panel as one view stack: later
+// stages grow the same panel instead of handing over to the bottom sheet.
 let addState = null;
 
 function closeOverlays() { closeSheet(); closeDrop(); }
 
 function closeDrop() {
-  document.getElementById('drop').classList.remove('show');
+  if (stackHost === 'drop') sheetStack = [];
+  addState = null;
+  const drop = document.getElementById('drop');
+  drop.classList.remove('show');
+  // Wipe the panel once it has slid away: hidden leftovers would stay in the
+  // focus order and duplicate the numpad element ids the sheet also uses.
+  setTimeout(() => { if (!drop.classList.contains('show')) drop.innerHTML = ''; }, 350);
   // the scrim is shared with the bottom sheet — keep it while the sheet is open
   if (!document.getElementById('sheet').classList.contains('show')) {
     document.getElementById('scrim').classList.remove('show');
@@ -840,18 +923,24 @@ function closeDrop() {
 
 function openAdd() {
   addState = { date: cur };
-  const drop = document.getElementById('drop');
-  drop.innerHTML =
-    '<div class="sheet-head"><div class="sheet-title">入單</div>' +
-    '<button class="sheet-x" onclick="closeDrop()">&#10005;</button></div>' +
-    '<div class="sheet-sub">' + esc(addState.date) + ' 星期' + weekday(addState.date) + '</div>' +
+  stackHost = 'drop';
+  sheetStack = [addFormView];
+  renderSheet();
+  document.getElementById('scrim').classList.add('show');
+  document.getElementById('drop').classList.add('show');
+}
+
+function addFormView(el) {
+  el.insertAdjacentHTML('beforeend',
+    sheetHead('入單', esc(addState.date) + ' 星期' + weekday(addState.date)) +
     '<textarea class="paste-box" id="pasteBox" placeholder="喺度貼訂單 message"></textarea>' +
     '<button class="primary-btn" id="parseBtn">解析</button>' +
     '<div class="quick-types">' +
     Object.keys(TYPE_META).map(t =>
       '<button class="quick-type-btn ' + t + '" data-t="' + t + '">' + TYPE_META[t].label + '</button>'
     ).join('') +
-    '</div>';
+    '</div>');
+  // Restored on pop so backing out of the price stage keeps the pasted message
   document.getElementById('pasteBox').value = addState.pasteText || '';
   document.getElementById('parseBtn').addEventListener('click', async function () {
     const text = document.getElementById('pasteBox').value.trim();
@@ -861,29 +950,25 @@ function openAdd() {
     this.textContent = '解析緊…';
     try {
       addState.preview = await apiWrite('POST', '/api/orders/parse', { text });
-      closeDrop();
-      openSheet(pastePriceView());  // pricing continues in the bottom sheet, where the typing thumb already is
+      pushView(pastePriceView());
     } catch (e) {
       toast(e.message);
       this.disabled = false;
       this.textContent = '解析';
     }
   });
-  drop.querySelectorAll('.quick-type-btn').forEach(btn => {
+  el.querySelectorAll('.quick-type-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       addState.type = btn.dataset.t;
-      closeDrop();
-      openSheet(addTimeView());
+      pushView(addTimeView());
     });
   });
-  document.getElementById('scrim').classList.add('show');
-  drop.classList.add('show');
 }
 
 function addTimeView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time',
+    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time', full: true,
     onConfirm: v => { addState.time = v; pushView(addPriceView()); },
   });
 }
@@ -891,7 +976,7 @@ function addTimeView() {
 function addPriceView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · ' + meta.priceLabel, hint: addState.time, mode: 'money',
+    title: meta.label + ' · ' + meta.priceLabel, hint: addState.time, mode: 'money', full: true,
     onConfirm: v => {
       addState.price = v;
       if (meta.hasTunnel) pushView(addTunnelView());
@@ -903,7 +988,7 @@ function addPriceView() {
 function addTunnelView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · ' + meta.tunnelLabel, mode: 'money',
+    title: meta.label + ' · ' + meta.tunnelLabel, mode: 'money', full: true,
     quick: { label: '冇' + meta.tunnelLabel, onTap: () => { addState.tunnel = 0; pushView(addConfirmView); } },
     onConfirm: v => { addState.tunnel = v; pushView(addConfirmView); },
   });
@@ -941,7 +1026,7 @@ function addConfirmView(sheet) {
       });
       if (filter && filter !== addState.type) filter = null;  // keep the new card visible
       flashId = res.order_id;
-      closeSheet();
+      closeDrop();
       toast(meta.label + ' 已入單');
       load();
     } catch (e) {
@@ -951,6 +1036,7 @@ function addConfirmView(sheet) {
     }
   });
 }
+addConfirmView.full = true;
 
 // ---- paste flow (message entry lives in the top drop panel; see openAdd) ----
 // After a successful parse, preview and price keypad share one view: the
@@ -984,7 +1070,7 @@ function pastePriceView() {
   return numpadView({
     title: '#' + shortId(o.order_id) + ' · 入價',
     sub: '<button class="np-skip" id="npSkip">先唔入價，直接儲存</button>',
-    above: rowsHtml, mode: 'money', layout: 'pay',
+    above: rowsHtml, mode: 'money', layout: 'pay', full: true,
     onConfirm: v => savePaste(v),
     onRender: () => {
       document.getElementById('npSkip').addEventListener('click', async function () {
@@ -1004,7 +1090,7 @@ async function savePaste(price) {
     if (res.date && res.date !== cur) cur = res.date;  // a pasted order carries its own date — navigate to it
     if (filter && filter !== 'ride') filter = null;    // pasted orders are platform rides; drop any filter that would hide the new card
     flashId = res.order_id;
-    closeSheet();
+    closeDrop();
     toast('已入單 #' + shortId(res.order_id));
     load();
   } catch (e) {
@@ -1014,6 +1100,13 @@ async function savePaste(price) {
 }
 
 // ---- init ----
+// Release the drop panel's inline animation height once a grow/shrink lands,
+// so the stage classes (content height / 100dvh) govern it between animations.
+// When the slide-up close finishes, wipe the panel (see closeDrop).
+document.getElementById('drop').addEventListener('transitionend', e => {
+  if (e.propertyName === 'height') e.target.style.height = '';
+  if (e.propertyName === 'transform' && !e.target.classList.contains('show')) e.target.innerHTML = '';
+});
 scrollToNext = true;
 load();
 const es = new EventSource('/api/events');
