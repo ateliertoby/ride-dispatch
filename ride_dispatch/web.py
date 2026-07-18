@@ -20,6 +20,7 @@ from .db import (
     update_price,
 )
 from .ingest import parse_any, parking_fee, banner_fee
+from .pricing import suggest_price
 
 load_dotenv()
 
@@ -79,6 +80,7 @@ def api_parse_order():
         "parking_fee": parking_fee(order, source),
         "banner_fee": banner_fee(order.additional_services),
         "duplicate": order_id_exists(DB_PATH, order.order_id),
+        "suggested_price": suggest_price(DB_PATH, order),
     })
 
 
