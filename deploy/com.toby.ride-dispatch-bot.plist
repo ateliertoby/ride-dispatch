@@ -6,20 +6,20 @@
     <string>com.toby.ride-dispatch-bot</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/toby/ride-dispatch/.venv/bin/python</string>
+        <string>/Users/accountname/ride-dispatch/.venv/bin/python</string>
         <string>-m</string>
         <string>ride_dispatch.bot</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/toby/ride-dispatch</string>
+    <string>/Users/accountname/ride-dispatch</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/toby/ride-dispatch/logs/bot.log</string>
+    <string>/Users/accountname/ride-dispatch/logs/bot.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/toby/ride-dispatch/logs/bot.err</string>
+    <string>/Users/accountname/ride-dispatch/logs/bot.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
