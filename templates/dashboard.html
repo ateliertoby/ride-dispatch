@@ -181,7 +181,7 @@
      tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
   .drop {
     position: fixed; z-index: 21; left: 0; right: 0; top: 0;
-    max-width: 480px; margin: 0 auto;
+    max-width: 480px; margin: 0 auto; max-height: 100dvh;
     background: var(--sheet-bg); border-radius: 0 0 18px 18px;
     padding: calc(12px + env(safe-area-inset-top)) 18px 16px;
     overflow: hidden;
@@ -189,20 +189,9 @@
     transition: transform .3s cubic-bezier(.32,.72,.35,1), height .3s cubic-bezier(.32,.72,.35,1);
   }
   .drop.show { transform: translateY(0); }
-  /* Later add-flow stages fill the screen: the panel the user is already in
-     grows downward, so paste → price reads as one continuous surface instead
-     of a top panel retracting while a bottom sheet rises from below. */
-  .drop-full {
-    height: 100vh; height: 100dvh; border-radius: 0;
-    display: flex; flex-direction: column;
-    padding-bottom: calc(16px + env(safe-area-inset-bottom));
-  }
-  /* Bottom-anchor the input zone in the grown panel so the keypad and primary
-     actions sit at the thumb, matching where a bottom sheet would put them */
-  .drop-full .numpad-display { margin-top: auto; }
-  .drop-full .sum-rows { margin-top: auto; }
   @media (prefers-reduced-motion: reduce) {
-    .sheet, .scrim, .drop { transition: none; }
+    .sheet, .scrim, .drop, .np-pad, .np-amount-row .step, .np-amount-row .numpad-display, .np-links-opt { transition: none; }
+    .paste-preview .sum-row, .np-links, .np-amount-row, .np-sheet .np-ok { animation: none; }
   }
   .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 6px auto 2px; }
   .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 0 2px; }
@@ -293,41 +282,78 @@
   }
   .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
   .paste-preview .sum-row .v { text-align: right; }
-  /* Pay layout: the host panel becomes a non-scrolling flex column — the
-     preview flexes and scrolls internally. (A scrolling, CSS-transformed
-     panel mis-registers taps on iOS Safari.) The confirm button sits between
-     the preview and the amount so neither neighbour is tappable, and the
-     keypad is bottommost with nothing below 0/⌫ to hit by accident. */
+  @keyframes row-in { from { opacity: 0; transform: translateY(4px); } }
+  .paste-preview .sum-row {
+    animation: row-in .25s both;
+    animation-delay: calc(var(--i, 0) * 25ms);
+  }
+  /* Every numpad screen follows one rule: the keypad is bottommost (nothing
+     tappable below 0/⌫ — pressing ⌫ means "not confirming", so confirm must
+     never sit beside it), confirm sits above the keypad behind a structural
+     gap, and only when no keypad is on screen does confirm take the bottom
+     thumb position. Confirm is a decision control, not part of the input
+     cluster: full-width inverted primary versus the grey key grid, and a
+     separate element outside the keypad unit. */
+  /* Pay layout: the panel is sized by its content and flows top-down — no
+     full-screen stretch, no dead space between the preview and the action
+     cluster. It is still a flex column capped at the viewport so on short
+     screens the preview shrinks and scrolls internally rather than the panel
+     itself scrolling. (A scrolling, CSS-transformed panel mis-registers taps
+     on iOS Safari.) */
   .np-sheet { display: flex; flex-direction: column; }
-  .np-sheet .paste-preview { flex: 1 1 auto; max-height: none; min-height: 66px; }
-  .np-sheet .np-ok { flex-shrink: 0; margin-top: 10px; padding: 12px; }
-  .np-sheet .numpad-display { flex-shrink: 0; padding: 6px 0 2px; min-height: 44px; font-size: 28px; }
-  .np-sheet .numpad { flex-shrink: 0; padding: 6px 0 0; gap: 6px; }
-  .np-sheet .key { padding: 10px 0; font-size: 20px; }
-  .np-skip {
+  .np-sheet .paste-preview { flex: 0 1 auto; max-height: none; min-height: 66px; }
+  .np-sheet .np-ok { flex-shrink: 0; }
+  .np-sheet .numpad-display { flex-shrink: 0; }
+  /* The action cluster rises in as one unit after the preview rows have
+     staggered in, so the stage lands with a settle beat instead of popping */
+  @keyframes cluster-in { from { opacity: 0; transform: translateY(8px); } }
+  .np-links, .np-amount-row, .np-sheet .np-ok {
+    animation: cluster-in .25s .12s both;
+  }
+  .np-links {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    flex-shrink: 0; color: var(--text-3); font-size: 13px;
+  }
+  .np-links button {
     background: none; border: none; color: var(--text-3); font-size: 13px;
-    padding: 0; cursor: pointer; text-decoration: underline;
+    padding: 14px 6px; cursor: pointer; text-decoration: underline;
   }
-  .np-steps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 0 6px; }
-  .np-steps .key { padding: 10px 0; font-size: 17px; font-weight: 600; }
-  .np-sheet .np-steps { flex-shrink: 0; }
-  /* With a suggested price the keypad starts tucked away: confirm + steppers
-     cover the normal case, and the class (not the hidden attribute, which
-     .numpad's display:grid would override) hides it until expanded */
-  .numpad.tucked { display: none; }
-  /* Tucked layout flows from the top: without the keypad there is little
-     below the preview, so letting it flex would open a dead gap between the
-     parsed fields and the confirm button. The drop-full margin-top:auto on
-     the display must be neutralised for the same reason. Expanding the
-     keypad removes .np-tight and restores the bottom-anchored layout. */
-  .np-sheet.np-tight .paste-preview { flex: 0 1 auto; max-height: 45vh; }
-  .np-sheet.np-tight .numpad-display { margin-top: 0; }
-  .np-toggle {
-    display: block; margin: 0 auto; padding: 10px 16px;
-    background: none; border: none; cursor: pointer;
-    color: var(--text-3); font-size: 13px; text-decoration: underline;
+  .np-links-opt {
+    display: inline-flex; align-items: center; gap: 6px;
+    max-width: 130px; overflow: hidden; white-space: nowrap;
+    transition: max-width .3s cubic-bezier(.32,.72,.35,1), opacity .2s;
   }
-  .np-sheet .np-toggle { flex-shrink: 0; }
+  .np-links-opt.gone { max-width: 0; opacity: 0; pointer-events: none; }
+  /* The price lives in one place: the centre of the stepper row, flanked by
+     its adjustment keys. Expanding the keypad collapses the steppers and the
+     same element grows into the plain numpad display — the amount never
+     moves between elements or renders twice. */
+  .np-amount-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .np-amount-row .numpad-display {
+    flex: 1; min-height: 0; padding: 12px 0; font-size: 32px;
+    transition: font-size .3s cubic-bezier(.32,.72,.35,1);
+  }
+  .np-amount-row .step {
+    background: var(--key-bg); border: none; border-radius: 12px; cursor: pointer;
+    font-size: 17px; font-weight: 600; color: var(--text-2);
+    padding: 12px 0; width: 76px; flex-shrink: 0;
+    transition: max-width .3s cubic-bezier(.32,.72,.35,1), opacity .2s, padding .3s cubic-bezier(.32,.72,.35,1);
+    max-width: 76px; overflow: hidden;
+  }
+  .np-amount-row .step:active { background: var(--key-press); }
+  .np-amount-row.expanded .step { max-width: 0; padding-left: 0; padding-right: 0; opacity: 0; pointer-events: none; }
+  .np-amount-row.expanded .numpad-display { font-size: 40px; }
+  /* Keypad slides up from the screen edge and pushes confirm upward — the
+     same causality as the iOS keyboard displacing content. 0fr→1fr keeps the
+     easing exact without measuring heights. */
+  .np-pad {
+    display: grid; grid-template-rows: 0fr;
+    transition: grid-template-rows .3s cubic-bezier(.32,.72,.35,1), opacity .25s;
+    opacity: 0; flex-shrink: 0;
+  }
+  .np-pad.open { grid-template-rows: 1fr; opacity: 1; }
+  .np-pad > div { overflow: hidden; }
+  .np-pad .numpad { padding-top: 16px; }
   .sug-tag { font-size: 12px; font-weight: 650; color: var(--green); vertical-align: 5px; letter-spacing: 0; margin-left: 4px; }
   .dup-warn {
     background: rgba(255,97,97,.12); color: var(--red);
@@ -648,18 +674,19 @@ function popView() {
 }
 function renderSheet() {
   const el = document.getElementById(stackHost);
-  el.classList.remove('np-sheet', 'np-tight');  // the pay-layout view re-adds these itself; they must not leak into other views
+  el.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
   const view = sheetStack[sheetStack.length - 1];
   if (stackHost === 'sheet') {
     el.innerHTML = '<div class="grab"></div>';
     view(el);
     return;
   }
-  // Drop host: views marked .full grow the panel to the whole screen; animate
-  // the height change so the flow reads as one surface extending downward.
+  // Drop host: the panel is sized by whatever view is in it; animate the
+  // height change so a stage switch reads as the same surface extending or
+  // retracting, with the new content animating in on its own (row stagger,
+  // action-cluster rise).
   const h0 = el.offsetHeight;
   el.innerHTML = '';
-  el.classList.toggle('drop-full', !!view.full);
   view(el);
   if (el.classList.contains('show')) animateDropHeight(el, h0);
   else el.style.height = '';
@@ -846,42 +873,45 @@ function cancelConfirmView(sheet) {
 // ---- numpad ----
 // mode: 'money' (digits + dot) | 'time' (HHMM)
 // onConfirm may be async; returning false means "stay here and reset for retry"
+// One element order for every caller: display → confirm → gap → keypad, the
+// keypad bottommost (see the layout-rule comment in the CSS).
 // layout 'pay' (paste pricing): the host becomes a flex column (.np-sheet)
-// ordered preview → confirm → amount → keypad, so the confirm button has no
-// tappable neighbours and nothing sits below the keypad.
-// full: mark the view so the drop host grows to the whole screen for it.
-// suggest: prefill the amount and show −/+$10 steppers; the first typed key
-// replaces the prefill wholesale (typing means "I'm entering my own number").
-function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, onRender, full, suggest }) {
+// with the parsed preview on top and a links row (manual-entry toggle, skip).
+// suggest: prefill the amount, flank it with −/+$10 steppers, and keep the
+// keypad collapsed behind the 自己入價 toggle; the first typed key replaces
+// the prefill wholesale (typing means "I'm entering my own number").
+// skip: secondary action in the links row; its handler may return false to
+// re-enable the button for retry.
+function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, suggest, skip }) {
   let input = suggest != null ? String(suggest) : '';
   let pristine = suggest != null;
   const pay = layout === 'pay';
   function view(sheet) {
-    // Suggested price covers the normal case with confirm + steppers alone,
-    // so the keypad starts tucked behind a manual-entry toggle
-    const tucked = pay && suggest != null;
+    const suggested = pay && suggest != null;
     if (pay) sheet.classList.add('np-sheet');
-    if (tucked) sheet.classList.add('np-tight');
-    const stepsHtml = suggest != null
-      ? '<div class="np-steps" id="npSteps">' +
-        '<button class="key fn" data-s="-10">&minus;$10</button>' +
-        '<button class="key fn" data-s="10">+$10</button></div>'
-      : '';
+    const padHtml =
+      '<div class="np-pad' + (suggested ? '' : ' open') + '" id="npPad"><div>' +
+      '<div class="numpad" id="npKeys"></div></div></div>';
     sheet.insertAdjacentHTML('beforeend',
       sheetHead(esc(title), sub || '') +
       (above || '') +
       (pay
-        ? '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
-          '<div class="numpad-display" id="npDisplay"></div>' +
-          stepsHtml +
-          (tucked ? '<button class="np-toggle" id="npPadToggle">自己入價</button>' : '') +
-          '<div class="numpad' + (tucked ? ' tucked' : '') + '" id="npKeys"></div>'
+        ? '<div class="np-links">' +
+            (suggested ? '<span class="np-links-opt" id="npOpt"><button id="npPadToggle">自己入價</button><span>·</span></span>' : '') +
+            (skip ? '<button id="npSkip">' + esc(skip.label) + '</button>' : '') +
+          '</div>' +
+          '<div class="np-amount-row' + (suggested ? '' : ' expanded') + '" id="npRow">' +
+            (suggested ? '<button class="step" data-s="-10">&minus;$10</button>' : '') +
+            '<div class="numpad-display" id="npDisplay"></div>' +
+            (suggested ? '<button class="step" data-s="10">+$10</button>' : '') +
+          '</div>' +
+          '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
+          padHtml
         : '<div class="numpad-display" id="npDisplay"></div>' +
           '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
-          stepsHtml +
-          '<div class="numpad" id="npKeys"></div>' +
           (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
-          '<button class="primary-btn" id="npOk" disabled>確認</button>')
+          '<button class="primary-btn" id="npOk" disabled>確認</button>' +
+          padHtml)
     );
     const keys = mode === 'money'
       ? ['1','2','3','4','5','6','7','8','9','.','0','⌫']
@@ -913,7 +943,6 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
         display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
       }
       ok.disabled = !valid();
-      if (pay) ok.textContent = valid() ? '確認 $' + input : '確認';
     }
     keysEl.addEventListener('click', e => {
       const k = e.target.dataset && e.target.dataset.k;
@@ -942,8 +971,8 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
         paint();
       }
     });
-    const stepsEl = sheet.querySelector('#npSteps');
-    if (stepsEl) stepsEl.addEventListener('click', e => {
+    const rowEl = sheet.querySelector('#npRow');
+    if (rowEl) rowEl.addEventListener('click', e => {
       const s = e.target.dataset && e.target.dataset.s;
       if (!s) return;
       input = String(Math.max(0, (parseFloat(input) || 0) + Number(s)));
@@ -951,16 +980,19 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
     });
     const padToggle = sheet.querySelector('#npPadToggle');
     if (padToggle) padToggle.addEventListener('click', () => {
-      keysEl.classList.remove('tucked');
-      sheet.classList.remove('np-tight');
-      padToggle.remove();
+      rowEl.classList.add('expanded');
+      sheet.querySelector('#npPad').classList.add('open');
+      sheet.querySelector('#npOpt').classList.add('gone');
+    });
+    const skipEl = sheet.querySelector('#npSkip');
+    if (skip && skipEl) skipEl.addEventListener('click', async function () {
+      this.disabled = true;
+      if (await skip.onTap() === false) this.disabled = false;
     });
     const quickEl = sheet.querySelector('#npQuick');
     if (quick && quickEl) quickEl.addEventListener('click', quick.onTap);
-    if (onRender) onRender(sheet);
     paint();
   }
-  view.full = !!full;
   return view;
 }
 
@@ -1037,7 +1069,7 @@ function addFormView(el) {
 function addTimeView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time', full: true,
+    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time',
     onConfirm: v => { addState.time = v; pushView(addPriceView()); },
   });
 }
@@ -1045,7 +1077,7 @@ function addTimeView() {
 function addPriceView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · ' + meta.priceLabel, hint: addState.time, mode: 'money', full: true,
+    title: meta.label + ' · ' + meta.priceLabel, hint: addState.time, mode: 'money',
     onConfirm: v => {
       addState.price = v;
       if (meta.hasTunnel) pushView(addTunnelView());
@@ -1057,7 +1089,7 @@ function addPriceView() {
 function addTunnelView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · ' + meta.tunnelLabel, mode: 'money', full: true,
+    title: meta.label + ' · ' + meta.tunnelLabel, mode: 'money',
     quick: { label: '冇' + meta.tunnelLabel, onTap: () => { addState.tunnel = 0; pushView(addConfirmView); } },
     onConfirm: v => { addState.tunnel = v; pushView(addConfirmView); },
   });
@@ -1105,7 +1137,6 @@ function addConfirmView(sheet) {
     }
   });
 }
-addConfirmView.full = true;
 
 // ---- paste flow (message entry lives in the top drop panel; see openAdd) ----
 // After a successful parse, preview and price keypad share one view: the
@@ -1125,8 +1156,8 @@ function pastePriceView() {
   if (o.driver_notes) rows.push(['備註', o.driver_notes]);
   if (p.parking_fee) rows.push(['停車費', '$' + $(p.parking_fee)]);
   if (p.banner_fee) rows.push(['舉牌費', '$' + $(p.banner_fee)]);
-  const rowsHtml = '<div class="paste-preview">' + rows.map(r =>
-    '<div class="sum-row"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>'
+  const rowsHtml = '<div class="paste-preview">' + rows.map((r, i) =>
+    '<div class="sum-row" style="--i:' + i + '"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>'
   ).join('') + '</div>';
 
   if (p.duplicate) {
@@ -1138,16 +1169,10 @@ function pastePriceView() {
   }
   return numpadView({
     title: '#' + shortId(o.order_id) + ' · 入價',
-    sub: '<button class="np-skip" id="npSkip">先唔入價，直接儲存</button>',
-    above: rowsHtml, mode: 'money', layout: 'pay', full: true,
+    above: rowsHtml, mode: 'money', layout: 'pay',
     suggest: p.suggested_price != null ? p.suggested_price : null,
+    skip: { label: '先唔入價，直接儲存', onTap: () => savePaste(null) },
     onConfirm: v => savePaste(v),
-    onRender: () => {
-      document.getElementById('npSkip').addEventListener('click', async function () {
-        this.disabled = true;
-        if (await savePaste(null) === false) this.disabled = false;
-      });
-    },
   });
 }
 
