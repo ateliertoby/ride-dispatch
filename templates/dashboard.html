@@ -311,6 +311,23 @@
   .np-steps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 2px 0 6px; }
   .np-steps .key { padding: 10px 0; font-size: 17px; font-weight: 600; }
   .np-sheet .np-steps { flex-shrink: 0; }
+  /* With a suggested price the keypad starts tucked away: confirm + steppers
+     cover the normal case, and the class (not the hidden attribute, which
+     .numpad's display:grid would override) hides it until expanded */
+  .numpad.tucked { display: none; }
+  /* Tucked layout flows from the top: without the keypad there is little
+     below the preview, so letting it flex would open a dead gap between the
+     parsed fields and the confirm button. The drop-full margin-top:auto on
+     the display must be neutralised for the same reason. Expanding the
+     keypad removes .np-tight and restores the bottom-anchored layout. */
+  .np-sheet.np-tight .paste-preview { flex: 0 1 auto; max-height: 45vh; }
+  .np-sheet.np-tight .numpad-display { margin-top: 0; }
+  .np-toggle {
+    display: block; margin: 0 auto; padding: 10px 16px;
+    background: none; border: none; cursor: pointer;
+    color: var(--text-3); font-size: 13px; text-decoration: underline;
+  }
+  .np-sheet .np-toggle { flex-shrink: 0; }
   .sug-tag { font-size: 12px; font-weight: 650; color: var(--green); vertical-align: 5px; letter-spacing: 0; margin-left: 4px; }
   .dup-warn {
     background: rgba(255,97,97,.12); color: var(--red);
@@ -631,7 +648,7 @@ function popView() {
 }
 function renderSheet() {
   const el = document.getElementById(stackHost);
-  el.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
+  el.classList.remove('np-sheet', 'np-tight');  // the pay-layout view re-adds these itself; they must not leak into other views
   const view = sheetStack[sheetStack.length - 1];
   if (stackHost === 'sheet') {
     el.innerHTML = '<div class="grab"></div>';
@@ -840,7 +857,11 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
   let pristine = suggest != null;
   const pay = layout === 'pay';
   function view(sheet) {
+    // Suggested price covers the normal case with confirm + steppers alone,
+    // so the keypad starts tucked behind a manual-entry toggle
+    const tucked = pay && suggest != null;
     if (pay) sheet.classList.add('np-sheet');
+    if (tucked) sheet.classList.add('np-tight');
     const stepsHtml = suggest != null
       ? '<div class="np-steps" id="npSteps">' +
         '<button class="key fn" data-s="-10">&minus;$10</button>' +
@@ -853,7 +874,8 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
         ? '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
           '<div class="numpad-display" id="npDisplay"></div>' +
           stepsHtml +
-          '<div class="numpad" id="npKeys"></div>'
+          (tucked ? '<button class="np-toggle" id="npPadToggle">自己入價</button>' : '') +
+          '<div class="numpad' + (tucked ? ' tucked' : '') + '" id="npKeys"></div>'
         : '<div class="numpad-display" id="npDisplay"></div>' +
           '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
           stepsHtml +
@@ -913,7 +935,10 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
         : input.slice(0, 2) + ':' + input.slice(2);
       const result = await onConfirm(value);
       if (result === false) {
-        input = '';
+        // retry keeps a usable state: back to the suggestion when there is
+        // one, since the keypad may still be tucked away
+        input = suggest != null ? String(suggest) : '';
+        pristine = suggest != null;
         paint();
       }
     });
@@ -923,6 +948,12 @@ function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, o
       if (!s) return;
       input = String(Math.max(0, (parseFloat(input) || 0) + Number(s)));
       paint();
+    });
+    const padToggle = sheet.querySelector('#npPadToggle');
+    if (padToggle) padToggle.addEventListener('click', () => {
+      keysEl.classList.remove('tucked');
+      sheet.classList.remove('np-tight');
+      padToggle.remove();
     });
     const quickEl = sheet.querySelector('#npQuick');
     if (quick && quickEl) quickEl.addEventListener('click', quick.onTap);
