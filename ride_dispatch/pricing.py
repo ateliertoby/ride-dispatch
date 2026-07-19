@@ -29,6 +29,11 @@ ZONE_KEYWORDS: dict[str, list[str]] = {
         "黄埔", "黃埔", "土瓜湾", "土瓜灣",
         "油尖旺", "九龙塘", "九龍塘",
         "观塘", "觀塘", "九龙站", "九龍站", "西九",
+        # Bare "九龙"/"Kowloon" is deliberately broad: platform strings for
+        # hotels named after the peninsula (九龙海逸君绰, Harbour Grand
+        # Kowloon) often carry no district at all.  A string that also hits
+        # another zone's token still falls out via the multi-zone rule.
+        "九龙", "九龍", "Kowloon",
         "巧明街", "城市大学", "城市大學", "HKMU",
         "Tsim Sha Tsui", "Nathan Road", "Mong Kok",
         # "朗廷酒店" would be wrong here: hotels across zones carry the
@@ -119,14 +124,21 @@ def suggest_price(db_path: str, order: Order) -> float | None:
     finally:
         conn.close()
 
-    prices: list[float] = []
+    prices_direction: list[float] = []
+    prices_zone: list[float] = []
     for stype, pickup, dropoff, price in rows:
-        if stype != order.service_type:
-            continue
         hist_endpoint = dropoff if stype == "接机" else pickup
         if hist_endpoint and match_zone(hist_endpoint) == zone:
-            prices.append(price)
+            prices_zone.append(price)
+            if stype == order.service_type:
+                prices_direction.append(price)
 
+    # A single order cannot establish a direction's base fare -- one
+    # condition-adjusted booking would masquerade as it.  With fewer than
+    # two same-direction samples, widen to the whole zone's pool: zones
+    # with a real per-direction fare split have volume in both directions,
+    # so they never take this fallback.
+    prices = prices_direction if len(prices_direction) >= 2 else prices_zone
     if not prices:
         return None
 

@@ -87,6 +87,10 @@ class TestMatchZone:
     def test_english_district_token(self):
         assert match_zone("The Mira Hong Kong(118 Nathan Road, Tsim Sha Tsui)") == "kowloon"
 
+    def test_bare_kowloon_hotel_name(self):
+        # Some platform strings carry only the hotel name, no district token
+        assert match_zone("香港九龙海逸君绰酒店(Harbour Grand Kowloon)") == "kowloon"
+
     def test_unknown_area_null(self):
         assert match_zone("东涌") is None
 
@@ -142,6 +146,21 @@ class TestSuggestPrice:
         _seed(db_path, "D1", "接机", "香港国际机场", "尖沙咀凯悦", 210)
         query = _make_order("DQ", "单程接送", "尖沙咀凯悦", "大屿山")
         assert suggest_price(db_path, query) is None
+
+    def test_thin_direction_falls_back_to_zone_pool(self, db_path):
+        # One condition-adjusted pickup must not become the pickup base;
+        # with <2 same-direction samples the zone-wide pool decides.
+        _seed(db_path, "S1", "送机", "香港帝都酒店(白鹤汀街8号)", "香港国际机场", 240)
+        _seed(db_path, "S2", "送机", "香港帝都酒店(香港帝都酒店)", "香港国际机场", 240)
+        _seed(db_path, "S3", "接机", "香港国际机场", "香港沙田凯悦酒店(沙田 泽祥街18号)", 290)
+        query = _make_order("SQ", "接机", "香港国际机场", "沙田新城市广场")
+        assert suggest_price(db_path, query) == 240.0
+
+    def test_zone_pool_serves_empty_direction(self, db_path):
+        _seed(db_path, "D1", "接机", "香港国际机场", "迪士尼乐园酒店", 170)
+        _seed(db_path, "D2", "接机", "香港国际机场", "迪士尼探索家度假酒店", 170)
+        query = _make_order("DQ2", "送机", "香港迪士尼乐园度假区", "香港国际机场")
+        assert suggest_price(db_path, query) == 170.0
 
     def test_cancelled_prices_count(self, db_path):
         # 2 cancelled at 290, 1 active at 240
