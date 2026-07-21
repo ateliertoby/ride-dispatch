@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 from .ingest import parse_any, parking_fee, banner_fee
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
-from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval
+from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
 from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, is_configured as whiteboard_configured, WhiteboardError
 
@@ -48,6 +48,16 @@ def format_card(order) -> str:
         f"{type_label} | {order.flight_number}",
         f"乘客: {order.passenger_name}",
         f"時間: {time}",
+    ]
+    if order.service_type == "接机" and order.passenger_exit_minutes:
+        exit_line = f"出場: {order.passenger_exit_minutes}分鐘"
+        urgency = exit_urgency(order.passenger_exit_minutes)
+        if urgency == "urgent":
+            exit_line += " — 降落前要出發"
+        elif urgency == "tight":
+            exit_line += " — 降落即刻出發"
+        lines.append(exit_line)
+    lines += [
         f"上車: {order.pickup}",
         f"落車: {order.dropoff}",
     ]
@@ -535,6 +545,25 @@ async def _check_svc_reminders(bot, chat_id: int, now: datetime):
             logger.exception("svc reminder failed for %s", order.get('order_id', '?')[-4:])
 
 
+async def _check_depart_reminders(bot, chat_id: int, now: datetime):
+    dates = get_tracking_dates(DB_PATH, now=now)
+    if not dates:
+        return
+    for order in _orders_in(dates):
+        try:
+            hhmm = depart_reminder_due(order, now)
+            if not hhmm:
+                continue
+            landing = predicted_landing_hhmm(order)
+            msg = f"出發接機 | 預計降落 {landing}"
+            msg += _order_lines(order, landing)
+            await bot.send_message(chat_id=chat_id, text=msg)
+            mark_reminder_sent(DB_PATH, order['order_id'], 'depart')
+            logger.info("depart reminder sent for %s", order['order_id'][-4:])
+        except Exception:
+            logger.exception("depart reminder failed for %s", order.get('order_id', '?')[-4:])
+
+
 async def _check_departure_reminders(bot, chat_id: int, now: datetime):
     for order in get_departure_reminders(DB_PATH, now):
         try:
@@ -584,6 +613,10 @@ async def _poll_and_notify(context) -> int:
         await _check_svc_reminders(bot, chat_id, now)
     except Exception:
         logger.exception("svc reminder check error")
+    try:
+        await _check_depart_reminders(bot, chat_id, now)
+    except Exception:
+        logger.exception("depart reminder check error")
     try:
         await _check_departure_reminders(bot, chat_id, now)
     except Exception:
@@ -670,6 +703,8 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
             svc = svc_time(arrival_hhmm, order_data["passenger_exit_minutes"])
             if svc:
                 lines += f"\n用車: {svc}"
+        if order_data.get("passenger_exit_minutes"):
+            lines += f"\n出場: {order_data['passenger_exit_minutes']}分鐘"
         if "举牌" in (order_data.get("additional_services") or ""):
             lines += f"\n舉牌: {order_data.get('passenger_name', '')}"
         if order_data.get("dropoff"):

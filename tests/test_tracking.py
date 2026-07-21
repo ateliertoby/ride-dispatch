@@ -89,7 +89,8 @@ def test_tracking_dates_excludes_non_pickup_and_no_flight(db_path):
 
 
 def order_dict(scheduled_time="2026-07-02 12:01:00", flight_status=None, flight_eta=None,
-               flight_scheduled=None, service_type="接机", flight_number="MU5017"):
+               flight_scheduled=None, service_type="接机", flight_number="MU5017",
+               passenger_exit_minutes=None):
     return {
         "service_type": service_type,
         "flight_number": flight_number,
@@ -97,6 +98,7 @@ def order_dict(scheduled_time="2026-07-02 12:01:00", flight_status=None, flight_
         "flight_status": flight_status,
         "flight_eta": flight_eta,
         "flight_scheduled": flight_scheduled,
+        "passenger_exit_minutes": passenger_exit_minutes,
     }
 
 
@@ -178,3 +180,31 @@ def test_eta_before_midnight_for_after_midnight_pickup():
     orders = [order_dict(scheduled_time="2026-07-03 00:30:00", flight_status="est", flight_eta="23:50")]
     late_evening = datetime(2026, 7, 2, 23, 0, 0)
     assert calc_next_interval(orders, now=late_evening) == 1500
+
+
+# --- urgent-exit poll cap ---
+
+
+def test_urgent_exit_near_eta_caps_at_300():
+    orders = [order_dict(scheduled_time="2026-07-02 12:50:00", flight_status="est",
+                         flight_eta="12:30", passenger_exit_minutes=20)]
+    # halving alone would give 900
+    assert calc_next_interval(orders, now=NOW) == 300
+
+
+def test_urgent_exit_far_eta_not_capped():
+    orders = [order_dict(scheduled_time="2026-07-02 13:50:00", flight_status="est",
+                         flight_eta="13:30", passenger_exit_minutes=20)]
+    assert calc_next_interval(orders, now=NOW) == 2700
+
+
+def test_tight_exit_not_capped():
+    orders = [order_dict(scheduled_time="2026-07-02 12:50:00", flight_status="est",
+                         flight_eta="12:30", passenger_exit_minutes=30)]
+    assert calc_next_interval(orders, now=NOW) == 900
+
+
+def test_urgent_exit_no_flight_data_keeps_fallback():
+    # Polling can't refresh an ETA that doesn't exist; clamp_interval owns this wake-up
+    orders = [order_dict(scheduled_time="2026-07-02 13:00:00", passenger_exit_minutes=20)]
+    assert calc_next_interval(orders, now=NOW) == 1800

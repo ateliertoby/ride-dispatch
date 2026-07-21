@@ -11,6 +11,7 @@ from ride_dispatch.flight import (
     departure_milestones_due,
     pending_reminder_times,
     clamp_interval,
+    depart_reminder_due,
     WATCHDOG_INTERVAL,
 )
 
@@ -476,3 +477,203 @@ def test_pending_mixed_orders():
     assert datetime(2026, 7, 13, 12, 30, 0) in times
     assert datetime(2026, 7, 13, 12, 20, 0) in times
     assert datetime(2026, 7, 13, 12, 40, 0) in times
+
+
+# ---- depart_reminder_due ----
+
+
+def test_depart_due_est_status():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "12:10",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    # depart = 12:10 + 30 - 40 = 12:00 → fires pre-landing
+    assert depart_reminder_due(order, NOW) == "12:00"
+
+
+def test_depart_due_no_status_uses_booking_fallback():
+    order = {
+        "service_type": "接机",
+        "flight_status": None,
+        "flight_eta": None,
+        "flight_scheduled": None,
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 12:30:00",
+        "reminders_sent": "",
+    }
+    # No flight data: depart = booking 12:30 - 40 = 11:50
+    assert depart_reminder_due(order, NOW) == "11:50"
+
+
+def test_depart_not_due_future():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "13:00",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 13:20:00",
+        "reminders_sent": "",
+    }
+    # depart = 12:40, now 12:00 → not yet
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_postponed_when_eta_slips():
+    base = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    assert depart_reminder_due({**base, "flight_eta": "12:15"}, NOW) == "11:55"
+    # Same order after HKIA slips the ETA to 12:50 → no longer due
+    assert depart_reminder_due({**base, "flight_eta": "12:50"}, NOW) is None
+
+
+def test_depart_not_due_already_sent():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "12:10",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "depart",
+    }
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_not_due_staleness_guard():
+    order = {
+        "service_type": "接机",
+        "flight_status": "landed",
+        "flight_eta": "09:00",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 09:30:00",
+        "reminders_sent": "",
+    }
+    # depart = 08:50, now 12:00 → >2h past
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_not_due_cancelled_flight():
+    order = {
+        "service_type": "接机",
+        "flight_status": "cancelled",
+        "flight_eta": "12:10",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_not_due_songji():
+    order = {
+        "service_type": "送机",
+        "flight_status": "est",
+        "flight_eta": "12:10",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_not_due_missing_exit_minutes():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "12:10",
+        "passenger_exit_minutes": None,
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    assert depart_reminder_due(order, NOW) is None
+
+
+def test_depart_due_landed_catchup():
+    # Late entry / early flight: already landed but never reminded → catch up
+    order = {
+        "service_type": "接机",
+        "flight_status": "landed",
+        "flight_eta": "11:50",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 12:10:00",
+        "reminders_sent": "",
+    }
+    # depart = 11:30, 30 min past, within the 2h guard
+    assert depart_reminder_due(order, NOW) == "11:30"
+
+
+# ---- pending_reminder_times: depart branch ----
+
+
+def test_pending_depart_future_est():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "13:00",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 13:20:00",
+        "reminders_sent": "",
+    }
+    # depart = 12:40 — pre-landing, must be a wake-up target
+    assert datetime(2026, 7, 13, 12, 40, 0) in pending_reminder_times([order], NOW)
+
+
+def test_pending_depart_and_svc_together():
+    order = {
+        "service_type": "接机",
+        "flight_status": "landed",
+        "flight_eta": "12:20",
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 12:50:00",
+        "reminders_sent": "",
+    }
+    times = pending_reminder_times([order], NOW)
+    # depart = 12:10, svc = 12:50
+    assert datetime(2026, 7, 13, 12, 10, 0) in times
+    assert datetime(2026, 7, 13, 12, 50, 0) in times
+
+
+def test_pending_depart_sent_not_included():
+    order = {
+        "service_type": "接机",
+        "flight_status": "est",
+        "flight_eta": "13:00",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 13:20:00",
+        "reminders_sent": "depart",
+    }
+    assert pending_reminder_times([order], NOW) == []
+
+
+def test_pending_depart_cancelled_not_included():
+    order = {
+        "service_type": "接机",
+        "flight_status": "cancelled",
+        "flight_eta": "13:00",
+        "passenger_exit_minutes": 20,
+        "scheduled_time": "2026-07-13 13:20:00",
+        "reminders_sent": "",
+    }
+    assert pending_reminder_times([order], NOW) == []
+
+
+def test_pending_depart_no_flight_data_uses_booking():
+    order = {
+        "service_type": "接机",
+        "flight_status": None,
+        "flight_eta": None,
+        "flight_scheduled": None,
+        "passenger_exit_minutes": 30,
+        "scheduled_time": "2026-07-13 13:30:00",
+        "reminders_sent": "",
+    }
+    # depart = 13:30 - 40 = 12:50; svc branch needs landed/gate so this is the only entry
+    assert pending_reminder_times([order], NOW) == [datetime(2026, 7, 13, 12, 50, 0)]

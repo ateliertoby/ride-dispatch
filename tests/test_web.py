@@ -225,3 +225,40 @@ def test_paste_rejects_bad_input(client):
 
 def test_kick_bot_noop_when_socket_missing(client):
     web._kick_bot()  # no bot.sock next to the tmp DB; must be a silent no-op
+
+
+# ---- exit-time enrichment ----
+
+
+def test_parse_preview_exit_urgency_tight(client):
+    res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
+    assert res.get_json()["exit_urgency"] == "tight"
+
+
+def test_parse_preview_exit_urgency_none_without_field(client):
+    res = client.post("/api/orders/parse", json={"text": TC_MSG})
+    assert res.get_json()["exit_urgency"] is None
+
+
+def test_orders_enriched_with_depart_time(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    rows = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    # No flight data yet: depart = booking 12:35 - 40 = 11:55
+    assert rows[0]["depart_hhmm"] == "11:55"
+    assert rows[0]["exit_urgency"] == "tight"
+
+
+def test_orders_depart_follows_eta(client):
+    from ride_dispatch.db import update_flight_info
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    update_flight_info(web.DB_PATH, "1128000000000099", "12:00", "12:10", None, "est")
+    rows = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    # eta 12:10 + 30 - 40 = 12:00
+    assert rows[0]["depart_hhmm"] == "12:00"
+
+
+def test_orders_enrichment_none_for_quick_orders(client):
+    seed_order()
+    rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
+    assert rows[0]["depart_hhmm"] is None
+    assert rows[0]["exit_urgency"] is None

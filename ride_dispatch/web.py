@@ -19,6 +19,7 @@ from .db import (
     update_order_fields,
     update_price,
 )
+from .flight import depart_hhmm, exit_urgency
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 
@@ -41,6 +42,10 @@ def dashboard():
 def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
+    for o in orders:
+        is_pickup = o.get("service_type") == "接机"
+        o["depart_hhmm"] = depart_hhmm(o) if is_pickup else None
+        o["exit_urgency"] = exit_urgency(o.get("passenger_exit_minutes")) if is_pickup else None
     return jsonify({"orders": orders, "date": date_str})
 
 
@@ -81,6 +86,7 @@ def api_parse_order():
         "banner_fee": banner_fee(order.additional_services),
         "duplicate": order_id_exists(DB_PATH, order.order_id),
         "suggested_price": suggest_price(DB_PATH, order),
+        "exit_urgency": exit_urgency(order.passenger_exit_minutes),
     })
 
 

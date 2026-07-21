@@ -11,6 +11,9 @@ FALLBACK_INTERVAL = 1800
 # ±12h mirrors _attach_date's red-eye convention: covers late-night pickups
 # and delayed flights, rejects the adjacent day's same-numbered leg (~24h off).
 MATCH_WINDOW_HOURS = 12
+DRIVE_MINUTES = 40
+EXIT_URGENT_MAX = 20
+EXIT_TIGHT_MAX = 30
 
 _TIME_RE = re.compile(r"(\d{2}:\d{2})")
 
@@ -26,6 +29,43 @@ def svc_time(arrival_hhmm: str | None, exit_minutes: int) -> str | None:
         return None
     total = int(arrival_hhmm[:2]) * 60 + int(arrival_hhmm[3:5]) + exit_minutes
     return f"{total // 60 % 24:02d}:{total % 60:02d}"
+
+
+def exit_urgency(minutes: int | None) -> str | None:
+    # 0 means "missing" throughout this codebase (see svc_reminder_due), not a band.
+    if not minutes or minutes < 0:
+        return None
+    if minutes <= EXIT_URGENT_MAX:
+        return "urgent"
+    if minutes <= EXIT_TIGHT_MAX:
+        return "tight"
+    return None
+
+
+def predicted_landing_hhmm(order: dict) -> str | None:
+    for key in ("flight_eta", "flight_scheduled"):
+        v = order.get(key)
+        if v and _TIME_RE.fullmatch(v):
+            return v
+    # No flight data: the platform books pickup at scheduled landing + exit
+    # buffer, so walking the exit minutes back recovers a landing estimate.
+    exit_min = order.get("passenger_exit_minutes")
+    if not exit_min:
+        return None
+    try:
+        sched = datetime.strptime(order.get("scheduled_time") or "", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    total = sched.hour * 60 + sched.minute - exit_min
+    return f"{total // 60 % 24:02d}:{total % 60:02d}"
+
+
+def depart_hhmm(order: dict) -> str | None:
+    """When the driver should leave for the airport: landing + exit - drive."""
+    exit_min = order.get("passenger_exit_minutes")
+    if not exit_min:
+        return None
+    return svc_time(predicted_landing_hhmm(order), exit_min - DRIVE_MINUTES)
 
 
 def parse_status(status: str) -> dict:
@@ -159,6 +199,7 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
         return WATCHDOG_INTERVAL
 
     min_seconds = float("inf")
+    urgent_soon = False
     for o in tracking:
         if o.get("flight_status") in ("gate", "cancelled"):
             continue
@@ -167,11 +208,22 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
             continue
         sched = datetime.strptime(o["scheduled_time"], "%Y-%m-%d %H:%M:%S")
         target = _attach_date(arrival, sched)
-        min_seconds = min(min_seconds, (target - now).total_seconds())
+        seconds = (target - now).total_seconds()
+        min_seconds = min(min_seconds, seconds)
+        # Reminders fire before the fetch inside a tick, so a depart push uses
+        # the previous tick's ETA — near landing that staleness must stay
+        # small for urgent-exit orders.
+        exit_min = o.get("passenger_exit_minutes")
+        if exit_min and exit_min <= EXIT_URGENT_MAX and seconds <= 3600:
+            urgent_soon = True
 
     if min_seconds == float("inf"):
-        return FALLBACK_INTERVAL
-    return max(60, int(min_seconds / 2))
+        interval = FALLBACK_INTERVAL
+    else:
+        interval = max(60, int(min_seconds / 2))
+    if urgent_soon:
+        interval = min(interval, 300)
+    return interval
 
 
 # ---- Reminder pure logic (no IO) ----
@@ -202,6 +254,31 @@ def svc_reminder_due(order: dict, now: datetime) -> str | None:
     if (now - svc_dt).total_seconds() >= 7200:
         return None  # staleness guard
     return svc_hhmm
+
+
+def depart_reminder_due(order: dict, now: datetime) -> str | None:
+    """Return depart HH:MM if the departure reminder should fire, else None.
+
+    Unlike svc_reminder_due this must fire pre-landing, so any non-cancelled
+    flight status (including no flight data at all) qualifies.
+    """
+    if order.get('service_type') != '接机':
+        return None
+    if order.get('flight_status') == 'cancelled':
+        return None
+    sent = set(filter(None, (order.get('reminders_sent') or '').split(',')))
+    if 'depart' in sent:
+        return None
+    hhmm = depart_hhmm(order)
+    if not hhmm:
+        return None
+    sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+    due = _attach_date(hhmm, sched)
+    if now < due:
+        return None
+    if (now - due).total_seconds() >= 7200:
+        return None  # staleness guard
+    return hhmm
 
 
 def departure_milestones_due(order: dict, now: datetime) -> list[str]:
@@ -236,6 +313,15 @@ def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
                         svc_dt = _attach_date(svc_hhmm, sched)
                         if svc_dt > now:
                             times.append(svc_dt)
+        # depart reminder (接机; any non-cancelled status, pre-landing included)
+        if o.get('service_type') == '接机' and o.get('flight_status') != 'cancelled':
+            if 'depart' not in sent:
+                hhmm = depart_hhmm(o)
+                if hhmm:
+                    sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+                    due = _attach_date(hhmm, sched)
+                    if due > now:
+                        times.append(due)
         # departure milestones
         if o.get('service_type') in _DEPARTURE_TYPES:
             sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')

@@ -147,6 +147,8 @@
   .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
   .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
   .badge.banner { background: var(--banner-bg); color: var(--banner-fg); margin-left: 5px; }
+  .badge.exit-urgent { background: rgba(255,97,97,.14); color: var(--red); margin-left: 5px; }
+  .badge.exit-tight { background: rgba(255,176,46,.14); color: var(--amber); margin-left: 5px; }
   .time { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .phase { font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 3px; }
   .phase.est { background: var(--pickup-bg); color: var(--pickup-fg); }
@@ -365,6 +367,8 @@
   .sum-row { display: flex; justify-content: space-between; padding: 9px 2px; font-size: 16px; }
   .sum-row .k { color: var(--text-2); }
   .sum-row .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .sum-row .v.urgent { color: var(--red); }
+  .sum-row .v.tight { color: var(--amber); }
   .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
 
   .toast {
@@ -633,18 +637,23 @@ function cardHtml(o, nextId) {
       gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
     }
     const landingTime = o.flight_eta || o.flight_scheduled;
+    let svcT = null;
     if (landingTime && o.passenger_exit_minutes) {
       const [h, m] = landingTime.split(':').map(Number);
       const total = h * 60 + m + o.passenger_exit_minutes;
-      svcTimeHtml = '<div class="svc-time">用車 ' +
-        String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0') + '</div>';
+      svcT = String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
     }
+    const parts = [];
+    if (o.depart_hhmm) parts.push('出發 ' + esc(o.depart_hhmm));
+    if (svcT) parts.push('用車 ' + svcT);
+    if (parts.length) svcTimeHtml = '<div class="svc-time">' + parts.join(' · ') + '</div>';
   }
 
   return '<button class="card' + (done ? ' done' : '') + (isNext ? ' next' : '') +
     '" data-oid="' + esc(o.order_id) + '" onclick="openDetail(this.dataset.oid)">' +
     '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' +
     (banner ? '<span class="badge banner">舉牌</span>' : '') +
+    (o.exit_urgency ? '<span class="badge exit-' + o.exit_urgency + '">出場' + o.passenger_exit_minutes + '</span>' : '') +
     (isNext ? '<span class="next-tag">NEXT</span>' : '') + '</div>' +
     '<span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
     (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
@@ -1151,13 +1160,20 @@ function pastePriceView() {
   if (o.passenger_name) rows.push(['乘客', o.passenger_name]);
   if (phone) rows.push(['電話', phone]);
   if (o.flight_number) rows.push(['航班', o.flight_number]);
+  if (o.passenger_exit_minutes) {
+    let exitVal = o.passenger_exit_minutes + '分鐘';
+    if (p.exit_urgency === 'urgent') exitVal += ' — 降落前要出發';
+    if (p.exit_urgency === 'tight') exitVal += ' — 降落即刻出發';
+    rows.push(['出場', exitVal, p.exit_urgency]);
+  }
   if (o.vehicle_type) rows.push(['車型', o.vehicle_type]);
   if (o.pickup) rows.push(['路線', o.pickup + ' → ' + o.dropoff]);
   if (o.driver_notes) rows.push(['備註', o.driver_notes]);
   if (p.parking_fee) rows.push(['停車費', '$' + $(p.parking_fee)]);
   if (p.banner_fee) rows.push(['舉牌費', '$' + $(p.banner_fee)]);
   const rowsHtml = '<div class="paste-preview">' + rows.map((r, i) =>
-    '<div class="sum-row" style="--i:' + i + '"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>'
+    '<div class="sum-row" style="--i:' + i + '"><span class="k">' + esc(r[0]) + '</span><span class="v' +
+    (r[2] ? ' ' + esc(r[2]) : '') + '">' + esc(r[1]) + '</span></div>'
   ).join('') + '</div>';
 
   if (p.duplicate) {

@@ -1,4 +1,12 @@
-from ride_dispatch.flight import normalize_flight_no, match_flights, parse_status, svc_time
+from ride_dispatch.flight import (
+    normalize_flight_no,
+    match_flights,
+    parse_status,
+    svc_time,
+    exit_urgency,
+    predicted_landing_hhmm,
+    depart_hhmm,
+)
 
 
 def test_normalize_strips_spaces():
@@ -192,3 +200,65 @@ def test_match_preserves_raw_status_for_unknown():
     result = match_flights(orders, arrivals)
     assert result["A"]["status"] is None
     assert result["A"]["raw_status"] == "Diverted To Guangzhou"
+
+
+# ---- exit urgency + depart time ----
+
+
+def test_exit_urgency_bands():
+    assert exit_urgency(None) is None
+    assert exit_urgency(0) is None
+    assert exit_urgency(15) == "urgent"
+    assert exit_urgency(20) == "urgent"
+    assert exit_urgency(21) == "tight"
+    assert exit_urgency(30) == "tight"
+    assert exit_urgency(31) is None
+    assert exit_urgency(60) is None
+
+
+def test_predicted_landing_prefers_eta():
+    assert predicted_landing_hhmm({"flight_eta": "14:26", "flight_scheduled": "14:00"}) == "14:26"
+
+
+def test_predicted_landing_falls_back_to_scheduled():
+    assert predicted_landing_hhmm({"flight_eta": None, "flight_scheduled": "14:00"}) == "14:00"
+
+
+def test_predicted_landing_skips_invalid_eta():
+    assert predicted_landing_hhmm({"flight_eta": "?", "flight_scheduled": "14:00"}) == "14:00"
+
+
+def test_predicted_landing_derives_from_booking_time():
+    order = {"scheduled_time": "2026-07-21 12:00:00", "passenger_exit_minutes": 30}
+    assert predicted_landing_hhmm(order) == "11:30"
+
+
+def test_predicted_landing_none_without_any_anchor():
+    assert predicted_landing_hhmm({"scheduled_time": "2026-07-21 12:00:00"}) is None
+    assert predicted_landing_hhmm({"passenger_exit_minutes": 30, "scheduled_time": "bad"}) is None
+
+
+def test_depart_20min_exit_leads_landing():
+    assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 20}) == "13:40"
+
+
+def test_depart_30min_exit():
+    assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 30}) == "13:50"
+
+
+def test_depart_60min_exit_after_landing():
+    assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 60}) == "14:20"
+
+
+def test_depart_no_flight_data_is_booking_minus_drive():
+    order = {"scheduled_time": "2026-07-21 12:35:00", "passenger_exit_minutes": 30}
+    assert depart_hhmm(order) == "11:55"
+
+
+def test_depart_wraps_midnight():
+    assert depart_hhmm({"flight_eta": "00:10", "passenger_exit_minutes": 20}) == "23:50"
+
+
+def test_depart_none_without_exit_minutes():
+    assert depart_hhmm({"flight_eta": "14:00"}) is None
+    assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 0}) is None
