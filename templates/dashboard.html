@@ -445,6 +445,52 @@ function orderTime(o) {
   const t = (o.scheduled_time || '').split(' ')[1];
   return t ? t.slice(0, 5) : '';
 }
+// JS port of phone.py:format_phone_e164 — display-time only.
+const _KNOWN_CC = new Set(['1','7','44','61','62','63','65','66','81','82','86','852','853','886','971']);
+function formatPhoneE164(raw) {
+  const s = (raw || '').trim();
+  if (!s) return raw;
+  if (s.startsWith('+')) return '+' + s.slice(1).replace(/[\s\-]/g, '');
+  const hasSep = /[\s\-]/.test(s);
+  if (hasSep) {
+    const i = s.search(/[\s\-]/);
+    const cc = s.slice(0, i);
+    let sub = s.slice(i).replace(/[\s\-]/g, '');
+    if (_KNOWN_CC.has(cc)) {
+      if (sub.startsWith('0')) sub = sub.slice(1);
+      return '+' + cc + sub;
+    }
+    return raw;
+  }
+  const d = s.replace(/[\s\-]/g, '');
+  if (!/^\d+$/.test(d)) return raw;
+  if (d.length === 11 && /^1[3-9]/.test(d)) return '+86' + d;
+  if (d.length === 8 && /^[2-9]/.test(d)) return '+852' + d;
+  return raw;
+}
+// Collect distinct labelled phone entries from all four contact fields.
+// Parallel to collect_contact_lines() in bot.py — keep shapes in sync.
+const _bracketRe = /【(.+?)】\s*(.*)/;
+function collectContactLines(o) {
+  const seen = new Set();
+  const result = [];
+  function digits(s) { return s.replace(/\D/g, ''); }
+  function add(label, raw, fmt) {
+    const key = digits(raw);
+    if (key && seen.has(key)) return;
+    if (key) seen.add(key);
+    result.push([label, fmt ? formatPhoneE164(raw) : raw.trim()]);
+  }
+  if ((o.passenger_phone || '').trim()) add('電話', o.passenger_phone, true);
+  if ((o.overseas_phone || '').trim()) add('境外', o.overseas_phone, true);
+  if ((o.third_party_contact || '').trim()) {
+    const m = o.third_party_contact.trim().match(_bracketRe);
+    if (m) add(m[1], m[2].trim(), true);
+    else add('聯絡', o.third_party_contact, false);
+  }
+  if ((o.more_contacts || '').trim()) add('更多', o.more_contacts, true);
+  return result;
+}
 // When an order counts as done: pickups (接机) at service time + 60min —
 // service time = flight ETA (or scheduled arrival) + passenger exit minutes,
 // falling back to the booked time when there is no flight data; every other
@@ -752,10 +798,11 @@ function detailView(sheet) {
 
   let info = '';
   if (p === 'ride') {
-    const phone = o.passenger_phone || o.overseas_phone;
     const rows = [];
     if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
-    if (phone) rows.push(['電話', '<a href="tel:' + esc(phone.replace(/\s+/g, '')) + '">' + esc(phone) + '</a>']);
+    for (const [cl, cv] of collectContactLines(o)) {
+      rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
+    }
     if (o.flight_number) {
       let f = esc(o.flight_number);
       if (o.flight_status === 'gate' && o.flight_gate) f += ' · 已到閘 ' + esc(o.flight_gate);
@@ -1154,11 +1201,10 @@ function addConfirmView(sheet) {
 function pastePriceView() {
   const p = addState.preview, o = p.order;
   const svc = o.service_type === '接机' ? '接機' : o.service_type === '送机' ? '送機' : '單程';
-  const phone = o.passenger_phone || o.overseas_phone;
   const rows = [['平台', p.source + ' · ' + svc]];
   if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16)]);
   if (o.passenger_name) rows.push(['乘客', o.passenger_name]);
-  if (phone) rows.push(['電話', phone]);
+  for (const [cl, cv] of collectContactLines(o)) rows.push([cl, cv]);
   if (o.flight_number) rows.push(['航班', o.flight_number]);
   if (o.passenger_exit_minutes) {
     let exitVal = o.passenger_exit_minutes + '分鐘';

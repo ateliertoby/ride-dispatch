@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -684,6 +685,53 @@ async def _poll_and_notify(context) -> int:
     return _clamp_for_reminders(interval, now)
 
 
+_BRACKET_LABEL_RE = re.compile(r'【(.+?)】\s*(.*)')
+
+
+def collect_contact_lines(order_data: dict) -> list[tuple[str, str]]:
+    """Collect distinct labelled phone entries from all four contact fields.
+
+    Returns (label, display_value) pairs.  Deduplication key is the
+    digits-only form of the number — first occurrence wins in field
+    order: passenger_phone, overseas_phone, third_party_contact,
+    more_contacts.
+    """
+    seen: set[str] = set()
+    result: list[tuple[str, str]] = []
+
+    def _digits(s: str) -> str:
+        return re.sub(r'\D', '', s)
+
+    def _add(label: str, raw: str, fmt: bool = True):
+        key = _digits(raw)
+        if key and key in seen:
+            return
+        if key:
+            seen.add(key)
+        display = format_phone_e164(raw) if fmt else raw.strip()
+        result.append((label, display))
+
+    p_phone = order_data.get("passenger_phone") or ""
+    o_phone = order_data.get("overseas_phone") or ""
+    tp_contact = order_data.get("third_party_contact") or ""
+    more = order_data.get("more_contacts") or ""
+
+    if p_phone.strip():
+        _add("電話", p_phone)
+    if o_phone.strip():
+        _add("境外", o_phone)
+    if tp_contact.strip():
+        m = _BRACKET_LABEL_RE.match(tp_contact.strip())
+        if m:
+            _add(m.group(1), m.group(2).strip())
+        else:
+            _add("聯絡", tp_contact, fmt=False)
+    if more.strip():
+        _add("更多", more)
+
+    return result
+
+
 def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
     lines = ""
     flight = order_data.get("flight_number")
@@ -691,12 +739,8 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
         lines += f"\n航班: {flight}"
     if order_data.get("passenger_name"):
         lines += f"\n乘客: {order_data['passenger_name']}"
-    p_phone = order_data.get("passenger_phone")
-    o_phone = order_data.get("overseas_phone")
-    if p_phone:
-        lines += f"\n電話: {format_phone_e164(p_phone)}"
-    if o_phone:
-        lines += f"\n境外: {format_phone_e164(o_phone)}"
+    for label, display in collect_contact_lines(order_data):
+        lines += f"\n{label}: {display}"
     svc_type = order_data.get("service_type")
     if svc_type == "接机":
         if order_data.get("passenger_exit_minutes") and arrival_hhmm:

@@ -1,4 +1,4 @@
-from ride_dispatch.bot import format_card, _order_lines
+from ride_dispatch.bot import format_card, _order_lines, collect_contact_lines
 from ride_dispatch.parser import Order
 
 
@@ -85,3 +85,83 @@ def test_order_lines_include_exit_minutes():
 
 def test_order_lines_no_exit_when_missing():
     assert "出場" not in _order_lines(_pickup_dict(None), "12:00")
+
+
+# ---- collect_contact_lines / _order_lines contact rendering ----
+
+
+def _contact_dict(**overrides):
+    base = {
+        "passenger_phone": "",
+        "overseas_phone": "",
+        "third_party_contact": "",
+        "more_contacts": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_third_party_whatsapp_label_and_e164():
+    d = _contact_dict(third_party_contact="【WhatsApp】+39 3330000111")
+    lines = collect_contact_lines(d)
+    assert len(lines) == 1
+    assert lines[0] == ("WhatsApp", "+393330000111")
+
+
+def test_more_contacts_label():
+    d = _contact_dict(more_contacts="65 90000001")
+    lines = collect_contact_lines(d)
+    assert len(lines) == 1
+    assert lines[0] == ("更多", "+6590000001")
+
+
+def test_dedupe_overseas_and_third_party_same_number():
+    d = _contact_dict(
+        overseas_phone="86 13800001111",
+        third_party_contact="【WhatsApp】+86 13800001111",
+    )
+    lines = collect_contact_lines(d)
+    assert len(lines) == 1
+    assert lines[0][0] == "境外"
+
+
+def test_third_party_no_bracket_renders_raw():
+    d = _contact_dict(third_party_contact="some-contact-info 12345")
+    lines = collect_contact_lines(d)
+    assert len(lines) == 1
+    assert lines[0] == ("聯絡", "some-contact-info 12345")
+
+
+def test_all_four_distinct_shows_four_lines_in_order():
+    d = _contact_dict(
+        passenger_phone="86 13800001111",
+        overseas_phone="+39 3330000111",
+        third_party_contact="【WhatsApp】+65 90000001",
+        more_contacts="852 91000002",
+    )
+    lines = collect_contact_lines(d)
+    assert len(lines) == 4
+    assert lines[0][0] == "電話"
+    assert lines[1][0] == "境外"
+    assert lines[2][0] == "WhatsApp"
+    assert lines[3][0] == "更多"
+
+
+def test_order_lines_renders_all_contacts():
+    d = {
+        "service_type": "接机",
+        "flight_number": "CX100",
+        "passenger_name": "TEST/USER",
+        "passenger_phone": "86 13800001111",
+        "overseas_phone": "+39 3330000111",
+        "third_party_contact": "【WhatsApp】+65 90000001",
+        "more_contacts": "852 91000002",
+        "passenger_exit_minutes": None,
+        "additional_services": "",
+        "dropoff": "尖沙咀",
+    }
+    text = _order_lines(d)
+    assert "\n電話: +8613800001111" in text
+    assert "\n境外: +393330000111" in text
+    assert "\nWhatsApp: +6590000001" in text
+    assert "\n更多: +85291000002" in text
