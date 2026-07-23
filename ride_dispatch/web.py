@@ -19,7 +19,7 @@ from .db import (
     update_order_fields,
     update_price,
 )
-from .flight import depart_hhmm, exit_urgency
+from .flight import depart_hhmm, effective_service_time, exit_urgency
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 
@@ -42,6 +42,7 @@ def dashboard():
 def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
+    orders.sort(key=effective_service_time)
     for o in orders:
         is_pickup = o.get("service_type") == "接机"
         o["depart_hhmm"] = depart_hhmm(o) if is_pickup else None

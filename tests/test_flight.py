@@ -6,6 +6,7 @@ from ride_dispatch.flight import (
     exit_urgency,
     predicted_landing_hhmm,
     depart_hhmm,
+    effective_service_time,
 )
 
 
@@ -262,3 +263,73 @@ def test_depart_wraps_midnight():
 def test_depart_none_without_exit_minutes():
     assert depart_hhmm({"flight_eta": "14:00"}) is None
     assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 0}) is None
+
+
+# ---- effective_service_time sort key ----
+
+
+def test_effective_svc_time_delayed_pickup():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 18:15:00",
+        "flight_status": "est",
+        "flight_eta": "20:30",
+        "passenger_exit_minutes": None,
+    }
+    assert effective_service_time(order) == "2026-07-23 20:30:00"
+
+
+def test_effective_svc_time_early_with_exit():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 19:18:00",
+        "flight_eta": "18:58",
+        "passenger_exit_minutes": 40,
+    }
+    assert effective_service_time(order) == "2026-07-23 19:38:00"
+
+
+def test_effective_svc_time_no_flight_data():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 18:15:00",
+    }
+    assert effective_service_time(order) == "2026-07-23 18:15:00"
+
+
+def test_effective_svc_time_送机_ignores_flight():
+    order = {
+        "service_type": "送机",
+        "scheduled_time": "2026-07-23 10:00:00",
+        "flight_eta": "09:30",
+        "passenger_exit_minutes": 30,
+    }
+    assert effective_service_time(order) == "2026-07-23 10:00:00"
+
+
+def test_effective_svc_time_quick_order():
+    order = {
+        "service_type": "滴滴",
+        "scheduled_time": "2026-07-23 14:00:00",
+        "flight_eta": "13:00",
+    }
+    assert effective_service_time(order) == "2026-07-23 14:00:00"
+
+
+def test_effective_svc_time_midnight_crossing():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 23:50:00",
+        "flight_eta": "00:10",
+        "passenger_exit_minutes": None,
+    }
+    assert effective_service_time(order) == "2026-07-24 00:10:00"
+
+
+def test_effective_svc_time_malformed_scheduled():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "bad-data",
+        "flight_eta": "18:00",
+    }
+    assert effective_service_time(order) == "bad-data"

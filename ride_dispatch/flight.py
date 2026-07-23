@@ -68,6 +68,49 @@ def depart_hhmm(order: dict) -> str | None:
     return svc_time(predicted_landing_hhmm(order), exit_min - DRIVE_MINUTES)
 
 
+def effective_service_time(order: dict) -> str:
+    """Sort key: predicted passenger walk-out time for 接机, else booked time.
+
+    Returns a "%Y-%m-%d %H:%M:%S" string so lexicographic sort equals
+    chronological sort, and 接机 orders with flight data mix correctly
+    with orders that only have a booked scheduled_time.
+    """
+    sched_str = order.get("scheduled_time") or ""
+    if order.get("service_type") != "接机":
+        return sched_str
+
+    landing_hhmm = None
+    for key in ("flight_eta", "flight_scheduled"):
+        v = order.get(key)
+        if v and _TIME_RE.fullmatch(v):
+            landing_hhmm = v
+            break
+    if not landing_hhmm:
+        return sched_str
+
+    try:
+        sched_dt = datetime.strptime(sched_str, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return sched_str
+
+    landing_dt = sched_dt.replace(
+        hour=int(landing_hhmm[:2]),
+        minute=int(landing_hhmm[3:5]),
+        second=0,
+    )
+    # Midnight crossing: HKIA ETAs are bare HH:MM. Normally the ETA is
+    # close to or earlier than the booked time (booked = landing + exit
+    # buffer). A gap > 12h means the flight lands just after midnight on
+    # the next calendar day (e.g. booked 23:50, ETA 00:10). Only the
+    # forward shift applies — no reverse (mirrors dashboard doneAt()).
+    if (sched_dt - landing_dt).total_seconds() > 12 * 3600:
+        landing_dt += timedelta(days=1)
+
+    exit_min = order.get("passenger_exit_minutes") or 0
+    service_dt = landing_dt + timedelta(minutes=exit_min)
+    return service_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def parse_status(status: str) -> dict:
     if status.startswith("Est at "):
         m = _TIME_RE.search(status)

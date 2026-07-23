@@ -262,3 +262,28 @@ def test_orders_enrichment_none_for_quick_orders(client):
     rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
     assert rows[0]["depart_hhmm"] is None
     assert rows[0]["exit_urgency"] is None
+
+
+# ---- effective service time sort ----
+
+
+def test_api_orders_sorted_by_effective_service_time(client):
+    """Regression: delayed EK384 (booked 18:15, eta 20:30) must sort after
+    UO213 (booked 19:18, eta 18:58+40min exit = svc 19:38)."""
+    import sqlite3
+    from ride_dispatch.db import update_flight_info
+
+    save_quick_order(web.DB_PATH, "EK384-order", "接机", "2026-07-23 18:15:00", 500, 0)
+    update_flight_info(web.DB_PATH, "EK384-order", "18:00", "20:30", None, "est")
+
+    save_quick_order(web.DB_PATH, "UO213-order", "接机", "2026-07-23 19:18:00", 500, 0)
+    update_flight_info(web.DB_PATH, "UO213-order", "19:00", "18:58", None, "est")
+    conn = sqlite3.connect(web.DB_PATH)
+    conn.execute("UPDATE orders SET passenger_exit_minutes = 40 WHERE order_id = 'UO213-order'")
+    conn.commit()
+    conn.close()
+
+    rows = client.get("/api/orders?date=2026-07-23").get_json()["orders"]
+    assert len(rows) == 2
+    assert rows[0]["order_id"] == "UO213-order"   # svc 19:38 < 20:30
+    assert rows[1]["order_id"] == "EK384-order"
