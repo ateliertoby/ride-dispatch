@@ -75,3 +75,30 @@ def test_banner_fee():
     assert banner_fee("举牌服务") == 40.0
     assert banner_fee("") == 0.0
     assert banner_fee(None) == 0.0
+
+
+SPACE_MSG = """订单号：SPACE12345678
+类型：香港-送机
+车型：舒适5座【丰田雷凌等同级车]】
+用车日期：2026-07-25
+用车时间：中午12:30
+上车点：紫珀酒店
+下车点：香港国际机场
+联系人：王小明
+联系电话：13800000007"""
+
+
+def test_parse_any_space():
+    order, source = parse_any(SPACE_MSG)
+    assert source == "SPACE"
+    assert order.order_id == "SPACE12345678"
+    assert order.service_type == "送机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-07-25 12:30:00"
+    assert order.passenger_name == "王小明"
+
+
+def test_space_does_not_match_xiecheng():
+    order, source = parse_any(XIECHENG_MSG)
+    assert source == "携程"
+    assert order.order_id == "1128000000000099"

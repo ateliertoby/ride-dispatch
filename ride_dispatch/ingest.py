@@ -2,11 +2,17 @@
 
 Single source of truth for bot (Telegram) and web (paste) entry points.
 """
-from .parser import Order, parse_order, parse_feizhu, parse_tongcheng
+from .parser import Order, parse_order, parse_feizhu, parse_tongcheng, parse_space
 
 
 def parse_any(text: str) -> tuple[Order, str]:
-    """Try 携程 → 飛豬 → 同程. Caller checks order.order_id for success."""
+    """Try SPACE → 携程 → 飛豬 → 同程. Caller checks order.order_id for success."""
+    # SPACE format — detect by split date field (携程 would false-positive on shared keys)
+    if "用车日期" in text:
+        order = parse_space(text)
+        if order.order_id:
+            return order, "SPACE"
+
     order = parse_order(text)
     source = "携程"
     if not (order.order_id and order.pickup):

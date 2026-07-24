@@ -1,4 +1,4 @@
-from ride_dispatch.parser import parse_order, parse_feizhu, parse_tongcheng
+from ride_dispatch.parser import parse_order, parse_feizhu, parse_tongcheng, parse_space
 
 DROPOFF_MSG = """服务类型: 送机
 接单车型: 特斯拉 Model S
@@ -171,3 +171,55 @@ def test_parse_feizhu_no_flight():
     assert order.service_type == "送机"
     assert order.flight_number == ""
     assert order.passenger_name == "李明"
+
+
+SPACE_MSG = """订单号：SPACE12345678
+类型：香港-送机
+车型：舒适5座【丰田雷凌等同级车]】
+用车日期：2026-07-25
+用车时间：中午12:30
+上车点：紫珀酒店
+下车点：香港国际机场
+联系人：王小明
+联系电话：13800000007"""
+
+
+def test_parse_space_dropoff():
+    order = parse_space(SPACE_MSG)
+    assert order.order_id == "SPACE12345678"
+    assert order.service_type == "送机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-07-25 12:30:00"
+    assert order.pickup == "紫珀酒店"
+    assert order.dropoff == "香港国际机场"
+    assert order.passenger_name == "王小明"
+    assert order.passenger_phone == "13800000007"
+    assert order.raw_message == SPACE_MSG
+
+
+def test_parse_space_pm_time():
+    raw = """订单号：SPACE99999
+类型：深圳-接机
+车型：经济5座
+用车日期：2026-08-01
+用车时间：下午3:30
+上车点：宝安机场
+下车点：南山科技园
+联系人：张三
+联系电话：13500001111"""
+    order = parse_space(raw)
+    assert order.scheduled_time == "2026-08-01 15:30:00"
+
+
+def test_parse_space_no_prefix_time():
+    raw = """订单号：SPACE88888
+类型：香港-送机
+车型：舒适5座
+用车日期：2026-08-02
+用车时间：14:00
+上车点：铜锣湾酒店
+下车点：香港国际机场
+联系人：李四
+联系电话：13600002222"""
+    order = parse_space(raw)
+    assert order.scheduled_time == "2026-08-02 14:00:00"

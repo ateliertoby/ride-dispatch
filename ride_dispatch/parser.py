@@ -280,3 +280,98 @@ def parse_feizhu(raw: str) -> Order:
         more_contacts="",
         raw_message=raw,
     )
+
+
+_SPACE_FIELD_MAP = {
+    "订单号": "order_id",
+    "类型": "service_type",
+    "车型": "vehicle_type",
+    "联系人": "passenger_name",
+    "联系电话": "passenger_phone",
+    "上车点": "pickup",
+    "下车点": "dropoff",
+    "用车日期": "_date",
+    "用车时间": "_time",
+}
+
+_SPACE_BRACKET_RE = re.compile(r"[【\[].*")
+_SPACE_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+# Prefixes that imply PM when hour < 12
+_SPACE_PM_PREFIXES = ("下午", "晚上")
+_SPACE_TIME_PREFIXES = ("中午", "上午", "下午", "晚上", "凌晨")
+
+
+def parse_space(raw: str) -> Order:
+    parsed = {}
+    for line in raw.strip().splitlines():
+        sep = "：" if "：" in line else ":"
+        if sep not in line:
+            continue
+        key, _, value = line.partition(sep)
+        key = key.strip()
+        value = value.strip()
+        if key in _SPACE_FIELD_MAP:
+            parsed[_SPACE_FIELD_MAP[key]] = value
+
+    # service_type: extract part after last '-'
+    stype = parsed.get("service_type", "")
+    if "-" in stype:
+        stype = stype.rsplit("-", 1)[1]
+    parsed["service_type"] = stype
+
+    # vehicle_type: strip bracket suffix
+    vtype = parsed.get("vehicle_type", "")
+    vtype = _SPACE_BRACKET_RE.sub("", vtype).strip()
+    parsed["vehicle_type"] = vtype
+
+    # Merge date + time into scheduled_time
+    date_str = parsed.pop("_date", "")
+    time_str = parsed.pop("_time", "")
+    scheduled = ""
+    if time_str:
+        is_pm = any(time_str.startswith(p) for p in _SPACE_PM_PREFIXES)
+        for p in _SPACE_TIME_PREFIXES:
+            if time_str.startswith(p):
+                time_str = time_str[len(p):]
+                break
+        m = _SPACE_TIME_RE.search(time_str)
+        if m:
+            hour, minute = int(m.group(1)), m.group(2)
+            if is_pm and hour < 12:
+                hour += 12
+            time_part = f"{hour:02d}:{minute}:00"
+            scheduled = f"{date_str} {time_part}" if date_str else time_part
+    elif date_str:
+        scheduled = date_str
+    parsed["scheduled_time"] = scheduled
+
+    if not parsed.get("order_id"):
+        return Order(
+            order_id="", service_type="", vehicle_type="", passenger_name="",
+            scheduled_time="", passenger_phone="", overseas_phone="",
+            flight_number="", pickup="", dropoff="", distance_km=None,
+            notes="", driver_notes="", additional_services="",
+            passenger_exit_minutes=None, third_party_contact="",
+            more_contacts="", raw_message=raw,
+        )
+
+    return Order(
+        order_id=parsed.get("order_id", ""),
+        service_type=parsed.get("service_type", ""),
+        vehicle_type=parsed.get("vehicle_type", ""),
+        passenger_name=parsed.get("passenger_name", ""),
+        scheduled_time=parsed.get("scheduled_time", ""),
+        passenger_phone=parsed.get("passenger_phone", ""),
+        overseas_phone="",
+        flight_number="",
+        pickup=parsed.get("pickup", ""),
+        dropoff=parsed.get("dropoff", ""),
+        distance_km=None,
+        notes="",
+        driver_notes="",
+        additional_services="",
+        passenger_exit_minutes=None,
+        third_party_contact="",
+        more_contacts="",
+        raw_message=raw,
+    )
