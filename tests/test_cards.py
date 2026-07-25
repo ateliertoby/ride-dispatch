@@ -147,6 +147,45 @@ def test_all_four_distinct_shows_four_lines_in_order():
     assert lines[3][0] == "更多"
 
 
+# ---- format_card label and dangling pipe ----
+
+
+def test_card_station_label():
+    card = format_card(make_order(
+        service_type="接站",
+        flight_number="",
+        passenger_exit_minutes=None,
+    ))
+    assert card.startswith("接站")
+
+
+def test_card_no_dangling_pipe_when_no_flight():
+    card = format_card(make_order(
+        service_type="接站",
+        flight_number="",
+        passenger_exit_minutes=None,
+    ))
+    first_line = card.split("\n")[0]
+    assert "|" not in first_line
+
+
+def test_card_pipe_present_when_flight():
+    card = format_card(make_order(flight_number="CX100"))
+    first_line = card.split("\n")[0]
+    assert "接機 | CX100" == first_line
+
+
+def test_card_dancheng_no_flight_no_pipe():
+    card = format_card(make_order(
+        service_type="单程接送",
+        flight_number="",
+        passenger_exit_minutes=None,
+    ))
+    first_line = card.split("\n")[0]
+    assert first_line == "單程"
+    assert "|" not in first_line
+
+
 def test_order_lines_renders_all_contacts():
     d = {
         "service_type": "接机",

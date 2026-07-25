@@ -102,3 +102,35 @@ def test_space_does_not_match_xiecheng():
     order, source = parse_any(XIECHENG_MSG)
     assert source == "携程"
     assert order.order_id == "1128000000000099"
+
+
+JIEZHAN_MSG = """服务类型: 接站
+接单车型: 特斯拉 Model S
+乘客姓名: 陈小明
+用车时间: 2026-07-25 11:20:00
+乘客境外电话:
+航班号:
+上车点: 香港西九龙站(香港西九龙站)
+下车点: 香港紫珀酒店(尖沙咀诺士佛台6号)
+订单备注:
+附加服务:
+订单号: 1128000000000003
+司机可见备注:
+乘客出场时长:
+第三方联系方式:
+订单里程: 3
+更多联系方式:
+乘客电话: 86 13800000006"""
+
+
+def test_parse_any_jiezhan():
+    order, source = parse_any(JIEZHAN_MSG)
+    assert source == "携程"
+    assert order.service_type == "接站"
+    assert order.order_id == "1128000000000003"
+    assert order.distance_km == 3
+
+
+def test_jiezhan_parking_fee_zero():
+    order, source = parse_any(JIEZHAN_MSG)
+    assert parking_fee(order, source) == 0.0

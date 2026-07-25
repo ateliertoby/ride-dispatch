@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from .service import is_flight_pickup, needs_departure_reminder
+
 HKIA_URL = "https://www.hongkongairport.com/flightinfo-rest/rest/flights"
 
 TRACK_BUFFER_HOURS = 3
@@ -76,7 +78,7 @@ def effective_service_time(order: dict) -> str:
     with orders that only have a booked scheduled_time.
     """
     sched_str = order.get("scheduled_time") or ""
-    if order.get("service_type") != "接机":
+    if not is_flight_pickup(order.get("service_type") or ""):
         return sched_str
 
     landing_hhmm = None
@@ -227,7 +229,7 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
     now = now or datetime.now()
     tracking = []
     for o in orders:
-        if o.get("service_type") != "接机" or not o.get("flight_number"):
+        if not is_flight_pickup(o.get("service_type") or "") or not o.get("flight_number"):
             continue
         sched = datetime.strptime(o["scheduled_time"], "%Y-%m-%d %H:%M:%S")
         if _window_end(o, sched) < now:
@@ -271,12 +273,9 @@ def calc_next_interval(orders: list[dict], now: datetime | None = None) -> int |
 
 # ---- Reminder pure logic (no IO) ----
 
-_DEPARTURE_TYPES = ('送机', '单程接送')
-
-
 def svc_reminder_due(order: dict, now: datetime) -> str | None:
     """Return svc HH:MM if the 用車時間 reminder should fire, else None."""
-    if order.get('service_type') != '接机':
+    if not is_flight_pickup(order.get('service_type') or ''):
         return None
     if order.get('flight_status') not in ('landed', 'gate'):
         return None
@@ -305,7 +304,7 @@ def depart_reminder_due(order: dict, now: datetime) -> str | None:
     Unlike svc_reminder_due this must fire pre-landing, so any non-cancelled
     flight status (including no flight data at all) qualifies.
     """
-    if order.get('service_type') != '接机':
+    if not is_flight_pickup(order.get('service_type') or ''):
         return None
     if order.get('flight_status') == 'cancelled':
         return None
@@ -326,7 +325,7 @@ def depart_reminder_due(order: dict, now: datetime) -> str | None:
 
 def departure_milestones_due(order: dict, now: datetime) -> list[str]:
     """Return list of milestone tags (dep30, dep10) that should fire now."""
-    if order.get('service_type') not in _DEPARTURE_TYPES:
+    if not needs_departure_reminder(order.get('service_type') or ''):
         return []
     sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
     sent = set(filter(None, (order.get('reminders_sent') or '').split(',')))
@@ -345,7 +344,7 @@ def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
     for o in orders:
         sent = set(filter(None, (o.get('reminders_sent') or '').split(',')))
         # svc reminder
-        if o.get('service_type') == '接机' and o.get('flight_status') in ('landed', 'gate'):
+        if is_flight_pickup(o.get('service_type') or '') and o.get('flight_status') in ('landed', 'gate'):
             if 'svc' not in sent:
                 eta = o.get('flight_eta')
                 exit_min = o.get('passenger_exit_minutes')
@@ -357,7 +356,7 @@ def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
                         if svc_dt > now:
                             times.append(svc_dt)
         # depart reminder (接机; any non-cancelled status, pre-landing included)
-        if o.get('service_type') == '接机' and o.get('flight_status') != 'cancelled':
+        if is_flight_pickup(o.get('service_type') or '') and o.get('flight_status') != 'cancelled':
             if 'depart' not in sent:
                 hhmm = depart_hhmm(o)
                 if hhmm:
@@ -366,7 +365,7 @@ def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
                     if due > now:
                         times.append(due)
         # departure milestones
-        if o.get('service_type') in _DEPARTURE_TYPES:
+        if needs_departure_reminder(o.get('service_type') or ''):
             sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
             for tag, minutes in [('dep30', 30), ('dep10', 10)]:
                 if tag not in sent:

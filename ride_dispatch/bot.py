@@ -18,6 +18,7 @@ from .ingest import parse_any, parking_fee, banner_fee
 from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
+from .service import is_flight_pickup, label as service_label
 from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, is_configured as whiteboard_configured, WhiteboardError
 
 load_dotenv()
@@ -40,17 +41,17 @@ uber_state: dict[int, dict] = {}
 
 
 def format_card(order) -> str:
-    type_map = {"接机": "接機", "送机": "送機"}
-    type_label = type_map.get(order.service_type, "單程")
+    type_label = service_label(order.service_type)
     time = order.scheduled_time
     if " " in time:
         time = time.split(" ")[1][:5]
+    header = f"{type_label} | {order.flight_number}" if order.flight_number else type_label
     lines = [
-        f"{type_label} | {order.flight_number}",
+        header,
         f"乘客: {order.passenger_name}",
         f"時間: {time}",
     ]
-    if order.service_type == "接机" and order.passenger_exit_minutes:
+    if is_flight_pickup(order.service_type) and order.passenger_exit_minutes:
         exit_line = f"出場: {order.passenger_exit_minutes}分鐘"
         urgency = exit_urgency(order.passenger_exit_minutes)
         if urgency == "urgent":
@@ -415,7 +416,7 @@ async def handle_board(update: Update, context):
         return
     from datetime import date
     orders = get_orders_by_date(DB_PATH, date.today().isoformat())
-    pickups = [o for o in orders if o.get("service_type") == "接机"]
+    pickups = [o for o in orders if is_flight_pickup(o.get("service_type") or "")]
     if not pickups:
         await msg.reply_text("今日冇接機單。")
         return
@@ -442,9 +443,10 @@ async def handle_start(update: Update, context):
             await msg.reply_text("搵唔到呢張單。")
             return
         t = order["scheduled_time"].split(" ")[1][:5] if " " in order["scheduled_time"] else ""
-        type_label = {"接机": "接機", "送机": "送機"}.get(order["service_type"], "單程")
+        type_label = service_label(order["service_type"])
+        flight = order["flight_number"]
         lines = [
-            f"{type_label} | {order['flight_number']}",
+            f"{type_label} | {flight}" if flight else type_label,
             f"乘客: {order['passenger_name']}",
             f"時間: {t}",
         ]
@@ -454,7 +456,7 @@ async def handle_start(update: Update, context):
         parking = order.get("parking_fee") or 0
         if tunnel or parking:
             lines.append(f"成本: 隧道${tunnel:g} 停車${parking:g}")
-        is_pickup = order["service_type"] == "接机"
+        is_pickup = is_flight_pickup(order["service_type"])
         if is_pickup:
             parking_btn = InlineKeyboardButton("免停車費", callback_data=f"waive:parking:{order_id}")
         else:
@@ -573,11 +575,7 @@ async def _check_departure_reminders(bot, chat_id: int, now: datetime):
                 continue
             sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
             t = sched.strftime('%H:%M')
-            svc_type = order.get('service_type')
-            if svc_type == '送机':
-                headline = f"送機提醒 {t} 出發"
-            else:
-                headline = f"接送提醒 {t} 出發"
+            headline = f"{service_label(order.get('service_type') or '')}提醒 {t} 出發"
             # A late-entered order can have both milestones due at once —
             # one push, mark them all, no duplicate messages.
             msg = headline + _order_lines(order)
@@ -638,7 +636,7 @@ async def _poll_and_notify(context) -> int:
     old_statuses = {
         o["order_id"]: o.get("flight_status")
         for o in enriched
-        if o.get("service_type") == "接机" and o.get("flight_number")
+        if is_flight_pickup(o.get("service_type") or "") and o.get("flight_number")
     }
 
     all_updates = {}
@@ -741,8 +739,7 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
         lines += f"\n乘客: {order_data['passenger_name']}"
     for label, display in collect_contact_lines(order_data):
         lines += f"\n{label}: {display}"
-    svc_type = order_data.get("service_type")
-    if svc_type == "接机":
+    if is_flight_pickup(order_data.get("service_type") or ""):
         if order_data.get("passenger_exit_minutes") and arrival_hhmm:
             svc = svc_time(arrival_hhmm, order_data["passenger_exit_minutes"])
             if svc:

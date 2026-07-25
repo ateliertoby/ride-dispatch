@@ -228,3 +228,42 @@ def test_parse_suggested_price_null_no_history(client):
     res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
     assert res.status_code == 200
     assert res.get_json()["suggested_price"] is None
+
+
+# ---- family isolation ----
+
+
+class TestFamilyIsolation:
+    def test_flight_history_does_not_influence_station(self, db_path):
+        _seed(db_path, "F1", "接机", "香港国际机场", "尖沙咀凯悦酒店", 210)
+        _seed(db_path, "F2", "接机", "香港国际机场", "旺角朗豪坊", 210)
+        query = _make_order("SQ", "接站", "香港西九龙站", "九龙塘又一城")
+        assert suggest_price(db_path, query) is None
+
+    def test_station_history_does_not_influence_flight(self, db_path):
+        _seed(db_path, "S1", "接站", "香港西九龙站", "尖沙咀凯悦酒店", 80)
+        _seed(db_path, "S2", "接站", "香港西九龙站", "旺角朗豪坊", 80)
+        query = _make_order("FQ", "接机", "香港国际机场", "九龙塘又一城")
+        assert suggest_price(db_path, query) is None
+
+    def test_station_uses_own_history(self, db_path):
+        _seed(db_path, "S1", "接站", "香港西九龙站", "尖沙咀凯悦酒店", 80)
+        _seed(db_path, "S2", "接站", "香港西九龙站", "旺角朗豪坊", 80)
+        query = _make_order("SQ", "接站", "香港西九龙站", "红磡某酒店")
+        assert suggest_price(db_path, query) == 80.0
+
+    def test_unreceived_station_type_null(self, db_path):
+        """An unclassified type gets no suggestion, not a neighbouring fare."""
+        _seed(db_path, "S1", "接站", "香港西九龙站", "尖沙咀凯悦酒店", 80)
+        _seed(db_path, "S2", "接站", "香港西九龙站", "旺角朗豪坊", 80)
+        query = _make_order("SQ", "送站", "红磡某酒店", "香港西九龙站")
+        assert suggest_price(db_path, query) is None
+
+    def test_dancheng_still_null(self, db_path):
+        _seed(db_path, "D1", "单程接送", "尖沙咀凯悦酒店", "旺角朗豪坊", 100)
+        query = _make_order("DQ", "单程接送", "红磡某酒店", "九龙塘又一城")
+        assert suggest_price(db_path, query) is None
+
+    def test_station_no_history_null(self, db_path):
+        query = _make_order("SQ", "接站", "香港西九龙站", "尖沙咀凯悦酒店")
+        assert suggest_price(db_path, query) is None

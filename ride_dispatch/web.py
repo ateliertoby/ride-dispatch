@@ -22,6 +22,7 @@ from .db import (
 from .flight import depart_hhmm, effective_service_time, exit_urgency
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
+from .service import is_flight_pickup
 
 load_dotenv()
 
@@ -44,7 +45,7 @@ def api_orders():
     orders = get_orders_by_date(DB_PATH, date_str)
     orders.sort(key=effective_service_time)
     for o in orders:
-        is_pickup = o.get("service_type") == "接机"
+        is_pickup = is_flight_pickup(o.get("service_type") or "")
         o["depart_hhmm"] = depart_hhmm(o) if is_pickup else None
         o["exit_urgency"] = exit_urgency(o.get("passenger_exit_minutes")) if is_pickup else None
     return jsonify({"orders": orders, "date": date_str})

@@ -441,6 +441,26 @@ function platform(o) {
   if (o.service_type === 'foodpanda') return 'foodpanda';
   return 'ride';
 }
+// JS port of service.py — display-time classification only.  Keep the service
+// types listed here in step with that module.
+const _QUICK_TYPES = new Set(['滴滴', 'Uber', 'foodpanda']);
+function isFlightPickup(st) { return st === '接机'; }
+function svcLabel(st) {
+  if (st === '接机') return '接機';
+  if (st === '送机') return '送機';
+  if (st === '接站') return '接站';
+  if (_QUICK_TYPES.has(st)) return st;
+  return '單程';
+}
+// Badge class encodes trip direction.
+function svcBadge(o) {
+  const p = platform(o);
+  if (p !== 'ride') return p;
+  const st = o.service_type;
+  if (st === '接机' || st === '接站') return 'pickup';
+  if (st === '送机') return 'dropoff';
+  return 'transfer';
+}
 function orderTime(o) {
   const t = (o.scheduled_time || '').split(' ')[1];
   return t ? t.slice(0, 5) : '';
@@ -499,7 +519,7 @@ function doneAt(o) {
   const day = (o.scheduled_time || '').split(' ')[0];
   if (!day) return null;
   let hhmm, extraMin;
-  if (o.service_type === '接机') {
+  if (isFlightPickup(o.service_type)) {
     hhmm = o.flight_eta || o.flight_scheduled || orderTime(o);
     extraMin = (o.passenger_exit_minutes || 0) + 60;
   } else {
@@ -641,14 +661,11 @@ function toggleFilter(key) {
 }
 
 function cardHtml(o, nextId) {
-  const p = platform(o);
   const done = isDone(o);
   const isNext = o.order_id === nextId;
-  const isPickup = o.service_type === '接机';
-  const isDropoff = o.service_type === '送机';
-  const badge = p !== 'ride' ? p : isPickup ? 'pickup' : isDropoff ? 'dropoff' : 'transfer';
-  const label = p === 'didi' ? '滴滴' : p === 'uber' ? 'Uber' : p === 'foodpanda' ? 'foodpanda'
-    : isPickup ? '接機' : isDropoff ? '送機' : '單程';
+  const isPickup = isFlightPickup(o.service_type);
+  const badge = svcBadge(o);
+  const label = svcLabel(o.service_type);
   const banner = o.banner_fee || 0;
   const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
 
@@ -792,9 +809,8 @@ function detailView(sheet) {
   const o = orders.find(x => x.order_id === sheetOrderId);
   if (!o) { closeSheet(); return; }
   const p = platform(o);
-  const isPickup = o.service_type === '接机';
-  const label = p === 'didi' ? '滴滴' : p === 'uber' ? 'Uber' : p === 'foodpanda' ? 'foodpanda'
-    : isPickup ? '接機' : o.service_type === '送机' ? '送機' : '單程';
+  const isPickup = isFlightPickup(o.service_type);
+  const label = svcLabel(o.service_type);
 
   let info = '';
   if (p === 'ride') {
@@ -845,7 +861,7 @@ function detailView(sheet) {
   }).join('');
 
   sheet.insertAdjacentHTML('beforeend',
-    sheetHead('<span class="badge ' + (p !== 'ride' ? p : isPickup ? 'pickup' : o.service_type === '送机' ? 'dropoff' : 'transfer') + '">' + label + '</span> ' +
+    sheetHead('<span class="badge ' + svcBadge(o) + '">' + label + '</span> ' +
       '<span style="font-variant-numeric:tabular-nums">' + esc(orderTime(o)) + '</span>',
       '#' + esc(shortId(o.order_id))) +
     info + fields +
@@ -1200,7 +1216,7 @@ function addConfirmView(sheet) {
 // and saves — there is deliberately no separate confirmation step.
 function pastePriceView() {
   const p = addState.preview, o = p.order;
-  const svc = o.service_type === '接机' ? '接機' : o.service_type === '送机' ? '送機' : '單程';
+  const svc = svcLabel(o.service_type);
   const rows = [['平台', p.source + ' · ' + svc]];
   if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16)]);
   if (o.passenger_name) rows.push(['乘客', o.passenger_name]);

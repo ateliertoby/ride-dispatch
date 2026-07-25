@@ -211,6 +211,40 @@ def test_parse_space_pm_time():
     assert order.scheduled_time == "2026-08-01 15:30:00"
 
 
+JIEZHAN_MSG = """服务类型: 接站
+接单车型: 特斯拉 Model S
+乘客姓名: 陈小明
+用车时间: 2026-07-25 11:20:00
+乘客境外电话:
+航班号:
+上车点: 香港西九龙站(香港西九龙站)
+下车点: 香港紫珀酒店(尖沙咀诺士佛台6号)
+订单备注:
+附加服务:
+订单号: 1128000000000003
+司机可见备注:
+乘客出场时长:
+第三方联系方式:
+订单里程: 3
+更多联系方式:
+乘客电话: 86 13800000006"""
+
+
+def test_parse_jiezhan():
+    order = parse_order(JIEZHAN_MSG)
+    assert order.service_type == "接站"
+    assert order.order_id == "1128000000000003"
+    assert order.passenger_name == "陈小明"
+    assert order.scheduled_time == "2026-07-25 11:20:00"
+    assert order.flight_number == ""
+    assert order.pickup == "香港西九龙站(香港西九龙站)"
+    assert order.dropoff == "香港紫珀酒店(尖沙咀诺士佛台6号)"
+    assert order.distance_km == 3
+    assert order.vehicle_type == "特斯拉 Model S"
+    assert order.passenger_phone == "86 13800000006"
+    assert order.passenger_exit_minutes is None
+
+
 def test_parse_space_no_prefix_time():
     raw = """订单号：SPACE88888
 类型：香港-送机

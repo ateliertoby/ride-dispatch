@@ -9,6 +9,7 @@ import sqlite3
 from collections import Counter
 
 from .parser import Order
+from .service import FLIGHT_TYPES, anchor_end, is_station
 
 
 # Each zone maps to substring keywords (both Simplified and Traditional).
@@ -96,17 +97,42 @@ def match_zone(text: str) -> str | None:
     return None
 
 
+def _family(service_type: str) -> str | None:
+    """Classify service_type into a pricing family.
+
+    History is isolated per family so station and flight prices never
+    cross-contaminate (西九龍站→尖沙咀 ~3km vs 機場→尖沙咀 ~35km).
+    """
+    if service_type in FLIGHT_TYPES:
+        return 'flight'
+    if is_station(service_type):
+        return 'station'
+    return None
+
+
+def _is_in_family(service_type: str, family: str) -> bool:
+    return _family(service_type) == family
+
+
 def suggest_price(db_path: str, order: Order) -> float | None:
     """Suggest a zone-based price from historical order data.
 
-    Returns the statistical mode of prices for the same (zone, service_type)
-    pair, with the lower price winning on ties.  Returns None when the zone
-    is ambiguous, unknown, or there is no price history.
+    Returns the statistical mode of prices for the same (zone, family,
+    direction) tuple, with the lower price winning on ties.  Returns None
+    when the zone is ambiguous, unknown, or there is no price history.
     """
-    if order.service_type not in ("接机", "送机"):
+    family = _family(order.service_type)
+    if family is None:
         return None
 
-    endpoint = order.dropoff if order.service_type == "接机" else order.pickup
+    end = anchor_end(order.service_type)
+    if end == 'dropoff':
+        endpoint = order.dropoff
+    elif end == 'pickup':
+        endpoint = order.pickup
+    else:
+        return None
+
     if not endpoint:
         return None
 
@@ -119,7 +145,7 @@ def suggest_price(db_path: str, order: Order) -> float | None:
     try:
         rows = conn.execute(
             "SELECT service_type, pickup, dropoff, price FROM orders "
-            "WHERE service_type IN ('接机', '送机') AND price IS NOT NULL"
+            "WHERE price IS NOT NULL"
         ).fetchall()
     finally:
         conn.close()
@@ -127,7 +153,10 @@ def suggest_price(db_path: str, order: Order) -> float | None:
     prices_direction: list[float] = []
     prices_zone: list[float] = []
     for stype, pickup, dropoff, price in rows:
-        hist_endpoint = dropoff if stype == "接机" else pickup
+        if not _is_in_family(stype, family):
+            continue
+        hist_end = anchor_end(stype)
+        hist_endpoint = dropoff if hist_end == 'dropoff' else pickup if hist_end == 'pickup' else None
         if hist_endpoint and match_zone(hist_endpoint) == zone:
             prices_zone.append(price)
             if stype == order.service_type:

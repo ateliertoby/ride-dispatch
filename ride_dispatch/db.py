@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
 from .ingest import banner_fee
+from .service import needs_departure_reminder
 
 COARSE_WINDOW_HOURS = 24
 
@@ -234,15 +235,18 @@ def get_departure_reminders(db_path: str, now: datetime) -> list[dict]:
     low = now.strftime("%Y-%m-%d %H:%M:%S")
     high = (now + timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
     with _conn(db_path) as conn:
+        # Service-type filtering is deliberately omitted from the SQL: the
+        # rule lives in service.needs_departure_reminder, and restating it
+        # as an IN list here would be a second place to update.  Volume is
+        # 3-7 orders/day so the extra rows from a coarse filter are free.
         rows = conn.execute(
             "SELECT * FROM orders "
-            "WHERE service_type IN ('送机', '单程接送') "
-            "AND coalesce(status,'active') = 'active' "
+            "WHERE coalesce(status,'active') = 'active' "
             "AND scheduled_time >= ? AND scheduled_time <= ? "
             "ORDER BY scheduled_time",
             (low, high),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in rows if needs_departure_reminder(r["service_type"] or "")]
 
 
 def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | None, gate: str | None, status: str | None, hall: str | None = None):

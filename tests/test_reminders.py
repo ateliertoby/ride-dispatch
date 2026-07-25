@@ -677,3 +677,42 @@ def test_pending_depart_no_flight_data_uses_booking():
     }
     # depart = 13:30 - 40 = 12:50; svc branch needs landed/gate so this is the only entry
     assert pending_reminder_times([order], NOW) == [datetime(2026, 7, 13, 12, 50, 0)]
+
+
+# ---- 接站 departure milestones ----
+
+
+def test_jiezhan_dep30_fires(db_path):
+    """Station pickup fires dep30 via get_departure_reminders + milestones."""
+    save_order(db_path, make_order(
+        order_id="Z1", service_type="接站",
+        scheduled_time="2026-07-13 12:30:00",
+        flight_number="",
+        pickup="香港西九龙站(香港西九龙站)",
+        dropoff="香港紫珀酒店(尖沙咀诺士佛台6号)",
+    ), telegram_msg_id=1)
+    orders = get_departure_reminders(db_path, NOW)
+    assert len(orders) == 1
+    assert orders[0]["order_id"] == "Z1"
+    tags = departure_milestones_due(orders[0], NOW)
+    assert "dep30" in tags
+
+
+def test_jiezhan_dep10_fires():
+    order = {
+        "service_type": "接站",
+        "scheduled_time": "2026-07-13 12:10:00",
+        "reminders_sent": "",
+    }
+    assert "dep10" in departure_milestones_due(order, NOW)
+
+
+def test_jiezhan_pending_dep_future():
+    order = {
+        "service_type": "接站",
+        "scheduled_time": "2026-07-13 12:40:00",
+        "reminders_sent": "",
+    }
+    times = pending_reminder_times([order], NOW)
+    assert datetime(2026, 7, 13, 12, 10, 0) in times
+    assert datetime(2026, 7, 13, 12, 30, 0) in times
