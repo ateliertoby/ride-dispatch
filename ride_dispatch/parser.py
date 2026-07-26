@@ -375,3 +375,84 @@ def parse_space(raw: str) -> Order:
         more_contacts="",
         raw_message=raw,
     )
+
+
+_FX_FIELD_MAP = {
+    "平台订单号": "order_id",
+    "出行时间": "scheduled_time",
+    "出发地": "pickup",
+    "目的地": "dropoff",
+    "客人姓名": "passenger_name",
+    "客人联系方式": "passenger_phone",
+    "平台备注": "notes",
+}
+
+# 出行时间 arrives without seconds, hour not always zero-padded.
+_FX_TIME_NO_SEC_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{1,2}):(\d{2})$")
+
+
+def parse_fenxiao(raw: str) -> Order:
+    parsed = {}
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        sep = "：" if "：" in line else ":"
+        if sep not in line:
+            continue
+        key, _, value = line.partition(sep)
+        key = key.strip()
+        value = value.strip()
+        if key in _FX_FIELD_MAP:
+            parsed[_FX_FIELD_MAP[key]] = value
+
+    oid = parsed.get("order_id", "")
+    if "-" in oid:
+        oid = oid.split("-")[0]
+    parsed["order_id"] = oid
+
+    if not oid:
+        return Order(
+            order_id="", service_type="", vehicle_type="", passenger_name="",
+            scheduled_time="", passenger_phone="", overseas_phone="",
+            flight_number="", pickup="", dropoff="", distance_km=None,
+            notes="", driver_notes="", additional_services="",
+            passenger_exit_minutes=None, third_party_contact="",
+            more_contacts="", raw_message=raw,
+        )
+
+    # Every scheduled_time consumer (flight.py, reminder pushes) strptime's
+    # "%Y-%m-%d %H:%M:%S"; a seconds-less value silently breaks all of them.
+    scheduled = parsed.get("scheduled_time", "")
+    m = _FX_TIME_NO_SEC_RE.match(scheduled)
+    if m:
+        scheduled = f"{m.group(1)} {int(m.group(2)):02d}:{m.group(3)}:00"
+
+    # No explicit service field in this format — infer from pickup/dropoff.
+    dropoff = parsed.get("dropoff", "").lower()
+    pickup = parsed.get("pickup", "").lower()
+    if any(kw in dropoff for kw in _AIRPORT_KEYWORDS):
+        service_type = "送机"
+    elif any(kw in pickup for kw in _AIRPORT_KEYWORDS):
+        service_type = "接机"
+    else:
+        service_type = ""
+
+    return Order(
+        order_id=parsed.get("order_id", ""),
+        service_type=service_type,
+        vehicle_type="",
+        passenger_name=parsed.get("passenger_name", ""),
+        scheduled_time=scheduled,
+        passenger_phone=parsed.get("passenger_phone", ""),
+        overseas_phone="",
+        flight_number="",
+        pickup=parsed.get("pickup", ""),
+        dropoff=parsed.get("dropoff", ""),
+        distance_km=None,
+        notes=parsed.get("notes", ""),
+        driver_notes="",
+        additional_services="",
+        passenger_exit_minutes=None,
+        third_party_contact="",
+        more_contacts="",
+        raw_message=raw,
+    )

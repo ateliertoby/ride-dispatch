@@ -2,16 +2,32 @@
 
 Single source of truth for bot (Telegram) and web (paste) entry points.
 """
-from .parser import Order, parse_order, parse_feizhu, parse_tongcheng, parse_space
+from .parser import Order, parse_order, parse_feizhu, parse_tongcheng, parse_space, parse_fenxiao
 
 
 def parse_any(text: str) -> tuple[Order, str]:
-    """Try SPACE → 携程 → 飛豬 → 同程. Caller checks order.order_id for success."""
+    """Try SPACE → 分銷 → 携程 → 飛豬 → 同程. Caller checks order.order_id for success."""
     # SPACE format — detect by split date field (携程 would false-positive on shared keys)
     if "用车日期" in text:
         order = parse_space(text)
         if order.order_id:
             return order, "SPACE"
+
+    # 分銷 format — 平台订单号 is unique to it; the distributor name rides
+    # along as the order id suffix, so each distributor gets its own source.
+    if "平台订单号" in text:
+        order = parse_fenxiao(text)
+        if order.order_id:
+            source = "分銷"
+            for line in text.strip().splitlines():
+                line_s = line.strip()
+                if line_s.startswith("平台订单号") and ("：" in line_s or ":" in line_s):
+                    sep = "：" if "：" in line_s else ":"
+                    oid_full = line_s.partition(sep)[2].strip()
+                    if "-" in oid_full:
+                        source = oid_full.split("-", 1)[1]
+                    break
+            return order, source
 
     order = parse_order(text)
     source = "携程"

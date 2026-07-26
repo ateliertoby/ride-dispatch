@@ -134,3 +134,41 @@ def test_parse_any_jiezhan():
 def test_jiezhan_parking_fee_zero():
     order, source = parse_any(JIEZHAN_MSG)
     assert parking_fee(order, source) == 0.0
+
+
+FENXIAO_MSG = """平台订单号：DD26080100TEST0-銀河分銷
+
+出行时间：2026-08-01 11:30
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG), Sky Plaza Road 1, Hong Kong, Chek Lap Kok, Hong Kong SAR China
+乘客数：2
+行李数：3
+客人姓名：TANAKA/HANAKO
+客人联系方式：+8108012345678
+平台备注：Please provide the service according to the scheduled time."""
+
+
+def test_parse_any_fenxiao_source_from_suffix():
+    order, source = parse_any(FENXIAO_MSG)
+    assert source == "銀河分銷"
+    assert order.order_id == "DD26080100TEST0"
+    assert order.service_type == "送机"
+    assert order.scheduled_time == "2026-08-01 11:30:00"
+    assert order.passenger_name == "TANAKA/HANAKO"
+
+
+def test_parse_any_fenxiao_source_fallback():
+    raw = """平台订单号：DD26080500TEST0
+出行时间：2026-08-05 11:30
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG)
+客人姓名：TANAKA/HANAKO
+客人联系方式：+8108012345678"""
+    order, source = parse_any(raw)
+    assert source == "分銷"
+    assert order.order_id == "DD26080500TEST0"
+
+
+def test_fenxiao_no_parking_fee():
+    order, source = parse_any(FENXIAO_MSG)
+    assert parking_fee(order, source) == 0.0

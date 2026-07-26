@@ -1,4 +1,6 @@
-from ride_dispatch.parser import parse_order, parse_feizhu, parse_tongcheng, parse_space
+from ride_dispatch.parser import (
+    parse_order, parse_feizhu, parse_tongcheng, parse_space, parse_fenxiao
+)
 
 DROPOFF_MSG = """服务类型: 送机
 接单车型: 特斯拉 Model S
@@ -257,3 +259,73 @@ def test_parse_space_no_prefix_time():
 联系电话：13600002222"""
     order = parse_space(raw)
     assert order.scheduled_time == "2026-08-02 14:00:00"
+
+
+FENXIAO_MSG = """平台订单号：DD26080100TEST0-銀河分銷
+
+出行时间：2026-08-01 11:30
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG), Sky Plaza Road 1, Hong Kong, Chek Lap Kok, Hong Kong SAR China
+乘客数：2
+行李数：3
+客人姓名：TANAKA/HANAKO
+客人联系方式：+8108012345678
+平台备注：Please provide the service according to the scheduled time."""
+
+
+def test_parse_fenxiao_dropoff():
+    order = parse_fenxiao(FENXIAO_MSG)
+    assert order.order_id == "DD26080100TEST0"
+    assert order.service_type == "送机"
+    assert order.scheduled_time == "2026-08-01 11:30:00"
+    assert order.pickup == "Disney Explorers Lodge"
+    assert order.dropoff.startswith("Hong Kong International Airport (HKG)")
+    assert order.passenger_name == "TANAKA/HANAKO"
+    assert order.passenger_phone == "+8108012345678"
+    assert order.notes == "Please provide the service according to the scheduled time."
+    assert order.driver_notes == ""
+    assert order.vehicle_type == ""
+    assert order.flight_number == ""
+    assert order.raw_message == FENXIAO_MSG
+
+
+def test_parse_fenxiao_pickup():
+    raw = """平台订单号：DD26080200TEST0-銀河分銷
+出行时间：2026-08-02 09:05
+出发地：Hong Kong International Airport (HKG), Chek Lap Kok
+目的地：Disney Explorers Lodge
+客人姓名：TANAKA/TARO
+客人联系方式：+8108012345679"""
+    order = parse_fenxiao(raw)
+    assert order.service_type == "接机"
+    assert order.scheduled_time == "2026-08-02 09:05:00"
+
+
+def test_parse_fenxiao_pads_single_digit_hour():
+    raw = """平台订单号：DD26080300TEST0-銀河分銷
+出行时间：2026-08-03 7:05
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG)"""
+    order = parse_fenxiao(raw)
+    assert order.scheduled_time == "2026-08-03 07:05:00"
+
+
+def test_parse_fenxiao_keeps_existing_seconds():
+    raw = """平台订单号：DD26080400TEST0-銀河分銷
+出行时间：2026-08-04 18:45:30
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG)"""
+    order = parse_fenxiao(raw)
+    assert order.scheduled_time == "2026-08-04 18:45:30"
+
+
+def test_parse_fenxiao_no_order_id():
+    raw = """出行时间：2026-08-01 11:30
+出发地：Disney Explorers Lodge
+目的地：Hong Kong International Airport (HKG)
+客人姓名：TANAKA/HANAKO"""
+    order = parse_fenxiao(raw)
+    assert order.order_id == ""
+    assert order.pickup == ""
+    assert order.scheduled_time == ""
+    assert order.raw_message == raw
