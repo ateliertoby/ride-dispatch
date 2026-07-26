@@ -466,11 +466,26 @@ function orderTime(o) {
   return t ? t.slice(0, 5) : '';
 }
 // JS port of phone.py:format_phone_e164 — display-time only.
+// _KNOWN_CC mirrors phone.py:KNOWN_CC — keep both lists in sync.
 const _KNOWN_CC = new Set(['1','7','44','61','62','63','65','66','81','82','86','852','853','886','971']);
 function formatPhoneE164(raw) {
   const s = (raw || '').trim();
   if (!s) return raw;
-  if (s.startsWith('+')) return '+' + s.slice(1).replace(/[\s\-]/g, '');
+  // Drop the trunk zero some channels leave between CC and subscriber
+  // (+81 0 80... won't dial IDD). Longest CC match first so 852/853/886
+  // beat the 1-digit codes.
+  if (s.startsWith('+')) {
+    const d = s.slice(1).replace(/[\s\-]/g, '');
+    for (const n of [3, 2, 1]) {
+      const cc = d.slice(0, n);
+      if (_KNOWN_CC.has(cc)) {
+        let sub = d.slice(n);
+        if (sub.startsWith('0')) sub = sub.slice(1);
+        return '+' + cc + sub;
+      }
+    }
+    return '+' + d;
+  }
   const hasSep = /[\s\-]/.test(s);
   if (hasSep) {
     const i = s.search(/[\s\-]/);

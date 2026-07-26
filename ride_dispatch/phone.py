@@ -20,9 +20,19 @@ def format_phone_e164(raw: str) -> str:
     if not s:
         return raw
 
-    # Already has +: collapse separators, keep as-is
+    # Already has +: collapse separators, then drop the trunk zero some
+    # channels leave between CC and subscriber (+81 0 80... won't dial IDD).
+    # Longest CC match first so 852/853/886 beat the 1-digit codes.
     if s.startswith('+'):
-        return '+' + _SEP_RE.sub('', s[1:])
+        digits = _SEP_RE.sub('', s[1:])
+        for n in (3, 2, 1):
+            cc = digits[:n]
+            if cc in KNOWN_CC:
+                subscriber = digits[n:]
+                if subscriber.startswith('0'):
+                    subscriber = subscriber[1:]
+                return f'+{cc}{subscriber}'
+        return '+' + digits
 
     has_sep = bool(_SEP_RE.search(s))
 

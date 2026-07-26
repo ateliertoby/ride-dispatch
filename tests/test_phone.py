@@ -31,6 +31,14 @@ from ride_dispatch.phone import format_phone_e164
     # Already has +
     ("+852 5111 1111", "+85251111111"),
     ("+86-138-0000-0000", "+8613800000000"),
+    # + form with trunk zero left after the CC (strip the 0)
+    ("+8108012345678", "+818012345678"),
+    ("+81 080-1234-5678", "+818012345678"),
+    # + form without trunk zero — untouched
+    ("+85251111111", "+85251111111"),
+    ("+886922222222", "+886922222222"),
+    # + form with a CC outside KNOWN_CC — untouched, trunk zero and all
+    ("+390212345678", "+390212345678"),
     # Unknown shape — passthrough unchanged
     ("12345", "12345"),
     ("999 12345", "999 12345"),
