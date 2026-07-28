@@ -288,13 +288,18 @@ _SPACE_FIELD_MAP = {
     "车型": "vehicle_type",
     "联系人": "passenger_name",
     "联系电话": "passenger_phone",
+    # Relayed copies of this format carry the contact under shorter keys.
+    # Matching is exact-key, so these cannot swallow 乘客姓名/乘客电话.
+    "姓名": "passenger_name",
+    "电话": "passenger_phone",
     "上车点": "pickup",
     "下车点": "dropoff",
     "用车日期": "_date",
     "用车时间": "_time",
 }
 
-_SPACE_BRACKET_RE = re.compile(r"[【\[].*")
+# The example-model suffix after 车型 comes in any of these bracket styles.
+_SPACE_BRACKET_RE = re.compile(r"[【\[（(].*")
 _SPACE_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
 # Prefixes that imply PM when hour < 12
 _SPACE_PM_PREFIXES = ("下午", "晚上")
@@ -312,6 +317,14 @@ def parse_space(raw: str) -> Order:
         value = value.strip()
         if key in _SPACE_FIELD_MAP:
             parsed[_SPACE_FIELD_MAP[key]] = value
+
+    # A relaying distributor appends its name to 订单号. order_id is the DB
+    # UNIQUE dedupe key, so the suffix must go or the same order relayed by two
+    # channels lands twice.
+    oid = parsed.get("order_id", "")
+    if "-" in oid:
+        oid = oid.split("-")[0]
+    parsed["order_id"] = oid
 
     # service_type: extract part after last '-'
     stype = parsed.get("service_type", "")

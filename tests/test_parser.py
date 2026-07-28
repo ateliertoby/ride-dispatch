@@ -213,6 +213,33 @@ def test_parse_space_pm_time():
     assert order.scheduled_time == "2026-08-01 15:30:00"
 
 
+# Distributor-relayed copy of the SPACE format: 姓名/电话 keys, round-paren
+# 车型 suffix, distributor name on 订单号. Stray spaces and half-width colons
+# are reproduced from a real message — key.strip() has to absorb them.
+SPACE_RELAY_MSG = """订单号：3300000000000000001-測試分銷
+类型：香港-送机
+车型：舒适5座(丰田雷凌等同级车)
+用车日期：2026-07-28  
+用车时间：17:10
+上车点：尖沙咀瑰丽酒店
+下车点：香港国际机场
+ 姓名:李小芳 
+电话:13800001234"""
+
+
+def test_parse_space_relay_variant():
+    order = parse_space(SPACE_RELAY_MSG)
+    assert order.order_id == "3300000000000000001"
+    assert order.service_type == "送机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-07-28 17:10:00"
+    assert order.pickup == "尖沙咀瑰丽酒店"
+    assert order.dropoff == "香港国际机场"
+    assert order.passenger_name == "李小芳"
+    assert order.passenger_phone == "13800001234"
+    assert order.raw_message == SPACE_RELAY_MSG
+
+
 JIEZHAN_MSG = """服务类型: 接站
 接单车型: 特斯拉 Model S
 乘客姓名: 陈小明

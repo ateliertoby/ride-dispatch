@@ -1232,7 +1232,7 @@ function addConfirmView(sheet) {
 function pastePriceView() {
   const p = addState.preview, o = p.order;
   const svc = svcLabel(o.service_type);
-  const rows = [['平台', p.source + ' · ' + svc]];
+  const rows = [['平台', [p.source, svc].filter(Boolean).join(' · ')]];
   if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16)]);
   if (o.passenger_name) rows.push(['乘客', o.passenger_name]);
   for (const [cl, cv] of collectContactLines(o)) rows.push([cl, cv]);

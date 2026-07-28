@@ -11,7 +11,19 @@ def parse_any(text: str) -> tuple[Order, str]:
     if "用车日期" in text:
         order = parse_space(text)
         if order.order_id:
-            return order, "SPACE"
+            # Several channels relay this format, so it no longer identifies
+            # one. Only the 订单号 suffix names the relaying distributor;
+            # without it the source stays empty rather than misattributing.
+            source = ""
+            for line in text.strip().splitlines():
+                line_s = line.strip()
+                if line_s.startswith("订单号") and ("：" in line_s or ":" in line_s):
+                    sep = "：" if "：" in line_s else ":"
+                    oid_full = line_s.partition(sep)[2].strip()
+                    if "-" in oid_full:
+                        source = oid_full.split("-", 1)[1]
+                    break
+            return order, source
 
     # 分銷 format — 平台订单号 is unique to it; the distributor name rides
     # along as the order id suffix, so each distributor gets its own source.

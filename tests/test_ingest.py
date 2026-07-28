@@ -90,12 +90,36 @@ SPACE_MSG = """订单号：SPACE12345678
 
 def test_parse_any_space():
     order, source = parse_any(SPACE_MSG)
-    assert source == "SPACE"
+    # No 订单号 suffix means no known relaying distributor, and the format
+    # itself names no channel — an empty source beats guessing one.
+    assert source == ""
     assert order.order_id == "SPACE12345678"
     assert order.service_type == "送机"
     assert order.vehicle_type == "舒适5座"
     assert order.scheduled_time == "2026-07-25 12:30:00"
     assert order.passenger_name == "王小明"
+
+
+SPACE_RELAY_MSG = """订单号：3300000000000000001-測試分銷
+类型：香港-送机
+车型：舒适5座(丰田雷凌等同级车)
+用车日期：2026-07-28  
+用车时间：17:10
+上车点：尖沙咀瑰丽酒店
+下车点：香港国际机场
+ 姓名:李小芳 
+电话:13800001234"""
+
+
+def test_parse_any_space_relay_source_from_suffix():
+    order, source = parse_any(SPACE_RELAY_MSG)
+    assert source == "測試分銷"
+    assert order.order_id == "3300000000000000001"
+    assert order.service_type == "送机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-07-28 17:10:00"
+    assert order.passenger_name == "李小芳"
+    assert order.passenger_phone == "13800001234"
 
 
 def test_space_does_not_match_xiecheng():
