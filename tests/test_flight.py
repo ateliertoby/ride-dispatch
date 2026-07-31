@@ -22,6 +22,44 @@ def test_normalize_multiple_spaces():
     assert normalize_flight_no("CX  4 89") == "CX489"
 
 
+def test_normalize_strips_four_digit_padding():
+    # Some booking sources pad the number to four digits; the feed does not.
+    assert normalize_flight_no("HX0239") == "HX239"
+    assert normalize_flight_no("HX 239") == "HX239"
+
+
+def test_normalize_strips_three_digit_padding():
+    # HKIA pads to a minimum of three digits, so all three written forms of
+    # the same flight must collapse onto one key.
+    assert normalize_flight_no("HX018") == "HX18"
+    assert normalize_flight_no("HX18") == "HX18"
+    assert normalize_flight_no("HX0018") == "HX18"
+    assert normalize_flight_no("AC 007") == "AC7"
+    assert normalize_flight_no("AC7") == "AC7"
+    assert normalize_flight_no("TK 070") == "TK70"
+
+
+def test_normalize_keeps_interior_zeros():
+    assert normalize_flight_no("MU5018") == "MU5018"
+
+
+def test_normalize_digit_bearing_designator():
+    # The digit in 9C/5J/B7 belongs to the airline code, not the number.
+    assert normalize_flight_no("9C8888") == "9C8888"
+    assert normalize_flight_no("5J0111") == "5J111"
+    assert normalize_flight_no("B70101") == "B7101"
+
+
+def test_normalize_keeps_suffix_letter():
+    assert normalize_flight_no("CX880D") == "CX880D"
+
+
+def test_normalize_unrecognised_shape_falls_back():
+    # An unexpected shape keeps the space-stripped uppercase form, so it still
+    # matches itself on both sides of the lookup.
+    assert normalize_flight_no("CX88012") == "CX88012"
+
+
 def test_parse_status_est():
     assert parse_status("Est at 14:26") == {"eta": "14:26", "gate": None, "status": "est"}
 
@@ -117,6 +155,31 @@ def test_match_multiple_orders():
         "O1": {"date": "2026-07-02", "scheduled": "13:00", "hall": "A", "baggage": "3", "raw_status": "Est at 14:26", "eta": "14:26", "gate": None, "status": "est"},
         "O2": {"date": "2026-07-02", "scheduled": "14:30", "hall": "B", "baggage": "9", "raw_status": "Landed 14:35", "eta": "14:35", "gate": None, "status": "landed"},
     }
+
+
+# --- zero-padding: the order and the feed can write the same flight with
+# --- different amounts of padding; both must reach the same lookup key ---
+
+
+def test_match_order_padded_to_four_digits():
+    arrivals = [
+        {"date": "2026-07-30", "time": "21:55", "flight": [{"no": "HX 239"}],
+         "status": "Est at 23:00", "hall": "B", "baggage": "6"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "HX0239", "scheduled_time": "2026-07-30 22:40:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["eta"] == "23:00"
+    assert result["A"]["status"] == "est"
+
+
+def test_match_unpadded_order_against_padded_feed():
+    arrivals = [
+        {"date": "2026-07-30", "time": "14:00", "flight": [{"no": "HX 018"}],
+         "status": "Landed 14:05", "hall": "A", "baggage": "2"},
+    ]
+    orders = [{"order_id": "A", "flight_number": "HX18", "scheduled_time": "2026-07-30 15:00:00"}]
+    result = match_flights(orders, arrivals)
+    assert result["A"]["status"] == "landed"
 
 
 # --- date-aware matching: HKIA span=1 returns the previous day too, and

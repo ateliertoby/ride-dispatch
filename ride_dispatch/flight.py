@@ -18,10 +18,18 @@ EXIT_URGENT_MAX = 20
 EXIT_TIGHT_MAX = 30
 
 _TIME_RE = re.compile(r"(\d{2}:\d{2})")
+# Booking sources and the HKIA feed disagree on zero-padding (HKIA pads the
+# number to a minimum of 3 digits, some sources pad to 4), so the numeric part
+# must be canonicalised for exact-key matching. Alternation order matters: the
+# 3-letter ICAO code is tried before the 2-char forms, and digit-bearing IATA
+# codes (9C, 5J, B7) parse as designator rather than as flight digits.
+_FLIGHT_NO_RE = re.compile(r"^([A-Z]{3}|[A-Z]{2}|[A-Z]\d|\d[A-Z])0*(\d{1,4})([A-Z]?)$")
 
 
 def normalize_flight_no(s: str) -> str:
-    return s.replace(" ", "").upper()
+    s = s.replace(" ", "").upper()
+    m = _FLIGHT_NO_RE.fullmatch(s)
+    return "".join(m.groups()) if m else s
 
 
 def svc_time(arrival_hhmm: str | None, exit_minutes: int) -> str | None:
