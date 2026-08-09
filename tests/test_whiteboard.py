@@ -79,6 +79,17 @@ def test_qualifies_pickup_with_banner():
         assert qualifies_for_auto(order) is True
 
 
+def test_qualifies_bare_banner_flag():
+    # 同程 orders carry no 附加服务 field; the parser sets this bare literal.
+    order = {
+        "service_type": "接机",
+        "additional_services": "举牌",
+        "reminders_sent": "",
+    }
+    with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
+        assert qualifies_for_auto(order) is True
+
+
 def test_not_qualifies_no_banner():
     order = {
         "service_type": "接机",

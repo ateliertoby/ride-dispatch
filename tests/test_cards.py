@@ -115,6 +115,13 @@ def test_more_contacts_label():
     assert lines[0] == ("更多", "+6590000001")
 
 
+def test_more_contacts_bracket_label_and_e164():
+    d = _contact_dict(more_contacts="【同行人】852-69876543")
+    lines = collect_contact_lines(d)
+    assert len(lines) == 1
+    assert lines[0] == ("同行人", "+85269876543")
+
+
 def test_dedupe_overseas_and_third_party_same_number():
     d = _contact_dict(
         overseas_phone="86 13800001111",

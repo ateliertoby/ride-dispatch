@@ -61,7 +61,12 @@ def parse_any(text: str) -> tuple[Order, str]:
 
 
 def parking_fee(order: Order, source: str) -> float:
-    return 32.0 if source == "携程" and order.service_type == "接机" else 0.0
+    # 举牌 means meeting the passenger inside the terminal, so the driver enters
+    # the car park whatever the channel. Pickups from 携程 always park too.
+    return 32.0 if (
+        (source == "携程" and order.service_type == "接机")
+        or "举牌" in (order.additional_services or "")
+    ) else 0.0
 
 
 def banner_fee(additional_services: str | None) -> float:

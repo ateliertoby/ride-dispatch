@@ -112,9 +112,14 @@ _TC_FIELD_MAP = {
 _TC_NO_COLON = {
     "乘客姓名": "passenger_name",
     "乘客手机号": "passenger_phone",
+    "同行人电话": "companion_phone",
     "成人数": "adults",
     "儿童数": "children",
 }
+
+# The sign-holding request arrives as a free-standing line rather than a
+# labelled field, in either script depending on who relayed it.
+_TC_BANNER_MARKERS = ("舉牌", "举牌")
 
 
 def parse_tongcheng(raw: str) -> Order:
@@ -168,6 +173,16 @@ def parse_tongcheng(raw: str) -> Order:
     phone = parsed.get("passenger_phone", "").replace("-", " ")
     flight = parsed.get("flight_number", "").lstrip("￥").strip()
 
+    # 【label】number is the contact-line convention every renderer understands;
+    # without the label the companion's number is indistinguishable from the
+    # passenger's own.
+    companion = parsed.get("companion_phone", "")
+    more_contacts = f"【同行人】{companion}" if companion else ""
+
+    # Normalized to the simplified literal because that is what every consumer
+    # (banner fee, whiteboard auto-generation, card line) matches on.
+    banner = "举牌" if any(m in raw for m in _TC_BANNER_MARKERS) else ""
+
     return Order(
         order_id=parsed.get("order_id", ""),
         service_type=service_type,
@@ -182,10 +197,10 @@ def parse_tongcheng(raw: str) -> Order:
         distance_km=None,
         notes="",
         driver_notes="",
-        additional_services="",
+        additional_services=banner,
         passenger_exit_minutes=None,
         third_party_contact="",
-        more_contacts="",
+        more_contacts=more_contacts,
         raw_message=raw,
     )
 

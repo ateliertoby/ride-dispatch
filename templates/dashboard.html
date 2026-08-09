@@ -523,7 +523,11 @@ function collectContactLines(o) {
     if (m) add(m[1], m[2].trim(), true);
     else add('聯絡', o.third_party_contact, false);
   }
-  if ((o.more_contacts || '').trim()) add('更多', o.more_contacts, true);
+  if ((o.more_contacts || '').trim()) {
+    const m = o.more_contacts.trim().match(_bracketRe);
+    if (m) add(m[1], m[2].trim(), true);
+    else add('更多', o.more_contacts, true);
+  }
   return result;
 }
 // When an order counts as done: pickups (接机) at service time + 60min —

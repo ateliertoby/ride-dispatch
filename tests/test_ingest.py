@@ -56,6 +56,31 @@ def test_parse_any_tongcheng():
     assert order.order_id == "TC9876543"
     assert order.service_type == "送机"
     assert order.passenger_phone == "852 62222222"
+    assert order.additional_services == ""
+    assert order.more_contacts == ""
+
+
+TONGCHENG_BANNER_MSG = """订单号：TC1234567-同程用车
+车型：舒适5座
+用车时间：2026-08-09 21:45:00
+出发地：香港国际机场T1
+目的地：尖沙咀彌敦道1號
+航班号：￥ HX9999
+乘客姓名WONG,TAIMAN
+乘客手机号852-61234567
+同行人电话852-69876543
+舉牌接機！舉牌接機！舉牌接機！"""
+
+
+def test_parse_any_tongcheng_banner():
+    order, source = parse_any(TONGCHENG_BANNER_MSG)
+    assert source == "同程"
+    assert order.order_id == "TC1234567"
+    assert order.service_type == "接机"
+    assert order.additional_services == "举牌"
+    assert order.more_contacts == "【同行人】852-69876543"
+    assert banner_fee(order.additional_services) == 40.0
+    assert parking_fee(order, source) == 32.0
 
 
 def test_parse_any_garbage_returns_empty_id():
@@ -63,16 +88,41 @@ def test_parse_any_garbage_returns_empty_id():
     assert order.order_id == ""
 
 
+XIECHENG_DROPOFF_MSG = """服务类型: 送机
+接单车型: 经济5座
+乘客姓名: WONG/SIUMING
+用车时间: 2026-07-22 08:10:00
+航班号: CX477
+上车点: 九龙塘又一城
+下车点: 香港国际机场1号航站楼
+订单号: 1128000000000100
+附加服务:
+乘客电话: 86 13800000003"""
+
+
 def test_parking_fee_xiecheng_pickup_only():
     order, source = parse_any(XIECHENG_MSG)
     assert parking_fee(order, source) == 32.0
-    assert parking_fee(order, "同程") == 0.0
-    dropoff, src2 = parse_any(TONGCHENG_MSG)
-    assert parking_fee(dropoff, src2) == 0.0
+    dropoff, dsource = parse_any(XIECHENG_DROPOFF_MSG)
+    assert dropoff.service_type == "送机"
+    assert parking_fee(dropoff, dsource) == 0.0
+    tc, tcsource = parse_any(TONGCHENG_MSG)
+    assert parking_fee(tc, tcsource) == 0.0
+
+
+def test_parking_fee_banner_enters_car_park():
+    order, source = parse_any(TONGCHENG_BANNER_MSG)
+    assert parking_fee(order, source) == 32.0
+    # Same order minus the 舉牌 line: no terminal meet, so no car park.
+    plain, plain_source = parse_any(TONGCHENG_BANNER_MSG.rsplit("\n", 1)[0])
+    assert plain.service_type == "接机"
+    assert plain.additional_services == ""
+    assert parking_fee(plain, plain_source) == 0.0
 
 
 def test_banner_fee():
     assert banner_fee("举牌服务") == 40.0
+    assert banner_fee("举牌") == 40.0
     assert banner_fee("") == 0.0
     assert banner_fee(None) == 0.0
 

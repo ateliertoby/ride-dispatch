@@ -104,6 +104,8 @@ def test_parse_tongcheng_dropoff():
     assert order.passenger_name == "CHAN,MEI"
     assert order.passenger_phone == "86 13800000004"
     assert order.flight_number == ""
+    assert order.additional_services == ""
+    assert order.more_contacts == ""
     assert order.raw_message == TONGCHENG_MSG
 
 
@@ -124,6 +126,50 @@ def test_parse_tongcheng_pickup():
 def test_tongcheng_no_pickup_from_standard():
     order = parse_order(TONGCHENG_MSG)
     assert order.pickup == ""
+
+
+TONGCHENG_BANNER_MSG = """
+            订单号：VBKTEST00000000000002-同程
+
+            车型：舒适5座
+
+            用车时间：2026-08-09 21:45:00
+            出发地：香港国际机场 T1
+            目的地：尖沙咀彌敦道1號
+            航班号：￥ HX9999
+乘客姓名WONG,TAIMAN
+    乘客手机号852-61234567
+同行人电话852-69876543
+成人数2    儿童数0
+舉牌接機！舉牌接機！舉牌接機！
+"""
+
+
+def test_parse_tongcheng_banner():
+    order = parse_tongcheng(TONGCHENG_BANNER_MSG)
+    assert order.order_id == "VBKTEST00000000000002"
+    assert order.service_type == "接机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-08-09 21:45:00"
+    assert order.pickup == "香港国际机场 T1"
+    assert order.dropoff == "尖沙咀彌敦道1號"
+    assert order.passenger_name == "WONG,TAIMAN"
+    assert order.passenger_phone == "852 61234567"
+    assert order.flight_number == "HX9999"
+    assert order.more_contacts == "【同行人】852-69876543"
+    assert order.additional_services == "举牌"
+
+
+def test_parse_tongcheng_banner_marker_normalized_to_simplified():
+    raw = TONGCHENG_BANNER_MSG.replace("舉牌接機", "举牌接机")
+    assert parse_tongcheng(raw).additional_services == "举牌"
+
+
+def test_parse_tongcheng_companion_phone_only():
+    raw = TONGCHENG_BANNER_MSG.replace("舉牌接機！舉牌接機！舉牌接機！", "")
+    order = parse_tongcheng(raw)
+    assert order.more_contacts == "【同行人】852-69876543"
+    assert order.additional_services == ""
 
 
 FEIZHU_MSG = """订单编号：5122000000000000001-飛豬

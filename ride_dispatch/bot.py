@@ -725,7 +725,11 @@ def collect_contact_lines(order_data: dict) -> list[tuple[str, str]]:
         else:
             _add("聯絡", tp_contact, fmt=False)
     if more.strip():
-        _add("更多", more)
+        m = _BRACKET_LABEL_RE.match(more.strip())
+        if m:
+            _add(m.group(1), m.group(2).strip())
+        else:
+            _add("更多", more)
 
     return result
 
