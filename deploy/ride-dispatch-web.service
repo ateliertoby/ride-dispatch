@@ -1,0 +1,14 @@
+[Unit]
+Description=ride-dispatch web dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=toby
+WorkingDirectory=/home/toby/ride-dispatch
+ExecStart=/home/toby/ride-dispatch/.venv/bin/python -m ride_dispatch.web
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=ride-dispatch Cloudflare tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=toby
+# Run by tunnel UUID: name resolution would need the account cert.pem, the
+# credentials file alone is enough for the UUID form.
+ExecStart=/usr/bin/cloudflared tunnel --config /home/toby/.cloudflared/ride-dispatch.yml run 61facf68-f804-49ce-be6f-71ad40fcbca9
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=ride-dispatch Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=toby
+WorkingDirectory=/home/toby/ride-dispatch
+ExecStart=/home/toby/ride-dispatch/.venv/bin/python -m ride_dispatch.bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
