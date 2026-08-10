@@ -48,7 +48,7 @@ python -m ride_dispatch.web   # Web dashboard + flight poller (default port 3200
 
 ## Deploy
 
-The dashboard is exposed via a named Cloudflare Tunnel (`~/.cloudflared/ride-dispatch.yml`) with **Cloudflare Access** (email OTP, 1-month session) as perimeter auth. The tunnel runs as a launchd service; example plist files for all three processes (bot, web, tunnel) are in `deploy/`.
+The dashboard is exposed via a named Cloudflare Tunnel (`~/.cloudflared/ride-dispatch.yml`) with **Cloudflare Access** (email OTP, 1-month session) as perimeter auth. All three processes (bot, web, tunnel) run as supervised services; `deploy/` carries example definitions for both launchd (macOS plists) and systemd (Linux units). The systemd tunnel unit runs the tunnel by UUID, so the credentials JSON alone is enough — no account `cert.pem` needed on the host.
 
 Two gotchas:
 
