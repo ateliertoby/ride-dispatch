@@ -164,8 +164,13 @@ async def generate(name: str, flight: str) -> bytes:
         return img_resp.content
 
 
-def qualifies_for_auto(order: dict) -> bool:
-    """Check if an order qualifies for automatic whiteboard generation on landing."""
+def qualifies_for_prompt(order: dict) -> bool:
+    """Check if an order should be offered a whiteboard sign prompt on landing.
+
+    The "whiteboard" reminder tag records that the prompt was offered, not that
+    an image exists — generation itself is behind a confirm button because every
+    call costs credits.
+    """
     if order.get("service_type") != "接机":
         return False
     if "举牌" not in (order.get("additional_services") or ""):

@@ -19,7 +19,7 @@ from .db import init_db, save_order, save_quick_order, update_price, update_cost
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
-from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError
+from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError
 
 load_dotenv()
 
@@ -667,7 +667,7 @@ async def _poll_and_notify(context) -> int:
             continue
         logger.info("Flight %s status: %s -> %s", order_id[-4:], old, new)
         try:
-            await _notify_status_change(bot, chat_id, order_id, info, old, new, context.application)
+            await _notify_status_change(bot, chat_id, order_id, info, old, new)
         except Exception:
             # One malformed order must not eat the other orders' pushes.
             logger.exception("Notify failed for order %s", order_id[-4:])
@@ -762,6 +762,29 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
     return lines
 
 
+async def _prompt_whiteboard(bot, chat_id: int, order_id: str, order_data: dict):
+    """Offer whiteboard generation behind a button.
+
+    The message previews the two lines that will be written so a wrong name or
+    flight is caught before a paid generation call, and ignoring it costs
+    nothing. Reuses the board: callback, which is also the manual retry path.
+    """
+    lines = [f"舉牌相 #{order_id[-4:]}"]
+    name = sanitize_board_name(order_data.get("passenger_name") or "")
+    if name:
+        lines.append(name)
+    flight = order_data.get("flight_number") or ""
+    if flight:
+        lines.append(flight)
+    await bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("生成舉牌相", callback_data=f"board:{order_id}")]]
+        ),
+    )
+
+
 async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
                            fail_text: str | None = None):
     """Fire-and-forget: generate whiteboard image and send to chat."""
@@ -781,7 +804,7 @@ async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
         await bot.send_message(chat_id=chat_id, text=fail_text)
 
 
-async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None, application=None):
+async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None):
     order_data = get_order_by_id(DB_PATH, order_id)
     should_notify_landed = (new == "landed" and old != "landed") or (new == "gate" and old not in ("landed", "gate"))
     if should_notify_landed:
@@ -793,12 +816,12 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
         if order_data:
             msg += _order_lines(order_data, eta)
         await bot.send_message(chat_id=chat_id, text=msg)
-        # Auto whiteboard on landing
-        if order_data and application and qualifies_for_auto(order_data):
+        # Offer the whiteboard sign on landing. The tag is written here, before
+        # any image exists, so the landed→gate double transition cannot prompt
+        # twice; the board: callback ignores it and stays the retry path.
+        if order_data and qualifies_for_prompt(order_data):
             mark_reminder_sent(DB_PATH, order_id, "whiteboard")
-            application.create_task(
-                _send_whiteboard(bot, chat_id, order_id, order_data),
-            )
+            await _prompt_whiteboard(bot, chat_id, order_id, order_data)
     if new == "gate" and old != "gate":
         gate_time = info["gate"] or "?"
         hall = info.get("hall")

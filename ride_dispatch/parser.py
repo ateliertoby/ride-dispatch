@@ -180,7 +180,7 @@ def parse_tongcheng(raw: str) -> Order:
     more_contacts = f"【同行人】{companion}" if companion else ""
 
     # Normalized to the simplified literal because that is what every consumer
-    # (banner fee, whiteboard auto-generation, card line) matches on.
+    # (banner fee, whiteboard prompt, card line) matches on.
     banner = "举牌" if any(m in raw for m in _TC_BANNER_MARKERS) else ""
 
     return Order(

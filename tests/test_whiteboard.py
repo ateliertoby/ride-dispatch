@@ -7,7 +7,7 @@ import pytest
 
 from ride_dispatch.whiteboard import (
     build_prompt,
-    qualifies_for_auto,
+    qualifies_for_prompt,
     sanitize_name,
     _build_data_uri,
     _build_payload,
@@ -145,7 +145,7 @@ def test_qualifies_pickup_with_banner():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is True
+        assert qualifies_for_prompt(order) is True
 
 
 def test_qualifies_bare_banner_flag():
@@ -156,7 +156,7 @@ def test_qualifies_bare_banner_flag():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is True
+        assert qualifies_for_prompt(order) is True
 
 
 def test_not_qualifies_no_banner():
@@ -166,7 +166,7 @@ def test_not_qualifies_no_banner():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is False
+        assert qualifies_for_prompt(order) is False
 
 
 def test_not_qualifies_not_pickup():
@@ -176,7 +176,7 @@ def test_not_qualifies_not_pickup():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is False
+        assert qualifies_for_prompt(order) is False
 
 
 def test_not_qualifies_already_sent():
@@ -186,7 +186,7 @@ def test_not_qualifies_already_sent():
         "reminders_sent": "svc,whiteboard",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is False
+        assert qualifies_for_prompt(order) is False
 
 
 def test_not_qualifies_no_fal_key():
@@ -196,7 +196,7 @@ def test_not_qualifies_no_fal_key():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", ""):
-        assert qualifies_for_auto(order) is False
+        assert qualifies_for_prompt(order) is False
 
 
 def test_not_qualifies_none_additional_services():
@@ -206,7 +206,7 @@ def test_not_qualifies_none_additional_services():
         "reminders_sent": "",
     }
     with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
-        assert qualifies_for_auto(order) is False
+        assert qualifies_for_prompt(order) is False
 
 
 # ---- async generate: happy path ----
@@ -413,7 +413,8 @@ def test_generate_5xx_retries_then_succeeds():
 # ---- auto-trigger integration ----
 
 
-def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=False):
+def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=False,
+                             passenger_name="PIYA DEJKONG"):
     from ride_dispatch.db import init_db, save_order, mark_reminder_sent
     from ride_dispatch.parser import Order
 
@@ -422,7 +423,7 @@ def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=F
     init_db(db)
     order = Order(
         order_id=order_id, service_type="接机", vehicle_type="经济5座",
-        passenger_name="PIYA DEJKONG", scheduled_time="2026-07-13 14:00:00",
+        passenger_name=passenger_name, scheduled_time="2026-07-13 14:00:00",
         passenger_phone="66 812345678", overseas_phone="",
         flight_number="TG607", pickup="香港国际机场 T1", dropoff="尖沙咀",
         distance_km=30, notes="", driver_notes="",
@@ -435,82 +436,103 @@ def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=F
     return db
 
 
-def test_notify_landed_triggers_whiteboard():
-    """Landing push sends, then whiteboard task is created for qualifying orders."""
+def test_notify_landed_prompts_and_marks_without_generating():
+    """Landing push is followed by a confirm prompt; no API call until it is tapped."""
     from ride_dispatch.db import get_order_by_id
     db = _make_test_db_with_order("WB001", additional_services="举牌接机")
     try:
         bot = AsyncMock()
-        application = MagicMock()
         info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
 
         with patch("ride_dispatch.bot.DB_PATH", db), \
-             patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
+             patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"), \
+             patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock()) as gen:
             from ride_dispatch.bot import _notify_status_change
-            asyncio.run(_notify_status_change(bot, 123, "WB001", info, None, "landed", application))
+            asyncio.run(_notify_status_change(bot, 123, "WB001", info, None, "landed"))
 
-        bot.send_message.assert_called_once()
-        assert "已降落" in bot.send_message.call_args[1]["text"]
-        application.create_task.assert_called_once()
+        assert bot.send_message.call_count == 2
+        assert "已降落" in bot.send_message.call_args_list[0][1]["text"]
+        gen.assert_not_called()
         updated = get_order_by_id(db, "WB001")
         assert "whiteboard" in updated["reminders_sent"]
     finally:
         os.unlink(db)
 
 
-def test_notify_landed_no_whiteboard_without_banner():
-    """Orders without 舉牌 service should not trigger whiteboard."""
+def test_notify_landed_prompt_shows_board_text_and_button():
+    """The prompt previews exactly what goes on the board, VIP marker stripped."""
+    db = _make_test_db_with_order("WB006", additional_services="举牌接机",
+                                  passenger_name="PIYA DEJKONG(重要贵宾)")
+    try:
+        bot = AsyncMock()
+        info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
+
+        with patch("ride_dispatch.bot.DB_PATH", db), \
+             patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
+            from ride_dispatch.bot import _notify_status_change
+            asyncio.run(_notify_status_change(bot, 123, "WB006", info, None, "landed"))
+
+        prompt_call = bot.send_message.call_args_list[1]
+        text = prompt_call[1]["text"]
+        assert "舉牌相 #B006" in text
+        assert "PIYA DEJKONG" in text
+        assert "重要贵宾" not in text
+        assert "TG607" in text
+
+        button = prompt_call[1]["reply_markup"].inline_keyboard[0][0]
+        assert button.text == "生成舉牌相"
+        assert button.callback_data == "board:WB006"
+    finally:
+        os.unlink(db)
+
+
+def test_notify_landed_no_prompt_without_banner():
+    """Orders without 舉牌 service get no whiteboard prompt."""
     db = _make_test_db_with_order("WB002", additional_services="")
     try:
         bot = AsyncMock()
-        application = MagicMock()
         info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
 
         with patch("ride_dispatch.bot.DB_PATH", db), \
              patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
             from ride_dispatch.bot import _notify_status_change
-            asyncio.run(_notify_status_change(bot, 123, "WB002", info, None, "landed", application))
+            asyncio.run(_notify_status_change(bot, 123, "WB002", info, None, "landed"))
 
         bot.send_message.assert_called_once()
-        application.create_task.assert_not_called()
     finally:
         os.unlink(db)
 
 
-def test_notify_landed_no_whiteboard_already_sent():
-    """Already-marked orders should not re-trigger whiteboard."""
+def test_notify_landed_no_prompt_already_sent():
+    """Already-marked orders must not be prompted twice on landed→gate."""
     db = _make_test_db_with_order("WB003", additional_services="举牌接机", mark_whiteboard=True)
     try:
         bot = AsyncMock()
-        application = MagicMock()
         info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
 
         with patch("ride_dispatch.bot.DB_PATH", db), \
              patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
             from ride_dispatch.bot import _notify_status_change
-            asyncio.run(_notify_status_change(bot, 123, "WB003", info, None, "landed", application))
+            asyncio.run(_notify_status_change(bot, 123, "WB003", info, None, "landed"))
 
         bot.send_message.assert_called_once()
-        application.create_task.assert_not_called()
     finally:
         os.unlink(db)
 
 
-def test_notify_landed_no_whiteboard_without_fal_key():
-    """No FAL_KEY means no whiteboard trigger."""
+def test_notify_landed_no_prompt_without_fal_key():
+    """No FAL_KEY means the feature is off, so no prompt."""
     db = _make_test_db_with_order("WB004", additional_services="举牌接机")
     try:
         bot = AsyncMock()
-        application = MagicMock()
         info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
 
         with patch("ride_dispatch.bot.DB_PATH", db), \
              patch("ride_dispatch.whiteboard.FAL_KEY", ""):
             from ride_dispatch.bot import _notify_status_change
-            asyncio.run(_notify_status_change(bot, 123, "WB004", info, None, "landed", application))
+            asyncio.run(_notify_status_change(bot, 123, "WB004", info, None, "landed"))
 
         bot.send_message.assert_called_once()
-        application.create_task.assert_not_called()
     finally:
         os.unlink(db)
 
