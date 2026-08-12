@@ -12,14 +12,14 @@ This bot parses pasted order messages into structured records and stores them in
 
 ## How it works
 
-1. Paste an order message from WeChat into the Telegram bot
-2. Bot parses it and shows a summary card with Confirm/Cancel buttons
+1. Paste an order message from WeChat into the Telegram bot, or into the dashboard's paste box (parse preview → price → save in one flow)
+2. In the bot: it parses the message and shows a summary card with Confirm/Cancel buttons
 3. Type the price directly — saves the order and price in one step
 4. Alternatively, tap Confirm first to save, then type the price separately
 5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm).
 6. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
 7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
-8. On landing, pickup orders with 舉牌 service automatically generate a whiteboard sign photo (via GPT-Image-2) and push it to chat. `/board` regenerates manually for any pickup
+8. On landing, pickup orders with 舉牌 service get a preview of the sign text plus a 生成舉牌相 button — tapping it generates the whiteboard sign photo (via GPT-Image-2). `/board` generates manually for any pickup
 
 ## Run
 
@@ -32,7 +32,7 @@ cp .env.example .env
 | Variable | Required | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | From BotFather |
-| `RIDE_DB_PATH` | No | SQLite path (default: `orders.db`; use an absolute path outside cloud-synced dirs) |
+| `RIDE_DB_PATH` | No | SQLite path (default: `orders.db`). `~` is expanded, so one `.env` works across hosts; keep it outside cloud-synced dirs |
 | `RIDE_WEB_PORT` | No | Dashboard port (default: `3200`) |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs. Empty = allow all |
 | `FAL_KEY` | No | fal.ai API key for whiteboard sign photo generation. Unset = feature off |
@@ -42,8 +42,8 @@ Tests: `pytest tests/`
 Bot and dashboard are separate processes:
 
 ```bash
-python -m ride_dispatch.bot   # Telegram bot
-python -m ride_dispatch.web   # Web dashboard + flight poller (default port 3200)
+python -m ride_dispatch.bot   # Telegram bot + flight poller
+python -m ride_dispatch.web   # Web dashboard (default port 3200)
 ```
 
 ## Deploy
