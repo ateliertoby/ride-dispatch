@@ -4,6 +4,7 @@ import pytest
 from ride_dispatch.parser import Order
 from ride_dispatch.db import (
     init_db,
+    resolve_db_path,
     save_order,
     update_price,
     get_orders_by_date,
@@ -193,3 +194,25 @@ def test_order_id_exists(tmp_path):
     assert order_id_exists(path, "Q9") is True
     update_order_fields(path, "Q9", {"status": "cancelled"})
     assert order_id_exists(path, "Q9") is True  # cancelled orders still hold the order_id (UNIQUE column)
+
+
+def test_resolve_db_path_expands_tilde(monkeypatch):
+    monkeypatch.setenv("RIDE_DB_PATH", "~/.ride-dispatch/orders.db")
+    resolved = resolve_db_path()
+    assert resolved == os.path.join(os.path.expanduser("~"), ".ride-dispatch", "orders.db")
+    assert "~" not in resolved
+
+
+def test_resolve_db_path_keeps_absolute_path(monkeypatch):
+    monkeypatch.setenv("RIDE_DB_PATH", "/srv/ride-dispatch/orders.db")
+    assert resolve_db_path() == "/srv/ride-dispatch/orders.db"
+
+
+def test_resolve_db_path_keeps_relative_path(monkeypatch):
+    monkeypatch.setenv("RIDE_DB_PATH", "data/orders.db")
+    assert resolve_db_path() == "data/orders.db"
+
+
+def test_resolve_db_path_defaults_to_cwd_file(monkeypatch):
+    monkeypatch.delenv("RIDE_DB_PATH", raising=False)
+    assert resolve_db_path() == "orders.db"

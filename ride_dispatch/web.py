@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, jsonify
 from .db import (
     init_db,
+    resolve_db_path,
     count_active_orders,
     get_orders_by_date,
     get_order_by_id,
@@ -26,7 +27,7 @@ from .service import is_flight_pickup
 
 load_dotenv()
 
-DB_PATH = os.environ.get("RIDE_DB_PATH", "orders.db")
+DB_PATH = resolve_db_path()
 
 app = Flask(
     __name__,

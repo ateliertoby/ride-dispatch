@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import tempfile
 from datetime import datetime
@@ -6,6 +7,8 @@ from datetime import datetime
 import pytest
 
 import ride_dispatch.bot as bot
+import ride_dispatch.web as web
+from ride_dispatch.db import resolve_db_path
 
 
 @pytest.fixture
@@ -73,3 +76,16 @@ def test_kick_server_ignores_garbage(sock_dir):
             await bot._kick_server.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_sock_path_follows_home_relative_db_path(monkeypatch):
+    # os.path.abspath turns a leading "~" into a literal directory under cwd,
+    # so a socket derived from an unexpanded DB path lands somewhere the peer
+    # process cannot find. Both sides must read an already-expanded path.
+    monkeypatch.setenv("RIDE_DB_PATH", "~/.ride-dispatch/orders.db")
+    resolved = resolve_db_path()
+    monkeypatch.setattr(bot, "DB_PATH", resolved)
+    monkeypatch.setattr(web, "DB_PATH", resolved)
+    expected = os.path.join(os.path.expanduser("~"), ".ride-dispatch", "bot.sock")
+    assert bot._sock_path() == expected
+    assert web._sock_path() == expected

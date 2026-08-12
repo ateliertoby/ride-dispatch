@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
+from .db import init_db, resolve_db_path, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
@@ -23,7 +23,7 @@ from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, s
 
 load_dotenv()
 
-DB_PATH = os.environ.get("RIDE_DB_PATH", "orders.db")
+DB_PATH = resolve_db_path()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 _allowed_raw = os.environ.get("ALLOWED_CHAT_IDS", "")

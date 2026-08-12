@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -6,6 +7,14 @@ from .ingest import banner_fee
 from .service import needs_departure_reminder
 
 COARSE_WINDOW_HOURS = 24
+
+
+# Callers keep the result in a module-level constant and derive sibling paths
+# from it (the bot/web rendezvous socket) via os.path.abspath, which would turn
+# a leading "~" into a literal directory under cwd. Expansion therefore belongs
+# at the env read, not at sqlite3.connect.
+def resolve_db_path() -> str:
+    return os.path.expanduser(os.environ.get("RIDE_DB_PATH", "orders.db"))
 
 
 @contextmanager
