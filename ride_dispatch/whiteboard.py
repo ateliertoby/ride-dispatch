@@ -9,6 +9,7 @@ are already set in the real environment, so repeated calls are harmless.
 import base64
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,6 +29,26 @@ POLL_TIMEOUT = 180  # seconds
 
 def is_configured() -> bool:
     return bool(FAL_KEY)
+
+
+# Platforms append a VIP marker to the 乘客姓名 field, so it arrives as part of
+# the stored name. Both paren widths and both character sets are matched because
+# the marker's exact form is the platform's choice, not ours.
+_VIP_MARKER_RE = re.compile(r"[(（]\s*(?:重要)?\s*[贵貴][宾賓]\s*[)）]")
+
+
+def sanitize_name(name: str) -> str:
+    """Strip the VIP marker from a passenger name for use on a whiteboard sign.
+
+    The marker is platform metadata about the booking, not part of the person's
+    name, and the sign is held up in an arrivals hall for that person to read.
+    Only the 贵宾 family is removed — any other parenthetical may be part of the
+    real name.
+    """
+    cleaned, hits = _VIP_MARKER_RE.subn("", name)
+    if not hits:
+        return name
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def build_prompt(name: str, flight: str) -> str:
@@ -73,6 +94,9 @@ async def generate(name: str, flight: str) -> bytes:
 
     Raises WhiteboardError on timeout, API failure, or missing image.
     """
+    # Sanitized here rather than at each call site so no path can reach the
+    # image model with a name the passenger should not see on the board.
+    name = sanitize_name(name)
     base_bytes = BASE_IMAGE_PATH.read_bytes()
     data_uri = _build_data_uri(base_bytes)
     payload = _build_payload(name, flight, data_uri)

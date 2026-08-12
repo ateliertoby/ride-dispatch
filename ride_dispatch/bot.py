@@ -19,7 +19,7 @@ from .db import init_db, save_order, save_quick_order, update_price, update_cost
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
-from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, is_configured as whiteboard_configured, WhiteboardError
+from .whiteboard import generate as generate_whiteboard, qualifies_for_auto, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError
 
 load_dotenv()
 
@@ -765,7 +765,7 @@ def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
 async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
                            fail_text: str | None = None):
     """Fire-and-forget: generate whiteboard image and send to chat."""
-    name = order_data.get("passenger_name", "")
+    name = sanitize_board_name(order_data.get("passenger_name") or "")
     flight = order_data.get("flight_number", "")
     if fail_text is None:
         fail_text = f"舉牌相自動生成失敗 #{order_id[-4:]}，用 /board 重試。"

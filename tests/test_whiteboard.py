@@ -8,6 +8,7 @@ import pytest
 from ride_dispatch.whiteboard import (
     build_prompt,
     qualifies_for_auto,
+    sanitize_name,
     _build_data_uri,
     _build_payload,
     generate,
@@ -64,6 +65,74 @@ def test_build_payload_structure():
     assert payload["output_format"] == "png"
     assert payload["num_images"] == 1
     assert "PIYA DEJKONG" in payload["prompt"]
+
+
+# ---- VIP marker sanitization ----
+
+
+def test_sanitize_removes_halfwidth_vip_marker():
+    assert sanitize_name("PIYA DEJKONG(重要贵宾)") == "PIYA DEJKONG"
+
+
+def test_sanitize_removes_fullwidth_vip_marker():
+    assert sanitize_name("PIYA DEJKONG（重要贵宾）") == "PIYA DEJKONG"
+
+
+def test_sanitize_removes_bare_vip_marker():
+    assert sanitize_name("张大文(贵宾)") == "张大文"
+
+
+def test_sanitize_removes_traditional_vip_marker():
+    assert sanitize_name("張大文(貴賓)") == "張大文"
+
+
+def test_sanitize_leaves_clean_name_unchanged():
+    assert sanitize_name("PIYA DEJKONG") == "PIYA DEJKONG"
+
+
+def test_sanitize_keeps_non_vip_parenthetical():
+    # Only the 贵宾 family is platform metadata; other parentheses may be part
+    # of the real name and must survive.
+    assert sanitize_name("WONG TAI MAN (JR)") == "WONG TAI MAN (JR)"
+
+
+def test_sanitize_marker_not_at_end():
+    assert sanitize_name("LEE(重要贵宾) MING") == "LEE MING"
+
+
+def test_sanitize_strips_surrounding_whitespace():
+    assert sanitize_name("  PIYA DEJKONG  (重要贵宾)  ") == "PIYA DEJKONG"
+
+
+def test_sanitize_empty_string():
+    assert sanitize_name("") == ""
+
+
+def test_generate_sanitizes_name_before_prompting():
+    """The API must never be asked to write the VIP marker onto the board."""
+    fake_submit = {"status_url": "https://q.fal.run/status/123", "response_url": "https://q.fal.run/result/123"}
+
+    mock_client = AsyncMock()
+    submit_resp = MagicMock(status_code=200)
+    submit_resp.json.return_value = fake_submit
+    poll_resp = MagicMock(status_code=200)
+    poll_resp.json.return_value = {"status": "COMPLETED"}
+    result_resp = MagicMock(status_code=200)
+    result_resp.json.return_value = {"images": [{"url": "https://cdn.fal.run/img.png"}]}
+    img_resp = MagicMock(status_code=200)
+    img_resp.content = b"img"
+
+    mock_client.post.return_value = submit_resp
+    mock_client.get.side_effect = [poll_resp, result_resp, img_resp]
+
+    with patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"), \
+         patch("ride_dispatch.whiteboard.httpx.AsyncClient", return_value=_mock_client_ctx(mock_client)), \
+         patch("ride_dispatch.whiteboard.POLL_INTERVAL", 0):
+        asyncio.run(generate("PIYA DEJKONG(重要贵宾)", "TG607"))
+
+    prompt = mock_client.post.call_args[1]["json"]["prompt"]
+    assert "重要贵宾" not in prompt
+    assert "'PIYA DEJKONG'" in prompt
 
 
 # ---- qualification logic ----
@@ -479,6 +548,19 @@ def test_send_whiteboard_failure_sends_manual_fallback_message():
     text = bot.send_message.call_args[1]["text"]
     assert text == manual_fail
     bot.send_photo.assert_not_called()
+
+
+def test_send_whiteboard_caption_uses_sanitized_name():
+    """The caption must read like the board, not like the platform's raw field."""
+    from ride_dispatch.bot import _send_whiteboard
+
+    bot = AsyncMock()
+    with patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock(return_value=b"img")):
+        asyncio.run(_send_whiteboard(bot, 123, "WB007",
+                                     {"passenger_name": "PIYA DEJKONG(重要贵宾)",
+                                      "flight_number": "TG607"}))
+
+    assert bot.send_photo.call_args[1]["caption"] == "舉牌 | PIYA DEJKONG TG607"
 
 
 def test_board_callback_uses_create_task():
