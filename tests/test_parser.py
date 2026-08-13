@@ -172,6 +172,50 @@ def test_parse_tongcheng_companion_phone_only():
     assert order.additional_services == ""
 
 
+# Newer 同程 layout: several labelled fields share one line, and the message
+# carries 名称/订单里程/行驶时长 that the earlier layout did not.
+TONGCHENG_ONE_LINE_MSG = """
+            订单号：VBKTEST00000000000003-同程
+            名称： 香港机场-九龙启德（接机）
+            车型：5座
+            用车时间：2026-08-14 10:20:00
+            出发地：香港国际机场 T1
+            目的地：香港九龙启德酒店
+            订单里程：39.257 km
+            行驶时长：40 分钟
+
+            航班号：￥ HX9001
+          乘客姓名PANG,SIUYIN    乘客英文名    乘客手机号86-13800000008
+"""
+
+
+def test_parse_tongcheng_one_line_fields():
+    order = parse_tongcheng(TONGCHENG_ONE_LINE_MSG)
+    assert order.order_id == "VBKTEST00000000000003"
+    assert order.service_type == "接机"
+    assert order.vehicle_type == "5座"
+    assert order.scheduled_time == "2026-08-14 10:20:00"
+    assert order.pickup == "香港国际机场 T1"
+    assert order.dropoff == "香港九龙启德酒店"
+    assert order.passenger_name == "PANG,SIUYIN"
+    assert order.passenger_phone == "86 13800000008"
+    assert order.flight_number == "HX9001"
+    assert order.distance_km == 39.257
+    assert order.more_contacts == ""
+    assert order.raw_message == TONGCHENG_ONE_LINE_MSG
+
+
+def test_parse_tongcheng_english_name_appended():
+    raw = TONGCHENG_ONE_LINE_MSG.replace("乘客英文名    ", "乘客英文名SIU YIN    ")
+    order = parse_tongcheng(raw)
+    assert order.passenger_name == "PANG,SIUYIN SIU YIN"
+
+
+def test_parse_tongcheng_unparsable_distance():
+    raw = TONGCHENG_ONE_LINE_MSG.replace("39.257 km", "未知")
+    assert parse_tongcheng(raw).distance_km is None
+
+
 FEIZHU_MSG = """订单编号：5122000000000000001-飛豬
 经济5座
 【接机】

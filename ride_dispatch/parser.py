@@ -107,10 +107,12 @@ _TC_FIELD_MAP = {
     "出发地": "pickup",
     "目的地": "dropoff",
     "航班号": "flight_number",
+    "订单里程": "distance_km",
 }
 
 _TC_NO_COLON = {
     "乘客姓名": "passenger_name",
+    "乘客英文名": "passenger_en_name",
     "乘客手机号": "passenger_phone",
     "同行人电话": "companion_phone",
     "成人数": "adults",
@@ -120,6 +122,36 @@ _TC_NO_COLON = {
 # The sign-holding request arrives as a free-standing line rather than a
 # labelled field, in either script depending on who relayed it.
 _TC_BANNER_MARKERS = ("舉牌", "举牌")
+
+
+def _tc_no_colon_fields(line: str):
+    """Yield (field, value) for every unlabelled-field marker on one line.
+
+    A line can pack several fields ("乘客姓名X  乘客英文名  乘客手机号Y"), so a
+    marker's value ends where the next marker begins, not at end of line.
+    Anything before the first marker, and any line without one, is ignored.
+    """
+    hits = []
+    for marker, field in _TC_NO_COLON.items():
+        pos = line.find(marker)
+        if pos != -1:
+            hits.append((pos, marker, field))
+    hits.sort()
+
+    for i, (pos, marker, field) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else len(line)
+        yield field, line[pos + len(marker):end].strip()
+
+
+def _tc_distance(value: str) -> Optional[float]:
+    """Parse 订单里程, which arrives with its unit attached ("39.257 km")."""
+    num = value.strip()
+    if num.lower().endswith("km"):
+        num = num[:-2].strip()
+    try:
+        return float(num)
+    except ValueError:
+        return None
 
 
 def parse_tongcheng(raw: str) -> Order:
@@ -140,10 +172,8 @@ def parse_tongcheng(raw: str) -> Order:
                 break
         else:
             # Fields without colon
-            for prefix, field in _TC_NO_COLON.items():
-                if line.startswith(prefix):
-                    parsed[field] = line[len(prefix):].strip()
-                    break
+            for field, value in _tc_no_colon_fields(line):
+                parsed[field] = value
 
     oid = parsed.get("order_id", "")
     if "-" in oid:
@@ -160,7 +190,8 @@ def parse_tongcheng(raw: str) -> Order:
             more_contacts="", raw_message=raw,
         )
 
-    # Infer service type from pickup/dropoff
+    # Infer service type from pickup/dropoff. Some messages also name the
+    # direction in a 名称 line, but it is free text and absent from others.
     dropoff = parsed.get("dropoff", "").lower()
     pickup = parsed.get("pickup", "").lower()
     if any(kw in dropoff for kw in _AIRPORT_KEYWORDS):
@@ -172,6 +203,14 @@ def parse_tongcheng(raw: str) -> Order:
 
     phone = parsed.get("passenger_phone", "").replace("-", " ")
     flight = parsed.get("flight_number", "").lstrip("￥").strip()
+
+    # 乘客英文名 is a second name field, not a contact — the card has one name
+    # slot. The marker ships with an empty value too, which must leave the name
+    # untouched rather than trailing a separator.
+    name = parsed.get("passenger_name", "")
+    en_name = parsed.get("passenger_en_name", "")
+    if en_name:
+        name = f"{name} {en_name}".strip()
 
     # 【label】number is the contact-line convention every renderer understands;
     # without the label the companion's number is indistinguishable from the
@@ -187,14 +226,14 @@ def parse_tongcheng(raw: str) -> Order:
         order_id=parsed.get("order_id", ""),
         service_type=service_type,
         vehicle_type=parsed.get("vehicle_type", ""),
-        passenger_name=parsed.get("passenger_name", ""),
+        passenger_name=name,
         scheduled_time=parsed.get("scheduled_time", ""),
         passenger_phone=phone,
         overseas_phone="",
         flight_number=flight,
         pickup=parsed.get("pickup", ""),
         dropoff=parsed.get("dropoff", ""),
-        distance_km=None,
+        distance_km=_tc_distance(parsed.get("distance_km", "")),
         notes="",
         driver_notes="",
         additional_services=banner,
