@@ -246,7 +246,13 @@ def parse_feizhu(raw: str) -> Order:
 
         elif line.startswith("真实号") and ("：" in line or ":" in line):
             sep = "：" if "：" in line else ":"
-            parsed["passenger_phone"] = line.partition(sep)[2].strip()
+            # 真实号 can carry two numbers separated by "/". passenger_phone
+            # must stay a single dialable number: the card e164-formats it for
+            # tap-to-call and "/" is not a separator any formatter splits on.
+            first, slash, rest = line.partition(sep)[2].strip().partition("/")
+            parsed["passenger_phone"] = first.strip()
+            if slash:
+                parsed["more_contacts"] = f"【備用】{rest.strip()}"
             parsed["_phone_idx"] = i
 
     if not parsed.get("order_id"):
@@ -292,7 +298,7 @@ def parse_feizhu(raw: str) -> Order:
         additional_services="",
         passenger_exit_minutes=None,
         third_party_contact="",
-        more_contacts="",
+        more_contacts=parsed.get("more_contacts", ""),
         raw_message=raw,
     )
 

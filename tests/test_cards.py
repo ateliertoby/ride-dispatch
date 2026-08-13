@@ -122,6 +122,14 @@ def test_more_contacts_bracket_label_and_e164():
     assert lines[0] == ("同行人", "+85269876543")
 
 
+def test_dual_phone_order_renders_both_numbers():
+    d = _contact_dict(passenger_phone="13400001111", more_contacts="【備用】19900002222")
+    lines = collect_contact_lines(d)
+    assert len(lines) == 2
+    assert lines[0] == ("電話", "+8613400001111")
+    assert lines[1] == ("備用", "+8619900002222")
+
+
 def test_dedupe_overseas_and_third_party_same_number():
     d = _contact_dict(
         overseas_phone="86 13800001111",

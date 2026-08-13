@@ -221,6 +221,35 @@ def test_parse_feizhu_no_flight():
     assert order.passenger_name == "李明"
 
 
+# 真实号 with two numbers, plus the passenger-count trailer this variant adds.
+FEIZHU_DUAL_PHONE = """订单编号：5122000000000000002-飛豬
+经济5座
+【接机】
+中国-中国香港
+[出发]香港国际机场T1
+[抵达]尖沙咀酒店
+约35公里
+MU9001
+[预计抵达]
+2026-08-14 20:30:00
+李小明
+真实号：13400001111/19900002222
+---1成人1儿童"""
+
+
+def test_parse_feizhu_dual_phone():
+    order = parse_feizhu(FEIZHU_DUAL_PHONE)
+    assert order.passenger_phone == "13400001111"
+    assert order.more_contacts == "【備用】19900002222"
+    assert order.passenger_name == "李小明"
+    assert order.flight_number == "MU9001"
+    assert order.scheduled_time == "2026-08-14 20:30:00"
+
+
+def test_parse_feizhu_single_phone_leaves_more_contacts_empty():
+    assert parse_feizhu(FEIZHU_MSG).more_contacts == ""
+
+
 SPACE_MSG = """订单号：SPACE12345678
 类型：香港-送机
 车型：舒适5座【丰田雷凌等同级车]】
