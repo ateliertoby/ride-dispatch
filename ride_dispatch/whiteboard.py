@@ -7,6 +7,7 @@ are already set in the real environment, so repeated calls are harmless.
 """
 
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ logger = logging.getLogger("whiteboard")
 
 FAL_KEY = os.environ.get("FAL_KEY", "")
 BASE_IMAGE_PATH = Path(__file__).resolve().parent.parent / "assets" / "whiteboard_base.png"
+CACHE_DIR = Path(__file__).resolve().parent.parent / "cache" / "whiteboard"
 
 SUBMIT_URL = "https://queue.fal.run/fal-ai/gpt-image-2/edit"
 POLL_INTERVAL = 3  # seconds
@@ -162,6 +164,62 @@ async def generate(name: str, flight: str) -> bytes:
         if img_resp.status_code != 200:
             raise WhiteboardError(f"image download failed: {img_resp.status_code}")
         return img_resp.content
+
+
+# The cache holds a generated-but-not-yet-delivered image, so a dropped
+# connection to Telegram does not burn the paid generation call. It is emptied
+# on successful delivery: an order with no cached file regenerates, which is
+# what makes re-running /board on a bad-looking board still work.
+
+
+def cache_path(order_id: str, name: str, flight: str) -> Path:
+    """Path of the cache slot for one order's board.
+
+    The digest binds the file to the text written on the board, so editing the
+    order's name or flight orphans the old file instead of resending a board
+    that no longer matches the order.
+    """
+    digest = hashlib.sha1(f"{name}|{flight}".encode("utf-8")).hexdigest()[:8]
+    return CACHE_DIR / f"{order_id}-{digest}.png"
+
+
+def cache_store(order_id: str, name: str, flight: str, image_bytes: bytes) -> bool:
+    """Cache a generated image. Returns False if it could not be written.
+
+    Caching is an optimization for the retry path, never a precondition for
+    delivery, so a failing disk must not abort the send.
+    """
+    path = cache_path(order_id, name, flight)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image_bytes)
+        return True
+    except OSError:
+        logger.warning("Whiteboard cache write failed: %s", path, exc_info=True)
+        return False
+
+
+def cache_load(order_id: str, name: str, flight: str) -> bytes | None:
+    """Return the cached image for this order's current name/flight, or None."""
+    path = cache_path(order_id, name, flight)
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning("Whiteboard cache read failed: %s", path, exc_info=True)
+        return None
+
+
+def cache_discard(order_id: str, name: str, flight: str) -> None:
+    """Drop the cache slot once its image has been delivered."""
+    path = cache_path(order_id, name, flight)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Whiteboard cache delete failed: %s", path, exc_info=True)
 
 
 def qualifies_for_prompt(order: dict) -> bool:

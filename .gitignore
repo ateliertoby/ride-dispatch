@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 logs/
+cache/
 .DS_Store
 CLAUDE.md
 AGENTS.md

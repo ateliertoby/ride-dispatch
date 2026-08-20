@@ -1,12 +1,16 @@
 import asyncio
+import logging
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from ride_dispatch.whiteboard import (
     build_prompt,
+    cache_path,
+    cache_store,
     qualifies_for_prompt,
     sanitize_name,
     _build_data_uri,
@@ -14,6 +18,14 @@ from ride_dispatch.whiteboard import (
     generate,
     WhiteboardError,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path):
+    """Keep every test's whiteboard cache off the real runtime directory."""
+    cache_dir = tmp_path / "whiteboard"
+    with patch("ride_dispatch.whiteboard.CACHE_DIR", cache_dir):
+        yield cache_dir
 
 
 # ---- prompt construction ----
@@ -619,3 +631,157 @@ def test_board_callback_uses_create_task():
         query.message.reply_text.assert_called_once_with("生成中…")
     finally:
         os.unlink(db)
+
+
+# ---- delivery failure vs generation failure ----
+
+
+_ORDER = {"passenger_name": "PIYA DEJKONG", "flight_number": "TG607"}
+
+
+def _run_send(bot, order_id, order=None, **kwargs):
+    from ride_dispatch.bot import _send_whiteboard
+    # Zero backoff keeps the retry timing out of the test's runtime.
+    with patch("ride_dispatch.bot.DELIVERY_RETRY_DELAYS", (0, 0)):
+        asyncio.run(_send_whiteboard(bot, 123, order_id, order or _ORDER, **kwargs))
+
+
+def test_delivery_failure_message_differs_from_generation_failure():
+    """A dropped connection must not be reported as a generation failure."""
+    bot = AsyncMock()
+    bot.send_photo.side_effect = NetworkError("httpx.ReadError")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock(return_value=b"img")):
+        _run_send(bot, "WB020")
+
+    text = bot.send_message.call_args[1]["text"]
+    assert "已生成" in text
+    assert "生成失敗" not in text
+    assert "/board" in text
+
+
+def test_delivery_retry_succeeds_on_second_attempt():
+    """One transient blip costs a retry, not a generation and not a fail message."""
+    bot = AsyncMock()
+    bot.send_photo.side_effect = [NetworkError("httpx.ReadError"), None]
+    gen = AsyncMock(return_value=b"img")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB021")
+
+    assert bot.send_photo.call_count == 2
+    gen.assert_awaited_once()
+    bot.send_message.assert_not_called()
+
+
+def test_delivery_retry_exhausted_reports_delivery_failure():
+    bot = AsyncMock()
+    bot.send_photo.side_effect = TimedOut()
+    gen = AsyncMock(return_value=b"img")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB022")
+
+    assert bot.send_photo.call_count == 3
+    gen.assert_awaited_once()
+    assert "已生成" in bot.send_message.call_args[1]["text"]
+
+
+def test_delivery_does_not_retry_bad_request():
+    """BadRequest subclasses NetworkError but is a refusal, not a dropped line."""
+    bot = AsyncMock()
+    bot.send_photo.side_effect = BadRequest("PHOTO_INVALID_DIMENSIONS")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock(return_value=b"img")):
+        _run_send(bot, "WB023")
+
+    bot.send_photo.assert_called_once()
+    assert "已生成" in bot.send_message.call_args[1]["text"]
+
+
+def test_generation_failure_still_reports_generation_failure():
+    bot = AsyncMock()
+    with patch("ride_dispatch.bot.generate_whiteboard", side_effect=WhiteboardError("boom")):
+        _run_send(bot, "WB024")
+
+    text = bot.send_message.call_args[1]["text"]
+    assert "自動生成失敗" in text
+    bot.send_photo.assert_not_called()
+
+
+# ---- generated-image cache ----
+
+
+def test_cache_written_after_generation():
+    bot = AsyncMock()
+    bot.send_photo.side_effect = NetworkError("httpx.ReadError")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock(return_value=b"img")):
+        _run_send(bot, "WB030")
+
+    assert cache_path("WB030", "PIYA DEJKONG", "TG607").read_bytes() == b"img"
+
+
+def test_cache_hit_skips_generation_and_resends():
+    cache_store("WB031", "PIYA DEJKONG", "TG607", b"cached")
+    bot = AsyncMock()
+    gen = AsyncMock(return_value=b"fresh")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB031")
+
+    gen.assert_not_called()
+    assert bot.send_photo.call_args[1]["photo"] == b"cached"
+
+
+def test_cache_deleted_after_successful_delivery():
+    bot = AsyncMock()
+    with patch("ride_dispatch.bot.generate_whiteboard", new=AsyncMock(return_value=b"img")):
+        _run_send(bot, "WB032")
+
+    assert not cache_path("WB032", "PIYA DEJKONG", "TG607").exists()
+
+
+def test_cache_survives_a_failed_delivery_for_the_next_attempt():
+    """The whole point: a second /board resends without paying again."""
+    bot = AsyncMock()
+    bot.send_photo.side_effect = NetworkError("httpx.ReadError")
+    gen = AsyncMock(return_value=b"img")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB033")
+
+    bot2 = AsyncMock()
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot2, "WB033")
+
+    gen.assert_awaited_once()
+    assert bot2.send_photo.call_args[1]["photo"] == b"img"
+    assert not cache_path("WB033", "PIYA DEJKONG", "TG607").exists()
+
+
+def test_cache_miss_when_name_changed():
+    """An edited order must regenerate rather than resend the stale board."""
+    cache_store("WB034", "OLD NAME", "TG607", b"stale")
+    bot = AsyncMock()
+    gen = AsyncMock(return_value=b"fresh")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB034")
+
+    gen.assert_awaited_once()
+    assert bot.send_photo.call_args[1]["photo"] == b"fresh"
+
+
+def test_cache_key_uses_sanitized_name():
+    """Cache lookup must agree with the name the generator was given."""
+    cache_store("WB035", "PIYA DEJKONG", "TG607", b"cached")
+    bot = AsyncMock()
+    gen = AsyncMock(return_value=b"fresh")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB035",
+                  {"passenger_name": "PIYA DEJKONG(重要贵宾)", "flight_number": "TG607"})
+
+    gen.assert_not_called()
+    assert bot.send_photo.call_args[1]["photo"] == b"cached"

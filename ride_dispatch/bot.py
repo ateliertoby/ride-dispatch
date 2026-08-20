@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,7 +20,7 @@ from .db import init_db, resolve_db_path, save_order, save_quick_order, update_p
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
-from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError
+from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError, cache_load as whiteboard_cache_load, cache_store as whiteboard_cache_store, cache_discard as whiteboard_cache_discard
 
 load_dotenv()
 
@@ -785,6 +786,39 @@ async def _prompt_whiteboard(bot, chat_id: int, order_id: str, order_data: dict)
     )
 
 
+DELIVERY_RETRY_DELAYS = (2, 5)  # seconds to wait before each retry
+
+
+def _is_transient_network_error(err: BaseException) -> bool:
+    """Whether a Telegram error is a dropped connection rather than a refusal.
+
+    BadRequest subclasses NetworkError in this library but means the request
+    itself is unacceptable, so it must not be treated as transient.
+    """
+    return isinstance(err, NetworkError) and not isinstance(err, BadRequest)
+
+
+async def _deliver_whiteboard(bot, chat_id: int, order_id: str, img_bytes: bytes, caption: str):
+    """Send an already-generated board, retrying dropped connections.
+
+    The bytes are in hand, so a retry costs nothing while the generation that
+    produced them cost credits — worth several attempts before giving up.
+    """
+    attempts = len(DELIVERY_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=img_bytes, caption=caption)
+            return
+        except Exception as err:
+            if attempt == attempts - 1 or not _is_transient_network_error(err):
+                raise
+            logging.getLogger("whiteboard").warning(
+                "Whiteboard delivery attempt %d/%d failed for %s: %s: %s",
+                attempt + 1, attempts, order_id[-4:], type(err).__name__, err,
+            )
+            await asyncio.sleep(DELIVERY_RETRY_DELAYS[attempt])
+
+
 async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
                            fail_text: str | None = None):
     """Fire-and-forget: generate whiteboard image and send to chat."""
@@ -792,16 +826,30 @@ async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
     flight = order_data.get("flight_number", "")
     if fail_text is None:
         fail_text = f"舉牌相自動生成失敗 #{order_id[-4:]}，用 /board 重試。"
+    log = logging.getLogger("whiteboard")
+
+    img_bytes = whiteboard_cache_load(order_id, name, flight)
+    if img_bytes is None:
+        try:
+            img_bytes = await generate_whiteboard(name, flight)
+        except Exception:
+            log.exception("Whiteboard gen failed for %s", order_id[-4:])
+            await bot.send_message(chat_id=chat_id, text=fail_text)
+            return
+        # Cached before the first send attempt so the image survives a delivery
+        # failure at any point after this line.
+        whiteboard_cache_store(order_id, name, flight, img_bytes)
+
     try:
-        img_bytes = await generate_whiteboard(name, flight)
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=img_bytes,
-            caption=f"舉牌 | {name} {flight}",
-        )
+        await _deliver_whiteboard(bot, chat_id, order_id, img_bytes, f"舉牌 | {name} {flight}")
     except Exception:
-        logging.getLogger("whiteboard").exception("Whiteboard gen failed for %s", order_id[-4:])
-        await bot.send_message(chat_id=chat_id, text=fail_text)
+        log.exception("Whiteboard delivery failed for %s", order_id[-4:])
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"舉牌相已生成 #{order_id[-4:]}，但傳送失敗。用 /board 重發，唔使再生成。",
+        )
+        return
+    whiteboard_cache_discard(order_id, name, flight)
 
 
 async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, old: str | None, new: str | None):
