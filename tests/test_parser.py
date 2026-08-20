@@ -216,6 +216,90 @@ def test_parse_tongcheng_unparsable_distance():
     assert parse_tongcheng(raw).distance_km is None
 
 
+# Same one-line layout, but the airport end is named by terminal only and the
+# direction is spelled out in 名称 — the shape that shipped an empty
+# service_type to production.
+TONGCHENG_TERMINAL_MSG = """订单号：VBKSYNTHETIC0000001
+
+            名称： 香港机场-荃湾屯门（送机）
+            车型：经济5座
+            用车时间：2026-08-20 18:15:00
+            出发地：荃湾帝盛酒店
+            目的地：香港 T2
+            订单里程：24.626 km
+            行驶时长：21 分钟
+乘客姓名CHAN,TAIMAN\t乘客英文名\t乘客手机号86-13800000000"""
+
+
+def test_parse_tongcheng_terminal_only_dropoff():
+    order = parse_tongcheng(TONGCHENG_TERMINAL_MSG)
+    assert order.service_type == "送机"
+    assert order.order_id == "VBKSYNTHETIC0000001"
+    assert order.scheduled_time == "2026-08-20 18:15:00"
+    assert order.pickup == "荃湾帝盛酒店"
+    assert order.dropoff == "香港 T2"
+    assert order.passenger_name == "CHAN,TAIMAN"
+    assert order.passenger_phone == "86 13800000000"
+    assert order.distance_km == 24.626
+
+
+def test_parse_tongcheng_route_name_never_stored():
+    order = parse_tongcheng(TONGCHENG_TERMINAL_MSG)
+    stored = [v for k, v in vars(order).items()
+              if k != "raw_message" and isinstance(v, str)]
+    assert all("荃湾屯门" not in v for v in stored)
+
+
+def _tc_route(pickup: str, dropoff: str, name: str = "") -> str:
+    name_line = f"名称：{name}\n" if name else ""
+    return f"""订单号：VBKSYNTHETIC0000002
+{name_line}车型：经济5座
+用车时间：2026-08-20 09:00:00
+出发地：{pickup}
+目的地：{dropoff}
+乘客姓名CHAN,TAIMAN    乘客手机号86-13800000000"""
+
+
+def test_parse_tongcheng_terminal_pickup_is_arrival():
+    order = parse_tongcheng(_tc_route("T2客运大楼", "荃湾帝盛酒店"))
+    assert order.service_type == "接机"
+
+
+def test_parse_tongcheng_bare_terminal_token():
+    assert parse_tongcheng(_tc_route("荃湾帝盛酒店", "T1")).service_type == "送机"
+    assert parse_tongcheng(_tc_route("T1", "荃湾帝盛酒店")).service_type == "接机"
+
+
+def test_parse_tongcheng_terminal_inside_word_is_not_airport():
+    for dropoff in ("CAT2 商场", "T25", "T21 号铺", "Hyatt1"):
+        assert parse_tongcheng(_tc_route("荃湾帝盛酒店", dropoff)).service_type == ""
+
+
+def test_parse_tongcheng_route_name_breaks_the_tie():
+    raw = _tc_route("荃湾帝盛酒店", "九龙塘又一城", "荃湾屯门-香港机场（送机）")
+    assert parse_tongcheng(raw).service_type == "送机"
+
+
+def test_parse_tongcheng_route_name_traditional_marker():
+    raw = _tc_route("荃湾帝盛酒店", "九龙塘又一城", "香港機場-荃灣屯門（接機）")
+    assert parse_tongcheng(raw).service_type == "接机"
+
+
+def test_parse_tongcheng_route_name_both_directions_stays_empty():
+    raw = _tc_route("荃湾帝盛酒店", "九龙塘又一城", "接机送机套餐")
+    assert parse_tongcheng(raw).service_type == ""
+
+
+def test_parse_tongcheng_route_name_without_marker_stays_empty():
+    raw = _tc_route("荃湾帝盛酒店", "九龙塘又一城", "香港机场-荃湾屯门")
+    assert parse_tongcheng(raw).service_type == ""
+
+
+def test_parse_tongcheng_endpoints_outrank_contradictory_route_name():
+    raw = _tc_route("荃湾帝盛酒店", "香港国际机场 T1", "荃湾屯门-香港机场（接机）")
+    assert parse_tongcheng(raw).service_type == "送机"
+
+
 FEIZHU_MSG = """订单编号：5122000000000000001-飛豬
 经济5座
 【接机】
@@ -463,6 +547,16 @@ def test_parse_fenxiao_keeps_existing_seconds():
 目的地：Hong Kong International Airport (HKG)"""
     order = parse_fenxiao(raw)
     assert order.scheduled_time == "2026-08-04 18:45:30"
+
+
+def test_parse_fenxiao_terminal_only_dropoff():
+    raw = """平台订单号：DD26082000TEST0-銀河分銷
+出行时间：2026-08-20 18:15
+出发地：Disney Explorers Lodge
+目的地：Hong Kong T2
+客人姓名：TANAKA/HANAKO
+客人联系方式：+8108012345678"""
+    assert parse_fenxiao(raw).service_type == "送机"
 
 
 def test_parse_fenxiao_no_order_id():

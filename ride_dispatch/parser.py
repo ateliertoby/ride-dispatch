@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -100,6 +101,47 @@ def parse_order(raw: str) -> Order:
 
 _AIRPORT_KEYWORDS = ("机场", "機場", "airport")
 
+# A terminal name alone identifies the airport ("香港 T2" never names anything
+# else), but T1/T2 also occur inside unrelated ASCII runs (CAT2, T25, HYATT1).
+# \b cannot draw the boundary: a CJK char and an ASCII letter are both \w, so
+# 香港T2 has no word boundary before the T — hence explicit lookarounds.
+_TERMINAL_RE = re.compile(r"(?<![a-z0-9])t[12](?![a-z0-9])")
+
+# 送/接 direction markers, in either script, as they appear in free text.
+_DEPARTURE_MARKERS = ("送机", "送機")
+_ARRIVAL_MARKERS = ("接机", "接機")
+
+
+def _mentions_airport(text: str) -> bool:
+    lowered = text.lower()
+    return (any(kw in lowered for kw in _AIRPORT_KEYWORDS)
+            or _TERMINAL_RE.search(lowered) is not None)
+
+
+def _infer_service_type(pickup: str, dropoff: str) -> str:
+    """Derive 送机/接机 from the endpoints; "" when neither is the airport."""
+    if _mentions_airport(dropoff):
+        return "送机"
+    if _mentions_airport(pickup):
+        return "接机"
+    return ""
+
+
+def _direction_from_free_text(text: str) -> str:
+    """Derive 送机/接机 from an explicit direction marker in free text.
+
+    Returns "" unless exactly one direction is named: text carrying both, or
+    neither, is ambiguous and must not be guessed at.
+    """
+    departure = any(m in text for m in _DEPARTURE_MARKERS)
+    arrival = any(m in text for m in _ARRIVAL_MARKERS)
+    if departure and not arrival:
+        return "送机"
+    if arrival and not departure:
+        return "接机"
+    return ""
+
+
 _TC_FIELD_MAP = {
     "订单号": "order_id",
     "车型": "vehicle_type",
@@ -156,6 +198,9 @@ def _tc_distance(value: str) -> Optional[float]:
 
 def parse_tongcheng(raw: str) -> Order:
     parsed = {}
+    # 名称 is a product name, not an order field — it is read for direction
+    # inference only and never stored, so it stays out of `parsed`.
+    route_name = ""
     for line in raw.strip().splitlines():
         line = line.strip()
         if not line:
@@ -169,6 +214,8 @@ def parse_tongcheng(raw: str) -> Order:
                 value = value.strip()
                 if key in _TC_FIELD_MAP:
                     parsed[_TC_FIELD_MAP[key]] = value
+                elif key == "名称":
+                    route_name = value
                 break
         else:
             # Fields without colon
@@ -190,16 +237,15 @@ def parse_tongcheng(raw: str) -> Order:
             more_contacts="", raw_message=raw,
         )
 
-    # Infer service type from pickup/dropoff. Some messages also name the
-    # direction in a 名称 line, but it is free text and absent from others.
-    dropoff = parsed.get("dropoff", "").lower()
-    pickup = parsed.get("pickup", "").lower()
-    if any(kw in dropoff for kw in _AIRPORT_KEYWORDS):
-        service_type = "送机"
-    elif any(kw in pickup for kw in _AIRPORT_KEYWORDS):
-        service_type = "接机"
-    else:
-        service_type = ""
+    # The endpoints are the authoritative signal. 名称 only breaks the tie when
+    # they say nothing: it is free text, absent from older messages, and its
+    # airport keywords are non-directional (「香港机场-荃湾」 names the airport
+    # whichever way the car goes) — only its 送/接 marker carries direction.
+    service_type = _infer_service_type(
+        parsed.get("pickup", ""), parsed.get("dropoff", "")
+    )
+    if not service_type:
+        service_type = _direction_from_free_text(route_name)
 
     phone = parsed.get("passenger_phone", "").replace("-", " ")
     flight = parsed.get("flight_number", "").lstrip("￥").strip()
@@ -243,8 +289,6 @@ def parse_tongcheng(raw: str) -> Order:
         raw_message=raw,
     )
 
-
-import re
 
 _FZ_DISTANCE_RE = re.compile(r"约([\d.]+)公里")
 _FZ_SERVICE_RE = re.compile(r"【(接机|送机)】")
@@ -500,14 +544,9 @@ def parse_fenxiao(raw: str) -> Order:
         scheduled = f"{m.group(1)} {int(m.group(2)):02d}:{m.group(3)}:00"
 
     # No explicit service field in this format — infer from pickup/dropoff.
-    dropoff = parsed.get("dropoff", "").lower()
-    pickup = parsed.get("pickup", "").lower()
-    if any(kw in dropoff for kw in _AIRPORT_KEYWORDS):
-        service_type = "送机"
-    elif any(kw in pickup for kw in _AIRPORT_KEYWORDS):
-        service_type = "接机"
-    else:
-        service_type = ""
+    service_type = _infer_service_type(
+        parsed.get("pickup", ""), parsed.get("dropoff", "")
+    )
 
     return Order(
         order_id=parsed.get("order_id", ""),
