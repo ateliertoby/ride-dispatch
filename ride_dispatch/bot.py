@@ -945,7 +945,13 @@ async def _post_init(app):
 async def _on_error(update, context):
     # Without a handler PTB dumps "No error handlers are registered" plus a
     # full traceback for every transient network blip.
-    logging.getLogger("bot").error("Unhandled error", exc_info=context.error)
+    err = context.error
+    if _is_transient_network_error(err):
+        # Polling recovers from these on its own and they arrive in bursts;
+        # a traceback per blip buries the errors that need acting on.
+        logging.getLogger("bot").warning("%s: %s", type(err).__name__, err)
+        return
+    logging.getLogger("bot").error("Unhandled error", exc_info=err)
 
 
 def main():

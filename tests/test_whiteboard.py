@@ -785,3 +785,47 @@ def test_cache_key_uses_sanitized_name():
 
     gen.assert_not_called()
     assert bot.send_photo.call_args[1]["photo"] == b"cached"
+
+
+# ---- error handler noise ----
+
+
+def _run_on_error(caplog, error):
+    from ride_dispatch.bot import _on_error
+
+    context = MagicMock()
+    context.error = error
+    with caplog.at_level(logging.DEBUG, logger="bot"):
+        asyncio.run(_on_error(None, context))
+    return [r for r in caplog.records if r.name == "bot"]
+
+
+def test_on_error_downgrades_network_error(caplog):
+    records = _run_on_error(caplog, NetworkError("httpx.ReadError"))
+
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+    assert "NetworkError" in records[0].getMessage()
+    assert "httpx.ReadError" in records[0].getMessage()
+
+
+def test_on_error_downgrades_timed_out(caplog):
+    records = _run_on_error(caplog, TimedOut())
+
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+
+
+def test_on_error_keeps_traceback_for_other_errors(caplog):
+    records = _run_on_error(caplog, ValueError("real bug"))
+
+    assert records[0].levelno == logging.ERROR
+    assert records[0].exc_info is not None
+
+
+def test_on_error_keeps_traceback_for_bad_request(caplog):
+    records = _run_on_error(caplog, BadRequest("chat not found"))
+
+    assert records[0].levelno == logging.ERROR
+    assert records[0].exc_info is not None
