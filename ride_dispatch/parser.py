@@ -396,10 +396,18 @@ _SPACE_FIELD_MAP = {
     # Matching is exact-key, so these cannot swallow 乘客姓名/乘客电话.
     "姓名": "passenger_name",
     "电话": "passenger_phone",
+    # Another variant labels the same contact pair 乘车人/联系方式. 联系方式 is
+    # free text and often holds no number at all (e.g. 微信群联系); it is stored
+    # verbatim, because dropping an unrecognised value loses the only way to
+    # reach the passenger.
+    "乘车人": "passenger_name",
+    "联系方式": "passenger_phone",
+    "航班号": "flight_number",
     "上车点": "pickup",
     "下车点": "dropoff",
     "用车日期": "_date",
     "用车时间": "_time",
+    "预计降落时间": "_landing_time",
 }
 
 # The example-model suffix after 车型 comes in any of these bracket styles.
@@ -444,6 +452,12 @@ def parse_space(raw: str) -> Order:
     # Merge date + time into scheduled_time
     date_str = parsed.pop("_date", "")
     time_str = parsed.pop("_time", "")
+    landing_str = parsed.pop("_landing_time", "")
+    # 用车时间 always wins. Variants that omit it fall back to 预计降落时间: for
+    # 接机 the scheduled time is only an estimate that live flight tracking
+    # supersedes anyway, and a date without a time breaks every consumer that
+    # reads scheduled_time as '%Y-%m-%d %H:%M:%S'.
+    time_str = time_str or landing_str
     scheduled = ""
     if time_str:
         is_pm = any(time_str.startswith(p) for p in _SPACE_PM_PREFIXES)
@@ -480,7 +494,7 @@ def parse_space(raw: str) -> Order:
         scheduled_time=parsed.get("scheduled_time", ""),
         passenger_phone=parsed.get("passenger_phone", ""),
         overseas_phone="",
-        flight_number="",
+        flight_number=parsed.get("flight_number", ""),
         pickup=parsed.get("pickup", ""),
         dropoff=parsed.get("dropoff", ""),
         distance_km=None,

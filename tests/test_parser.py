@@ -443,6 +443,66 @@ def test_parse_space_relay_variant():
     assert order.raw_message == SPACE_RELAY_MSG
 
 
+# 接机 variant of the SPACE format: 乘车人/联系方式 contact keys, a 航班号, and
+# no 用车时间 — only 预计降落时间.
+SPACE_LANDING_MSG = """订单号：SPACE202608990001
+类型：香港-接机
+车型：舒适5座
+用车日期：2026-08-21
+预计降落时间：11:25
+航班号：CX880
+上车点：香港国际机场
+下车点：香港北角海逸酒店
+乘车人：陈大文
+联系方式：微信群联系"""
+
+
+def test_parse_space_landing_variant():
+    order = parse_space(SPACE_LANDING_MSG)
+    assert order.order_id == "SPACE202608990001"
+    assert order.service_type == "接机"
+    assert order.vehicle_type == "舒适5座"
+    assert order.scheduled_time == "2026-08-21 11:25:00"
+    assert order.flight_number == "CX880"
+    assert order.pickup == "香港国际机场"
+    assert order.dropoff == "香港北角海逸酒店"
+    assert order.passenger_name == "陈大文"
+    # Non-numeric contact values are kept verbatim rather than dropped.
+    assert order.passenger_phone == "微信群联系"
+    assert order.raw_message == SPACE_LANDING_MSG
+
+
+def test_parse_space_scheduled_time_prefers_pickup_time():
+    raw = """订单号：SPACE77777
+类型：香港-接机
+车型：舒适5座
+用车日期：2026-08-21
+用车时间：13:00
+预计降落时间：11:25
+航班号：CX880
+上车点：香港国际机场
+下车点：香港北角海逸酒店
+乘车人：陈大文
+联系方式：微信群联系"""
+    order = parse_space(raw)
+    assert order.scheduled_time == "2026-08-21 13:00:00"
+
+
+def test_parse_space_landing_time_prefix():
+    raw = """订单号：SPACE66666
+类型：香港-接机
+车型：舒适5座
+用车日期：2026-08-21
+预计降落时间：上午11:25
+航班号：CX880
+上车点：香港国际机场
+下车点：香港北角海逸酒店
+乘车人：陈大文
+联系方式：微信群联系"""
+    order = parse_space(raw)
+    assert order.scheduled_time == "2026-08-21 11:25:00"
+
+
 JIEZHAN_MSG = """服务类型: 接站
 接单车型: 特斯拉 Model S
 乘客姓名: 陈小明
