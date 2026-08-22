@@ -12,8 +12,12 @@ from .db import (
     init_db,
     resolve_db_path,
     count_active_orders,
+    create_settlement,
+    delete_settlement,
     get_orders_by_date,
     get_order_by_id,
+    get_settle_month,
+    mark_settlement_paid,
     order_id_exists,
     save_order,
     save_quick_order,
@@ -23,7 +27,7 @@ from .db import (
 from .flight import depart_hhmm, effective_service_time, exit_urgency
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
-from .service import is_flight_pickup
+from .service import PLATFORMS, is_flight_pickup
 
 load_dotenv()
 
@@ -71,6 +75,26 @@ def _parse_money(value, field: str) -> tuple[float | None, tuple | None]:
     if amount < 0:
         return None, (jsonify({"error": f"{field} must be >= 0"}), 400)
     return amount, None
+
+
+# Zero padding is enforced on top of strptime, which accepts "2026-7-1".
+# Dates are stored and compared as strings (prefix match for a month, plain
+# ordering for a day), so an unpadded value matches and sorts wrong instead
+# of failing loudly.
+_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+
+
+def _parse_day(value, field: str) -> tuple[str | None, tuple | None]:
+    day = str(value)
+    err = (jsonify({"error": f"{field} must be YYYY-MM-DD"}), 400)
+    if not _DAY_RE.fullmatch(day):
+        return None, err
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return None, err
+    return day, None
 
 
 @app.post("/api/orders/parse")
@@ -197,8 +221,69 @@ def api_update_order(order_id):
         fields["status"] = "cancelled"
     if not fields:
         return jsonify({"error": "no updatable fields in body"}), 400
-    if not update_order_fields(DB_PATH, order_id, fields):
+    try:
+        updated = update_order_fields(DB_PATH, order_id, fields)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not updated:
         return jsonify({"error": "order not found"}), 404
+    return jsonify({"ok": True})
+
+
+# ---- Settlement (埋數) ----
+
+
+@app.get("/api/settle")
+def api_settle():
+    month = request.args.get("month", date.today().strftime("%Y-%m"))
+    if not _MONTH_RE.fullmatch(month):
+        return jsonify({"error": "month must be YYYY-MM"}), 400
+    platform = request.args.get("platform", "ride")
+    if platform not in PLATFORMS:
+        return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
+    data = get_settle_month(DB_PATH, month, platform)
+    return jsonify({"month": month, "platform": platform, **data})
+
+
+@app.post("/api/settlements")
+def api_create_settlement():
+    body = request.get_json(silent=True) or {}
+    platform = body.get("platform")
+    if platform not in PLATFORMS:
+        return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
+    order_ids = body.get("order_ids")
+    if not isinstance(order_ids, list) or not order_ids:
+        return jsonify({"error": "order_ids required"}), 400
+    confirmed, cerr = _parse_money(body.get("confirmed_amount"), "confirmed_amount")
+    if cerr:
+        return cerr
+    settled_on, derr = _parse_day(body.get("settled_on") or date.today().isoformat(), "settled_on")
+    if derr:
+        return derr
+    try:
+        settlement_id = create_settlement(
+            DB_PATH, platform, [str(i) for i in order_ids], confirmed, settled_on
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"id": settlement_id}), 201
+
+
+@app.post("/api/settlements/<int:settlement_id>/paid")
+def api_mark_settlement_paid(settlement_id):
+    body = request.get_json(silent=True) or {}
+    paid_on, derr = _parse_day(body.get("paid_on") or date.today().isoformat(), "paid_on")
+    if derr:
+        return derr
+    if not mark_settlement_paid(DB_PATH, settlement_id, paid_on):
+        return jsonify({"error": "settlement not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/settlements/<int:settlement_id>")
+def api_delete_settlement(settlement_id):
+    if not delete_settlement(DB_PATH, settlement_id):
+        return jsonify({"error": "settlement not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -208,10 +293,16 @@ def _fingerprint():
         "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
         "count(case when status='cancelled' then 1 end), "
         "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0), coalesce(sum(banner_fee),0), "
+        "coalesce(sum(settlement_id),0), "
         "coalesce(group_concat(coalesce(scheduled_time,'') || coalesce(flight_eta,'') || coalesce(flight_gate,'') || coalesce(flight_status,'')),'') FROM orders"
     ).fetchone()
+    # max(id) rather than count alone: ids are AUTOINCREMENT, so undoing a batch
+    # and settling again is a visible change instead of a wash.
+    settle_row = conn.execute(
+        "SELECT count(*), coalesce(max(id),0), count(paid_on) FROM settlements"
+    ).fetchone()
     conn.close()
-    return "-".join(str(v) for v in row)
+    return "-".join(str(v) for v in (*row, *settle_row))
 
 
 @app.route("/api/events")

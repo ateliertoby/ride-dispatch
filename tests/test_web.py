@@ -287,3 +287,225 @@ def test_api_orders_sorted_by_effective_service_time(client):
     assert len(rows) == 2
     assert rows[0]["order_id"] == "UO213-order"   # svc 19:38 < 20:30
     assert rows[1]["order_id"] == "EK384-order"
+
+
+# ---- settlement ----
+
+
+def seed_ride(order_id="R1", scheduled="2026-07-01 09:00:00", price=500.0, banner=40.0):
+    from ride_dispatch.db import _conn
+    save_quick_order(web.DB_PATH, order_id, "接机", scheduled, price, 0.0, source="携程")
+    with _conn(web.DB_PATH) as conn:
+        conn.execute("UPDATE orders SET banner_fee = ? WHERE order_id = ?", (banner, order_id))
+        conn.commit()
+    return order_id
+
+
+def settle(client, month="2026-07", platform="ride"):
+    res = client.get(f"/api/settle?month={month}&platform={platform}")
+    assert res.status_code == 200
+    return res.get_json()
+
+
+def create_batch(client, order_ids, platform="ride", confirmed=540, settled_on="2026-07-03"):
+    return client.post("/api/settlements", json={
+        "platform": platform, "order_ids": order_ids,
+        "confirmed_amount": confirmed, "settled_on": settled_on,
+    })
+
+
+def test_settle_shape(client):
+    seed_ride("R1")
+    seed_order("D1", "2026-07-01 10:00:00")
+    data = settle(client)
+    assert data["month"] == "2026-07"
+    assert data["platform"] == "ride"
+    assert len(data["now"]) == 19
+    assert [o["order_id"] for o in data["orders"]] == ["R1"]
+    assert data["orders"][0]["banner_fee"] == 40.0
+    assert data["orders"][0]["settlement_id"] is None
+    assert data["settlements"] == []
+    assert data["counts"] == {"ride": 1, "didi": 1, "uber": 0, "foodpanda": 0}
+    assert data["totals"] == {"unsettled": 540.0, "awaiting": 0}
+
+
+def test_settle_totals_follow_the_batch(client):
+    seed_ride("R1")
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    create_batch(client, ["R1"], confirmed=530)
+    data = settle(client)
+    assert data["counts"]["ride"] == 1
+    assert data["totals"] == {"unsettled": 300.0, "awaiting": 530.0}
+    assert len(data["settlements"]) == 1
+    batch = data["settlements"][0]
+    assert batch["expected_amount"] == 540.0
+    assert batch["confirmed_amount"] == 530.0
+    assert [o["order_id"] for o in batch["orders"]] == ["R1"]
+
+
+def test_settle_returns_straddling_batch_whole(client):
+    seed_ride("JUN30", scheduled="2026-06-30 20:00:00", banner=0.0)
+    seed_ride("JUL01", scheduled="2026-07-01 09:00:00", banner=0.0)
+    create_batch(client, ["JUN30", "JUL01"], confirmed=1000, settled_on="2026-07-02")
+    data = settle(client)
+    assert [o["order_id"] for o in data["orders"]] == ["JUL01"]
+    assert [o["order_id"] for o in data["settlements"][0]["orders"]] == ["JUN30", "JUL01"]
+
+
+def test_settle_rejects_bad_query(client):
+    assert client.get("/api/settle?month=2026-13&platform=ride").status_code == 400
+    assert client.get("/api/settle?month=2026-07-01&platform=ride").status_code == 400
+    # unpadded month would LIKE-match nothing and read as an empty month
+    assert client.get("/api/settle?month=2026-7&platform=ride").status_code == 400
+    assert client.get("/api/settle?month=2026-07&platform=taxi").status_code == 400
+
+
+def test_settle_defaults_to_this_month_and_ride(client):
+    res = client.get("/api/settle")
+    assert res.status_code == 200
+    assert res.get_json()["platform"] == "ride"
+
+
+def test_create_settlement_endpoint(client):
+    seed_ride("R1")
+    res = create_batch(client, ["R1"])
+    assert res.status_code == 201
+    settlement_id = res.get_json()["id"]
+    batch = settle(client)["settlements"][0]
+    assert batch["id"] == settlement_id
+    assert batch["settled_on"] == "2026-07-03"
+    assert batch["paid_on"] is None
+
+
+def test_create_settlement_defaults_settled_on_to_today(client):
+    from datetime import date as _date
+    seed_ride("R1")
+    res = client.post("/api/settlements", json={
+        "platform": "ride", "order_ids": ["R1"], "confirmed_amount": 540,
+    })
+    assert res.status_code == 201
+    assert settle(client)["settlements"][0]["settled_on"] == _date.today().isoformat()
+
+
+def test_create_settlement_rejects_bad_input(client):
+    seed_ride("R1")
+    base = {"platform": "ride", "order_ids": ["R1"], "confirmed_amount": 540, "settled_on": "2026-07-03"}
+    assert client.post("/api/settlements", json={**base, "platform": "taxi"}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "order_ids": []}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "order_ids": "R1"}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "confirmed_amount": "abc"}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "confirmed_amount": -1}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "settled_on": "2026-13-01"}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "settled_on": "2026-2-30"}).status_code == 400
+    assert client.post("/api/settlements", json={**base, "settled_on": "2026-7-3"}).status_code == 400
+    assert settle(client)["settlements"] == []
+
+
+def test_create_settlement_rejects_unsettleable_order(client):
+    from datetime import date as _date, timedelta
+    seed_ride("R1")
+    tomorrow = (_date.today() + timedelta(days=1)).isoformat()
+    seed_ride("FUTURE", scheduled=f"{tomorrow} 09:00:00")
+    res = create_batch(client, ["R1", "FUTURE"], confirmed=1080)
+    assert res.status_code == 400
+    assert "FUTURE" in res.get_json()["error"]
+    assert settle(client)["settlements"] == []
+
+
+def test_create_settlement_rejects_unknown_order(client):
+    res = create_batch(client, ["NOPE"])
+    assert res.status_code == 400
+    assert "NOPE" in res.get_json()["error"]
+
+
+def test_mark_settlement_paid_endpoint(client):
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    res = client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
+    assert res.status_code == 200
+    data = settle(client)
+    assert data["settlements"][0]["paid_on"] == "2026-07-05"
+    assert data["totals"]["awaiting"] == 0
+
+
+def test_mark_settlement_paid_defaults_to_today(client):
+    from datetime import date as _date
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    client.post(f"/api/settlements/{settlement_id}/paid", json={})
+    assert settle(client)["settlements"][0]["paid_on"] == _date.today().isoformat()
+
+
+def test_mark_settlement_paid_bad_input(client):
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    assert client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-32"}).status_code == 400
+    assert client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-7-5"}).status_code == 400
+    assert client.post("/api/settlements/999/paid", json={"paid_on": "2026-07-05"}).status_code == 404
+
+
+def test_delete_settlement_endpoint(client):
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    assert client.delete(f"/api/settlements/{settlement_id}").status_code == 200
+    data = settle(client)
+    assert data["settlements"] == []
+    assert data["orders"][0]["settlement_id"] is None
+    assert data["counts"]["ride"] == 1
+
+
+def test_delete_settlement_unknown_id(client):
+    assert client.delete("/api/settlements/999").status_code == 404
+
+
+def test_patch_batched_order_rejected(client):
+    seed_ride("R1")
+    create_batch(client, ["R1"])
+    res = client.patch("/api/orders/R1", json={"price": 600})
+    assert res.status_code == 400
+    assert res.get_json()["error"] == "已結算嘅單要先撤銷結算"
+    assert client.patch("/api/orders/R1", json={"status": "cancelled"}).status_code == 400
+    assert get_order_by_id(web.DB_PATH, "R1")["price"] == 500.0
+
+
+def test_patch_batched_order_allows_parking(client):
+    seed_ride("R1")
+    create_batch(client, ["R1"])
+    assert client.patch("/api/orders/R1", json={"parking_fee": 32}).status_code == 200
+    assert get_order_by_id(web.DB_PATH, "R1")["parking_fee"] == 32
+
+
+def test_api_orders_carry_settlement_columns(client):
+    seed_ride("R1")
+    rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
+    assert rows[0]["settlement_paid_on"] is None
+    assert rows[0]["settlement_settled_on"] is None
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
+    rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
+    assert rows[0]["settlement_settled_on"] == "2026-07-03"
+    assert rows[0]["settlement_paid_on"] == "2026-07-05"
+
+
+def test_fingerprint_tracks_settlements(client):
+    seed_ride("R1")
+    before = web._fingerprint()
+    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    created = web._fingerprint()
+    assert created != before
+    client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
+    paid = web._fingerprint()
+    assert paid != created
+    client.delete(f"/api/settlements/{settlement_id}")
+    assert web._fingerprint() != paid
+
+
+def test_fingerprint_distinguishes_a_resettle(client):
+    """Undo empties the book back to its pre-settlement fingerprint, so the
+    batch id is what keeps a re-settle from looking like no change at all."""
+    seed_ride("R1")
+    first = create_batch(client, ["R1"]).get_json()["id"]
+    created = web._fingerprint()
+    client.delete(f"/api/settlements/{first}")
+    create_batch(client, ["R1"])
+    assert web._fingerprint() != created
