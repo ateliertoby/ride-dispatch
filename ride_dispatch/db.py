@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
 from .ingest import banner_fee
-from .service import needs_departure_reminder
+from .service import PLATFORMS, expected_of, needs_departure_reminder, platform_of
 
 COARSE_WINDOW_HOURS = 24
 
@@ -69,11 +69,23 @@ def init_db(db_path: str):
             "flight_hall TEXT",
             "source TEXT DEFAULT ''",
             "reminders_sent TEXT DEFAULT ''",
+            "settlement_id INTEGER",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settlements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT,
+                expected_amount REAL,
+                confirmed_amount REAL,
+                settled_on TEXT,
+                paid_on TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         conn.commit()
 
 
@@ -134,6 +146,22 @@ def update_cost(db_path: str, order_id: str, cost_type: str, amount: float):
 
 UPDATABLE_FIELDS = {"price", "tunnel_fee", "parking_fee", "banner_fee", "scheduled_time", "status"}
 
+# A settled batch's expected_amount is frozen at creation, so the fields it was
+# summed from — and cancellation, which would remove the order from the sum
+# entirely — are locked while the order belongs to a batch.  parking_fee and
+# scheduled_time never feed the sum and stay editable.
+BATCH_LOCKED_FIELDS = {"price", "tunnel_fee", "banner_fee", "status"}
+
+SETTLED_LOCK_MSG = "已結算嘅單要先撤銷結算"
+
+
+def _assert_unbatched(conn, order_id: str):
+    row = conn.execute(
+        "SELECT settlement_id FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    if row and row["settlement_id"] is not None:
+        raise ValueError(SETTLED_LOCK_MSG)
+
 
 def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
     bad = set(fields) - UPDATABLE_FIELDS
@@ -145,6 +173,8 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
     sets = ", ".join(f"{c} = ?" for c in cols)
     params = [fields[c] for c in cols] + [order_id]
     with _conn(db_path) as conn:
+        if BATCH_LOCKED_FIELDS & set(fields):
+            _assert_unbatched(conn, order_id)
         cur = conn.execute(f"UPDATE orders SET {sets} WHERE order_id = ?", params)
         conn.commit()
         return cur.rowcount > 0
@@ -152,6 +182,7 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
 
 def cancel_order(db_path: str, order_id: str):
     with _conn(db_path) as conn:
+        _assert_unbatched(conn, order_id)
         conn.execute("UPDATE orders SET status = 'cancelled' WHERE order_id = ?", (order_id,))
         conn.commit()
 
@@ -166,7 +197,10 @@ def count_active_orders(db_path: str) -> int:
 def get_orders_by_date(db_path: str, date_str: str) -> list[dict]:
     with _conn(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE scheduled_time LIKE ? AND coalesce(status,'active') = 'active' ORDER BY scheduled_time",
+            "SELECT o.*, s.paid_on AS settlement_paid_on, s.settled_on AS settlement_settled_on "
+            "FROM orders o LEFT JOIN settlements s ON s.id = o.settlement_id "
+            "WHERE o.scheduled_time LIKE ? AND coalesce(o.status,'active') = 'active' "
+            "ORDER BY o.scheduled_time",
             (f"{date_str}%",),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -274,3 +308,199 @@ def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | N
         params.append(order_id)
         conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE order_id = ?", params)
         conn.commit()
+
+
+# ---- Settlement (埋數) ----
+
+# Columns the settle page needs per order; the batch total is recomputed from
+# price/banner_fee/tunnel_fee, so all three travel with every row.
+_SETTLE_ORDER_COLS = (
+    "order_id, scheduled_time, service_type, flight_number, "
+    "pickup, dropoff, price, banner_fee, tunnel_fee, settlement_id"
+)
+
+# Only a finished, priced, not-yet-batched leg can enter a batch.  The clock is
+# a parameter so the settle page and the server agree on which legs are done.
+_SETTLEABLE_SQL = (
+    "coalesce(status,'active') = 'active' AND settlement_id IS NULL "
+    "AND coalesce(price,0) > 0 AND scheduled_time < ?"
+)
+
+
+def _now_str(now: datetime | None) -> str:
+    return (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def create_settlement(db_path: str, platform: str, order_ids: list[str],
+                      confirmed_amount: float, settled_on: str,
+                      now: datetime | None = None) -> int:
+    """Batch one platform's settleable orders; returns the settlement id.
+
+    All-or-nothing: any order that is missing, cancelled, unpriced, still in
+    the future, already batched, or belonging to another platform aborts the
+    call with ValueError naming it, and nothing is written.  expected_amount is
+    summed from the stored rows rather than taken from the caller, so a stale
+    client cannot disagree with the DB about what is owed.
+    """
+    if platform not in PLATFORMS:
+        raise ValueError(f"unknown platform: {platform}")
+    if not order_ids:
+        raise ValueError("order_ids required")
+    cutoff = _now_str(now)
+    with _conn(db_path) as conn:
+        expected = 0.0
+        seen = set()
+        for order_id in order_ids:
+            if order_id in seen:
+                raise ValueError(f"{order_id}: 重複")
+            seen.add(order_id)
+            row = conn.execute(
+                "SELECT * FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"{order_id}: 搵唔到單")
+            if (row["status"] or "active") != "active":
+                raise ValueError(f"{order_id}: 已取消")
+            if row["settlement_id"] is not None:
+                raise ValueError(f"{order_id}: 已經結算咗")
+            if not (row["price"] or 0) > 0:
+                raise ValueError(f"{order_id}: 未入價")
+            if (row["scheduled_time"] or "") >= cutoff:
+                raise ValueError(f"{order_id}: 未完成")
+            if platform_of(row["service_type"]) != platform:
+                raise ValueError(f"{order_id}: 唔屬於呢個平台")
+            expected += expected_of(dict(row))
+        cur = conn.execute(
+            "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on) "
+            "VALUES (?, ?, ?, ?)",
+            (platform, expected, confirmed_amount, settled_on),
+        )
+        settlement_id = cur.lastrowid
+        conn.execute(
+            "UPDATE orders SET settlement_id = ? WHERE order_id IN "
+            f"({', '.join('?' * len(order_ids))})",
+            [settlement_id, *order_ids],
+        )
+        conn.commit()
+        return settlement_id
+
+
+def mark_settlement_paid(db_path: str, settlement_id: int, paid_on: str) -> bool:
+    """Record the payout date.  False when the id is unknown.
+
+    Re-marking a paid batch keeps the original date: the platform pays once,
+    and a second tap (other device, stale page) must not rewrite history.
+    """
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT paid_on FROM settlements WHERE id = ?", (settlement_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row["paid_on"]:
+            return True
+        conn.execute(
+            "UPDATE settlements SET paid_on = ? WHERE id = ?", (paid_on, settlement_id)
+        )
+        conn.commit()
+        return True
+
+
+def delete_settlement(db_path: str, settlement_id: int) -> bool:
+    """Undo a settlement: unlink its orders and drop the batch, or False if unknown."""
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM settlements WHERE id = ?", (settlement_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE orders SET settlement_id = NULL WHERE settlement_id = ?", (settlement_id,)
+        )
+        conn.execute("DELETE FROM settlements WHERE id = ?", (settlement_id,))
+        conn.commit()
+        return True
+
+
+def _settlement_orders(conn, settlement_ids: list[int]) -> dict[int, list[dict]]:
+    if not settlement_ids:
+        return {}
+    rows = conn.execute(
+        f"SELECT {_SETTLE_ORDER_COLS} FROM orders WHERE settlement_id IN "
+        f"({', '.join('?' * len(settlement_ids))}) ORDER BY scheduled_time",
+        settlement_ids,
+    ).fetchall()
+    grouped: dict[int, list[dict]] = {sid: [] for sid in settlement_ids}
+    for row in rows:
+        grouped[row["settlement_id"]].append(dict(row))
+    return grouped
+
+
+def get_settlement(db_path: str, settlement_id: int) -> dict | None:
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM settlements WHERE id = ?", (settlement_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
+        return out
+
+
+def get_settle_month(db_path: str, month: str, platform: str,
+                     now: datetime | None = None) -> dict:
+    """Everything the settle page draws for one month of one platform.
+
+    Batches come back whole even when only part of them falls inside the
+    month — a batch can straddle months and the day sheet labels it by its
+    full date range.  counts and totals deliberately span all time: the point
+    of the page is clearing old days, which the month on screen would hide.
+    """
+    cutoff = _now_str(now)
+    with _conn(db_path) as conn:
+        month_rows = conn.execute(
+            f"SELECT {_SETTLE_ORDER_COLS} FROM orders "
+            "WHERE scheduled_time LIKE ? AND coalesce(status,'active') = 'active' "
+            "ORDER BY scheduled_time",
+            (f"{month}%",),
+        ).fetchall()
+        orders = [dict(r) for r in month_rows if platform_of(r["service_type"]) == platform]
+
+        settlement_ids = sorted({o["settlement_id"] for o in orders if o["settlement_id"]})
+        settlements = []
+        if settlement_ids:
+            members = _settlement_orders(conn, settlement_ids)
+            rows = conn.execute(
+                "SELECT * FROM settlements WHERE id IN "
+                f"({', '.join('?' * len(settlement_ids))}) ORDER BY id",
+                settlement_ids,
+            ).fetchall()
+            for row in rows:
+                batch = dict(row)
+                batch["orders"] = members[row["id"]]
+                settlements.append(batch)
+
+        counts = {p: 0 for p in PLATFORMS}
+        unsettled = 0.0
+        for row in conn.execute(
+            f"SELECT {_SETTLE_ORDER_COLS} FROM orders WHERE {_SETTLEABLE_SQL}", (cutoff,)
+        ):
+            p = platform_of(row["service_type"])
+            counts[p] += 1
+            if p == platform:
+                unsettled += expected_of(dict(row))
+
+        awaiting = conn.execute(
+            "SELECT coalesce(sum(confirmed_amount), 0) FROM settlements "
+            "WHERE platform = ? AND paid_on IS NULL",
+            (platform,),
+        ).fetchone()[0]
+
+    return {
+        "now": cutoff,
+        "counts": counts,
+        "totals": {"unsettled": unsettled, "awaiting": awaiting},
+        "orders": orders,
+        "settlements": settlements,
+    }

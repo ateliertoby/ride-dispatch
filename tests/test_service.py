@@ -1,7 +1,7 @@
 from ride_dispatch.service import (
-    FLIGHT_PICKUP, FLIGHT_TYPES, STATION_TYPES, QUICK_TYPES,
+    FLIGHT_PICKUP, FLIGHT_TYPES, STATION_TYPES, QUICK_TYPES, PLATFORMS,
     is_flight_pickup, is_station, needs_departure_reminder,
-    anchor_end, label,
+    anchor_end, label, platform_of, expected_of,
 )
 
 
@@ -165,6 +165,74 @@ def test_label_unknown():
 
 def test_label_unreceived_station_variant():
     assert label('高铁送站') == '單程'
+
+
+# ---- platform_of ----
+
+
+def test_platform_didi():
+    assert platform_of('滴滴') == 'didi'
+
+
+def test_platform_uber():
+    assert platform_of('Uber') == 'uber'
+
+
+def test_platform_foodpanda():
+    assert platform_of('foodpanda') == 'foodpanda'
+
+
+def test_platform_ride_types():
+    for st in ('接机', '送机', '接站', '单程接送', '未知类型', ''):
+        assert platform_of(st) == 'ride'
+
+
+def test_platform_values_are_declared():
+    for st in ('滴滴', 'Uber', 'foodpanda', '接机', ''):
+        assert platform_of(st) in PLATFORMS
+
+
+# ---- expected_of ----
+
+
+def order(**overrides) -> dict:
+    base = dict(service_type='接机', price=500.0, banner_fee=40.0, tunnel_fee=30.0)
+    base.update(overrides)
+    return base
+
+
+def test_expected_ride_adds_banner():
+    assert expected_of(order()) == 540.0
+
+
+def test_expected_ride_ignores_tunnel():
+    """The 接送 platform pays the toll itself; only 舉牌 is claimed back."""
+    assert expected_of(order(tunnel_fee=100.0)) == 540.0
+
+
+def test_expected_didi_adds_tunnel():
+    assert expected_of(order(service_type='滴滴')) == 530.0
+
+
+def test_expected_uber_adds_tunnel():
+    assert expected_of(order(service_type='Uber')) == 530.0
+
+
+def test_expected_foodpanda_is_price_only():
+    assert expected_of(order(service_type='foodpanda')) == 500.0
+
+
+def test_expected_null_fees_count_as_zero():
+    assert expected_of(order(banner_fee=None)) == 500.0
+    assert expected_of(order(service_type='滴滴', tunnel_fee=None)) == 500.0
+
+
+def test_expected_null_price_counts_as_zero():
+    assert expected_of(order(price=None)) == 40.0
+
+
+def test_expected_missing_columns():
+    assert expected_of({'service_type': '接机'}) == 0.0
 
 
 # orders.service_type is a nullable TEXT column, so every predicate has to
