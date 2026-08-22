@@ -19,7 +19,8 @@ This bot parses pasted order messages into structured records and stores them in
 5. Everything after that lives on the dashboard: tap a card to edit price, tunnel/parking/banner fees, or time, or to cancel (double-confirm).
 6. Tap **+** to add a Didi/Uber/foodpanda order onto whichever date is being viewed — time, money, confirm. Backfilling old orders is just navigating to that date first.
 7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
-8. On landing, pickup orders with 舉牌 service get a preview of the sign text plus a 生成舉牌相 button — tapping it generates the whiteboard sign photo (via GPT-Image-2). `/board` generates manually for any pickup
+8. Tap **$** to open 埋數: a month grid of what each day earned, coloured by whether the money is still to chase (amber), settled and waiting on the transfer (plain), or banked (green). Tap a day, tick its legs, type what the platform confirmed, and it becomes one settlement batch; 已到帳 marks the transfer in, 撤銷結算 unwinds the whole batch. An order in a batch is locked against price and cancellation edits until it is unwound
+9. On landing, pickup orders with 舉牌 service get a preview of the sign text plus a 生成舉牌相 button — tapping it generates the whiteboard sign photo (via GPT-Image-2). `/board` generates manually for any pickup
 
 ## Run
 
