@@ -289,6 +289,21 @@ def test_api_orders_sorted_by_effective_service_time(client):
     assert rows[1]["order_id"] == "EK384-order"
 
 
+# ---- pages ----
+
+
+def test_settle_page_renders(client):
+    res = client.get("/settle")
+    assert res.status_code == 200
+    assert "埋數" in res.get_data(as_text=True)
+
+
+def test_dashboard_links_to_settle_page(client):
+    res = client.get("/")
+    assert res.status_code == 200
+    assert 'href="/settle"' in res.get_data(as_text=True)
+
+
 # ---- settlement ----
 
 

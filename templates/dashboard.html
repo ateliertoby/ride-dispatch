@@ -9,110 +9,33 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Ride Dispatch</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+{% include "_shared.css" %}
+  /* Tokens only this page uses: service-badge and row-state colours. */
   :root {
-    --bg: #0c0f14;
-    --surface: #171c24;
-    --surface-press: #1e242f;
-    --sheet-bg: #1a202a;
-    --key-bg: #232a36;
-    --key-press: #2c3442;
-    --text: #e8ebf0;
-    --text-2: #9aa3b2;
-    --text-3: #626c7c;
-    --line: #242b37;
-    --amber: #ffb02e;
-    --red: #ff6161;
-    --green: #3ddc84;
-    --scrim: rgba(0,0,0,.55);
     --pickup-bg: rgba(77,163,255,.16);  --pickup-fg: #6ab2ff;
     --dropoff-bg: rgba(255,159,74,.16); --dropoff-fg: #ffb066;
     --didi-bg: rgba(61,220,132,.14);    --didi-fg: #52d98b;
     --uber-bg: rgba(186,140,255,.16);   --uber-fg: #c9a2ff;
     --fp-bg: rgba(255,63,133,.16);      --fp-fg: #ff6ba3;
     --transfer-bg: rgba(150,160,175,.14); --transfer-fg: #a8b1c0;
-    --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
     --urgent-bg: rgba(255,97,97,.14);
     --tight-bg: rgba(255,176,46,.14);
     --next-bg: rgba(61,220,132,.06);
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --bg: #f2f3f5;
-      --surface: #ffffff;
-      --surface-press: #f4f5f7;
-      --sheet-bg: #ffffff;
-      --key-bg: #eef0f3;
-      --key-press: #e2e5e9;
-      --text: #1a1d23;
-      --text-2: #6b7482;
-      --text-3: #9aa2af;
-      --line: #e6e8ec;
-      --amber: #c77800;
-      --red: #d63030;
-      --green: #1d9e57;
-      --scrim: rgba(0,0,0,.35);
       --pickup-bg: #e8f4fd;  --pickup-fg: #0a84ff;
       --dropoff-bg: #fff3e0; --dropoff-fg: #f57c00;
       --didi-bg: #e8f5e9;    --didi-fg: #2e9e52;
       --uber-bg: #f3e5f5;    --uber-fg: #8e24aa;
       --fp-bg: #fce4ef;      --fp-fg: #d70f64;
       --transfer-bg: #f0f1f3; --transfer-fg: #666;
-      --banner-bg: #fff8e1;  --banner-fg: #c77800;
       --urgent-bg: #fdeaea;
       --tight-bg: #fff8e1;
       --next-bg: #edfaf2;
     }
   }
-  html { -webkit-text-size-adjust: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: var(--bg); color: var(--text);
-    max-width: 480px; margin: 0 auto;
-    padding-bottom: env(safe-area-inset-bottom);
-    overflow-x: hidden;
-  }
-  button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
-
-  .header {
-    position: sticky; top: 0; z-index: 10;
-    background: var(--bg); padding: 10px 14px 8px;
-    padding-top: calc(10px + env(safe-area-inset-top));
-    border-bottom: 1px solid var(--line);
-  }
-  .header-row { display: flex; align-items: center; gap: 8px; }
-  .nav-btn, .icon-btn {
-    background: var(--surface); border: none; border-radius: 10px;
-    width: 42px; height: 40px; font-size: 17px; cursor: pointer;
-    color: var(--text-2); flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .nav-btn:active, .icon-btn:active { background: var(--surface-press); }
-  .date-btn {
-    background: none; border: none; cursor: pointer;
-    font-size: 17px; font-weight: 650; color: var(--text);
-    font-variant-numeric: tabular-nums;
-    flex: 1; text-align: center; height: 40px;
-  }
-  .date-btn small { display: block; font-size: 11px; font-weight: 500; color: var(--text-3); }
   .add-btn { background: var(--surface); color: var(--text); font-size: 22px; font-weight: 400; }
-
-  .summary {
-    text-align: center; font-size: 13px; color: var(--text-2);
-    font-variant-numeric: tabular-nums; padding-top: 4px;
-  }
-  .summary .warn { color: var(--amber); }
-
-  .chips { display: flex; gap: 6px; padding: 10px 14px 2px; }
-  .chip {
-    position: relative; flex: 1; height: 28px; border: none; border-radius: 8px;
-    cursor: pointer; background: var(--surface); color: var(--text-2);
-    font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
-  }
-  /* The pill is 28px by design, but the tappable area must stay >= 44px. */
-  .chip::after { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
-  .chip.on { background: var(--text); color: var(--bg); }
-  .chip.zero { opacity: .4; }
 
   .orders { padding: 8px 0 24px; }
   .row {
@@ -216,23 +139,8 @@
   .badge.uber { background: var(--uber-bg); color: var(--uber-fg); }
   .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
   .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
-  .empty { text-align: center; color: var(--text-3); padding: 60px 0; font-size: 15px; }
 
   /* ---- sheet ---- */
-  .scrim {
-    position: fixed; inset: 0; z-index: 20; background: var(--scrim);
-    opacity: 0; transition: opacity .25s; pointer-events: none;
-  }
-  .scrim.show { opacity: 1; pointer-events: auto; }
-  .sheet {
-    position: fixed; z-index: 21; left: 0; right: 0; bottom: 0;
-    max-width: 480px; margin: 0 auto;
-    background: var(--sheet-bg); border-radius: 18px 18px 0 0;
-    padding: 6px 18px calc(20px + env(safe-area-inset-bottom));
-    transform: translateY(105%); transition: transform .3s cubic-bezier(.32,.72,.35,1);
-    max-height: 88vh; overflow-y: auto;
-  }
-  .sheet.show { transform: translateY(0); }
   /* Paste panel drops from the top: it opens right under the finger that
      tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
   .drop {
@@ -246,18 +154,9 @@
   }
   .drop.show { transform: translateY(0); }
   @media (prefers-reduced-motion: reduce) {
-    .sheet, .scrim, .drop, .np-pad, .np-amount-row .step, .np-amount-row .numpad-display, .np-links-opt { transition: none; }
+    .drop, .np-pad, .np-amount-row .step, .np-amount-row .numpad-display, .np-links-opt { transition: none; }
     .paste-preview .sum-row, .np-links, .np-amount-row, .np-sheet .np-ok { animation: none; }
   }
-  .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 6px auto 2px; }
-  .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 0 2px; }
-  .sheet-title { font-size: 17px; font-weight: 700; }
-  .sheet-x {
-    background: var(--key-bg); border: none; border-radius: 50%;
-    width: 32px; height: 32px; font-size: 15px; color: var(--text-2); cursor: pointer;
-  }
-  .sheet-sub { font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
-
   .info { padding: 10px 0 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
   .info-row { display: flex; gap: 10px; font-size: 14px; line-height: 1.65; }
   .info-row .k { color: var(--text-3); flex-shrink: 0; width: 3.2em; }
@@ -289,7 +188,6 @@
     color: var(--red); font-size: 13px; font-weight: 500; opacity: .75;
   }
   .cancel-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
-  .primary-btn.danger { background: var(--red); color: #fff; }
   .tg-link { display: block; text-align: center; margin-top: 10px; font-size: 13px; color: var(--text-3); text-decoration: none; padding: 8px; }
 
   .numpad-display {
@@ -306,16 +204,6 @@
   }
   .key:active { background: var(--key-press); }
   .key.fn { font-size: 18px; color: var(--text-2); }
-  .primary-btn {
-    width: 100%; margin-top: 12px; padding: 16px; border: none; border-radius: 12px;
-    background: var(--text); color: var(--bg); font-size: 17px; font-weight: 700; cursor: pointer;
-  }
-  .primary-btn:disabled { opacity: .35; }
-  .ghost-btn {
-    width: 100%; margin-top: 8px; padding: 13px; border: none; border-radius: 12px;
-    background: var(--key-bg); color: var(--text); font-size: 15px; font-weight: 600; cursor: pointer;
-  }
-
   .paste-box {
     width: 100%; margin-top: 12px; padding: 12px;
     background: var(--key-bg); color: var(--text);
@@ -417,23 +305,9 @@
     font-weight: 600; margin-top: 10px;
   }
 
-  .sum-rows { padding: 8px 0; }
-  .sum-row { display: flex; justify-content: space-between; padding: 9px 2px; font-size: 16px; }
-  .sum-row .k { color: var(--text-2); }
-  .sum-row .v { font-weight: 650; font-variant-numeric: tabular-nums; }
   .sum-row .v.urgent { color: var(--red); }
   .sum-row .v.tight { color: var(--amber); }
   .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
-
-  .toast {
-    position: fixed; z-index: 30; left: 50%; transform: translateX(-50%) translateY(20px);
-    bottom: calc(30px + env(safe-area-inset-bottom));
-    background: var(--text); color: var(--bg);
-    padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
-    opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none;
-    max-width: 85%;
-  }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
@@ -443,6 +317,7 @@
     <button class="date-btn" id="dateBtn" onclick="goToday()"></button>
     <button class="nav-btn" onclick="go(1)" aria-label="後一日">&rarr;</button>
     <button class="icon-btn" onclick="load()" aria-label="重新載入">&circlearrowright;</button>
+    <a class="icon-btn" href="/settle" aria-label="埋數">$</a>
     <button class="icon-btn add-btn" onclick="openAdd()" aria-label="入單">+</button>
   </div>
   <div class="summary" id="summary"></div>
@@ -456,6 +331,7 @@
 
 <script>
 'use strict';
+{% include "_shared.js" %}
 
 // ---- state ----
 let cur = fmtDate(new Date());
@@ -467,12 +343,6 @@ let sheetOrderId = null;      // order shown in detail view, if any
 let revealId = null;          // order_id to scroll into view after next render
 let scrollToNext = false;     // scroll only on user navigation; SSE/timer re-renders must not fight manual scrolling
 
-const PLATFORMS = [
-  { key: 'ride',      label: '接送' },
-  { key: 'didi',      label: '滴滴' },
-  { key: 'uber',      label: 'Uber' },
-  { key: 'foodpanda', label: '熊貓' },
-];
 const TYPE_META = {
   didi:      { label: '滴滴',      priceLabel: '車費',    tunnelLabel: '隧道費', hasTunnel: true },
   uber:      { label: 'Uber',      priceLabel: '行程收入', tunnelLabel: '通行費', hasTunnel: true },
@@ -480,34 +350,7 @@ const TYPE_META = {
 };
 
 // ---- utils ----
-function fmtDate(d) {
-  return d.getFullYear() + '-' +
-    String(d.getMonth() + 1).padStart(2, '0') + '-' +
-    String(d.getDate()).padStart(2, '0');
-}
-function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
-}
-function platform(o) {
-  if (o.service_type === '滴滴') return 'didi';
-  if (o.service_type === 'Uber') return 'uber';
-  if (o.service_type === 'foodpanda') return 'foodpanda';
-  return 'ride';
-}
-// JS port of service.py — display-time classification only.  Keep the service
-// types listed here in step with that module.
-const _QUICK_TYPES = new Set(['滴滴', 'Uber', 'foodpanda']);
 function isFlightPickup(st) { return st === '接机'; }
-function svcLabel(st) {
-  if (st === '接机') return '接機';
-  if (st === '送机') return '送機';
-  if (st === '接站') return '接站';
-  if (_QUICK_TYPES.has(st)) return st;
-  return '單程';
-}
 // Badge class encodes trip direction.
 function svcBadge(o) {
   const p = platform(o);
@@ -516,10 +359,6 @@ function svcBadge(o) {
   if (st === '接机' || st === '接站') return 'pickup';
   if (st === '送机') return 'dropoff';
   return 'transfer';
-}
-function orderTime(o) {
-  const t = (o.scheduled_time || '').split(' ')[1];
-  return t ? t.slice(0, 5) : '';
 }
 // JS port of phone.py:format_phone_e164 — display-time only.
 // _KNOWN_CC mirrors phone.py:KNOWN_CC — keep both lists in sync.
@@ -622,32 +461,6 @@ function isDone(o) {
 function shortId(id) {
   return id.includes('_') ? id.split('_').pop() : id.slice(-6);
 }
-function weekday(dateStr) {
-  return ['日', '一', '二', '三', '四', '五', '六'][new Date(dateStr + 'T00:00:00').getDay()];
-}
-let toastTimer;
-function toast(msg) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
-}
-
-// ---- api ----
-async function apiWrite(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || ('HTTP ' + res.status));
-  }
-  return res.json();
-}
-
 // ---- nav / load ----
 function go(d) {
   const dt = new Date(cur + 'T00:00:00');
@@ -950,6 +763,18 @@ function editableFields(o) {
   return [['price', '價錢'], ['tunnel_fee', '隧道費'], ['parking_fee', '停車費'], ['banner_fee', '舉牌費'], ['time', '時間']];
 }
 
+// Settlement state, from the batch columns /api/orders joins in. Money moves
+// unsettled -> settled (platform paying) -> paid; settling itself is done on
+// the settle page, so this row is read-only.
+function mdSlash(day) {
+  return (+day.slice(5, 7)) + '/' + (+day.slice(8, 10));
+}
+function settleLabel(o) {
+  if (o.settlement_paid_on) return '已收 ' + mdSlash(o.settlement_paid_on);
+  if (o.settlement_settled_on) return '等過數 · 結算 ' + mdSlash(o.settlement_settled_on);
+  return '未結算';
+}
+
 function detailView(sheet) {
   const o = orders.find(x => x.order_id === sheetOrderId);
   if (!o) { closeSheet(); return; }
@@ -958,8 +783,8 @@ function detailView(sheet) {
   const label = svcLabel(o.service_type);
 
   let info = '';
+  const rows = [];
   if (p === 'ride') {
-    const rows = [];
     if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
     for (const [cl, cv] of collectContactLines(o)) {
       rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
@@ -975,12 +800,11 @@ function detailView(sheet) {
     if (o.vehicle_type) rows.push(['車型', esc(o.vehicle_type)]);
     if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span style="color:var(--text-3)">&rarr;</span> ' + esc(o.dropoff)]);
     if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
-    if (rows.length) {
-      info = '<div class="info">' + rows.map(r =>
-        '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
-      ).join('') + '</div>';
-    }
   }
+  rows.push(['結算', esc(settleLabel(o))]);
+  info = '<div class="info">' + rows.map(r =>
+    '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
+  ).join('') + '</div>';
 
   const fields = editableFields(o).map(([key, fLabel]) => {
     let value, unset = false;

@@ -44,6 +44,11 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+@app.route("/settle")
+def settle():
+    return render_template("settle.html")
+
+
 @app.route("/api/orders")
 def api_orders():
     date_str = request.args.get("date", date.today().isoformat())

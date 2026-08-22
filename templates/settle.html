@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0f14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f3f5" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>埋數 · Ride Dispatch</title>
+<style>
+{% include "_shared.css" %}
+  /* This page has native date inputs, whose built-in widgets follow
+     color-scheme rather than the tokens. */
+  :root { color-scheme: dark; }
+  @media (prefers-color-scheme: light) { :root { color-scheme: light; } }
+  body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+  .empty { padding: 28px 0 8px; }
+  .sum-rows { padding: 8px 0 0; }
+  /* Sheets here stack (day -> batch -> confirm), so the head carries a back
+     button and the title has to yield width to it. */
+  .sheet-head { gap: 10px; }
+  .sheet-title { flex: 1; min-width: 0; }
+  .sheet-x, .sheet-back { flex-shrink: 0; }
+  .sheet-back {
+    background: var(--key-bg); border: none; border-radius: 50%;
+    width: 32px; height: 32px; color: var(--text-2); cursor: pointer;
+    font-size: 21px; line-height: 30px; padding: 0 2px 2px 0;
+  }
+  .ghost-btn:active { background: var(--key-press); }
+
+  /* ---- month grid ---- */
+  .cal { padding: 12px 14px 4px; }
+  .wk, .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .wk { padding-bottom: 4px; }
+  .wk span { text-align: center; font-size: 11px; color: var(--text-3); }
+  .cell {
+    position: relative; min-height: 56px; border: none; border-radius: 10px;
+    background: var(--surface); cursor: pointer;
+    /* The day number is a corner label pinned top-left, not part of the
+       centred content, so the amount is centred in the band below it. Without
+       that offset it centres against the whole cell and reads as sitting high
+       with dead space underneath. */
+    padding: 13px 3px 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: inherit; color: inherit;
+  }
+  .cell.pad { background: none; cursor: default; }
+  /* A day with no orders carries no money and no decision, so it recedes to
+     little more than a calendar coordinate. */
+  .cell.none { opacity: .35; cursor: default; }
+  /* Explicit line-height: the mixed stack's top padding is set to clear this
+     band exactly, so its height must not drift with the platform font. */
+  .cell .d {
+    position: absolute; top: 4px; left: 6px;
+    font-size: 11px; line-height: 13px; font-weight: 600; color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .cell .amt {
+    font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
+    letter-spacing: -.2px;
+  }
+  /* The amount is the only mark in the cell, so its colour carries the state,
+     and the three colours are the three answers to "is this money in yet":
+     amber still to chase, plain text settled but not transferred, green
+     banked. A future day has no answer yet, so it is faint. */
+  .cell .amt.unsettled { color: var(--amber); }
+  .cell .amt.awaiting { color: var(--text); }
+  .cell .amt.paid { color: var(--green); }
+  .cell .amt.future { color: var(--text-3); }
+  /* A part-settled day is two facts, not one: the remainder to chase and the
+     part already handed over. It stacks a line per state in the same tones,
+     and is free to grow -- a day carrying all three states at once is rare,
+     and a clipped cell would be worse than a taller grid row.
+     A filled column has no slack for centring to absorb, so unlike the single
+     amount it cannot rely on the cell's own padding to stay clear of the day
+     number: its top padding is the day-number band plus a 3px gap. */
+  .cell.mixed { flex-direction: column; gap: 1px; padding-top: 20px; }
+  .cell.today .d { color: var(--text); }
+  .cell.today { box-shadow: inset 0 0 0 1px var(--text-3); }
+  .cell:not(.none):not(.pad):active { background: var(--surface-press); }
+
+  /* ---- sheet contents ---- */
+  .oday {
+    font-size: 12px; font-weight: 650; color: var(--text-3);
+    padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
+  }
+  .orow {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 11px 2px; text-align: left; cursor: pointer; font-family: inherit; color: inherit;
+  }
+  .orow:active { background: var(--surface-press); }
+  .tick {
+    width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px;
+    border: 1.5px solid var(--text-3); color: transparent;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .orow.on .tick { background: var(--text); border-color: var(--text); color: var(--bg); }
+  /* Excluded and un-settleable rows both recede, but only the excluded one is
+     still a live control. */
+  .orow.off { opacity: .5; }
+  .orow.dis { opacity: .42; cursor: default; }
+  .orow.ro { cursor: default; }
+  .orow.ro:active { background: none; }
+  .tick.blank { border-color: transparent; }
+  .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .ol { flex: 1; min-width: 0; font-size: 15px; }
+  .oll { display: block; }
+  /* The number the platform knows the leg by: the operator quotes it when he
+     disputes a leg, so it is on every row and tapping it copies. Negative
+     margins keep the digits aligned with the label while the padding gives the
+     tap something to land on. */
+  .oid {
+    display: inline-block; margin: 2px -6px 0; padding: 1px 6px 2px;
+    font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
+    letter-spacing: .2px; cursor: pointer;
+  }
+  .oid:active { color: var(--text-2); }
+  .oa { flex-shrink: 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .omark {
+    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    background: var(--banner-bg); color: var(--banner-fg);
+  }
+  /* In the day sheet the amount is never the answer on its own -- $500 already
+     collected and $500 still owed are the same number -- so every leg carries
+     its state under the amount, in the same colours the calendar uses. */
+  .oend { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+  .otag { font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .otag.unsettled { color: var(--amber); }
+  .otag.awaiting { color: var(--text); }
+  .otag.paid { color: var(--green); }
+  .otag.mute { color: var(--text-3); }
+
+  /* A batch the day's legs belong to is a pointer out of the day, not a row of
+     the day: it states what the whole batch is worth and hands the operator to
+     it. The text is single-line so a long span cannot widen the sheet. */
+  .blinks { padding-top: 6px; }
+  .blink {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 12px 2px; text-align: left; cursor: pointer;
+    font-family: inherit; color: var(--text-2);
+  }
+  .blink:active { background: var(--surface-press); }
+  .blink-t {
+    flex: 1; min-width: 0; font-size: 13px; font-variant-numeric: tabular-nums;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
+
+  /* Row gap is wider than the visual gap: the chips' 44px tap targets overhang
+     8px past the pill, and two wrapped rows must not overlap. */
+  .addrow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 6px; padding: 2px 0 8px; }
+  .addlab { font-size: 12px; font-weight: 650; color: var(--text-3); }
+  .addrow .chip { flex: 0 0 auto; padding: 0 11px; }
+
+  .conf-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 2px; border-top: 1px solid var(--line);
+  }
+  .conf-row .k { flex: 1; color: var(--text-2); font-size: 16px; }
+  /* The currency sign lives in the box beside the field, not in its value, so
+     the amount parses as a plain number and still reads like 應收 above it. */
+  .conf-box {
+    display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+    background: var(--key-bg); border-radius: 10px; padding: 9px 11px;
+  }
+  .conf-box .cur { font-size: 17px; font-weight: 700; color: var(--text-2); }
+  .conf-in {
+    width: 100px; text-align: right; background: none; border: none;
+    color: var(--text); font-family: inherit;
+    /* 16px floor: iOS Safari auto-zooms the page when focusing any input
+       whose font-size is below 16px */
+    font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums;
+    padding: 0;
+  }
+  .conf-in:focus { outline: none; }
+  .conf-in.date { width: 138px; font-weight: 600; font-size: 16px; }
+  .diff {
+    text-align: right; font-size: 13px; color: var(--text-3);
+    padding: 0 2px 6px; min-height: 19px; font-variant-numeric: tabular-nums;
+  }
+  .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
+
+  /* ---- desktop ----
+     The dashboard is phone-only. A wide screen has nothing else to show --
+     every batch is read from the day it sits on -- so the width buys bigger
+     cells rather than a second column. Sheets are unchanged: they stay
+     phone-width bottom sheets. */
+  @media (min-width: 900px) {
+    body { max-width: 640px; }
+    .cell { min-height: 76px; padding: 18px 5px 8px; }
+    .cell .d { font-size: 12px; line-height: 14px; }
+    .cell .amt { font-size: 15px; }
+    .cell.mixed { gap: 2px; padding-top: 21px; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-row">
+    <button class="nav-btn" id="prevM" aria-label="前一個月">&larr;</button>
+    <button class="date-btn" id="monthBtn"></button>
+    <button class="nav-btn" id="nextM" aria-label="後一個月">&rarr;</button>
+    <a class="icon-btn" href="/" aria-label="返日程">&#10005;</a>
+  </div>
+  <div class="summary" id="summary"></div>
+</div>
+<div class="chips" id="chips"></div>
+<div class="cal">
+  <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
+  <div class="grid" id="grid"></div>
+  <div id="calEmpty"></div>
+</div>
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+{% include "_shared.js" %}
+
+// ---- state ----
+// One month of one platform at a time, exactly what /api/settle returns.
+let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, now: '' };
+let curPlat = 'ride';
+let curMonth = fmtDate(new Date()).slice(0, 7);
+// Settle-ability is decided against the server's clock, not the browser's, so
+// the page and the API agree on which legs are done.
+let NOW = '';
+let TODAY = '';
+let BY_ID = new Map();
+let BATCH_OF = new Map();
+// The batch being built lives outside the sheet's markup: adding a day
+// re-renders the whole sheet, and the typed fields have to survive that.
+let settleDays = [];
+let settleTicked = new Set();
+let confirmedTouched = false;
+let confirmedText = '';
+let settleOn = '';
+
+// The operator works one platform for a stretch, so reopening lands where he
+// left off. Storage can be unavailable (private mode), and the page must
+// still render if it is.
+function loadPlat() {
+  try {
+    const p = localStorage.getItem('settlePlatform');
+    if (p && PLATFORMS.some(x => x.key === p)) curPlat = p;
+  } catch (e) { /* no stored preference */ }
+}
+function savePlat() {
+  try { localStorage.setItem('settlePlatform', curPlat); } catch (e) { /* not stored */ }
+}
+
+// ---- derived state ----
+// JS twin of service.py:expected_of — keep in sync. Null fees count as 0.
+function expectedOf(o) {
+  const p = platform(o);
+  if (p === 'ride') return (o.price || 0) + (o.banner_fee || 0);
+  if (p === 'foodpanda') return o.price || 0;
+  return (o.price || 0) + (o.tunnel_fee || 0);   // didi, uber: the toll is reimbursed
+}
+function orderDate(o) { return (o.scheduled_time || '').split(' ')[0]; }
+function byId(id) { return BY_ID.get(id); }
+function batchById(id) { return data.settlements.find(b => b.id === +id) || null; }
+function batchOf(orderId) { return BATCH_OF.get(orderId) || null; }
+function reindex() {
+  BY_ID = new Map();
+  BATCH_OF = new Map();
+  for (const o of data.orders) BY_ID.set(o.order_id, o);
+  for (const b of data.settlements) {
+    for (const o of b.orders) {
+      // A batch can straddle months, so its own member list is the only place
+      // legs outside the month on screen appear.
+      if (!BY_ID.has(o.order_id)) BY_ID.set(o.order_id, o);
+      BATCH_OF.set(o.order_id, b);
+    }
+  }
+}
+// An order carries no settlement state of its own; its state is whatever its
+// batch says, and no batch means the money is still outstanding.
+function orderState(o) {
+  const b = batchOf(o.order_id);
+  if (!b) return 'unsettled';
+  return b.paid_on ? 'paid' : 'awaiting';
+}
+// Mirrors db.py's settleable predicate: finished, priced, not already batched.
+// Both other kinds of leg stay visible; neither can enter a batch.
+function isSettleable(o) {
+  return !batchOf(o.order_id) && (o.price || 0) > 0 && o.scheduled_time < NOW;
+}
+function ordersOn(dateStr) {
+  return data.orders.filter(o => orderDate(o) === dateStr);
+}
+function dayState(dateStr) {
+  const list = ordersOn(dateStr);
+  const r = { state: 'none', total: 0, unsettled: 0, awaitingAmt: 0, paidAmt: 0 };
+  if (!list.length) return r;
+  let batched = 0, loose = 0;
+  for (const o of list) {
+    const amt = expectedOf(o);
+    r.total += amt;
+    const st = orderState(o);
+    if (st === 'unsettled') { loose++; r.unsettled += amt; }
+    else {
+      batched++;
+      if (st === 'awaiting') r.awaitingAmt += amt; else r.paidAmt += amt;
+    }
+  }
+  // With nothing left unsettled, a day split across an awaiting batch and a
+  // paid one reads as awaiting: the outstanding half is the part still
+  // needing attention, and one marker has to speak for the whole day.
+  const settledTone = r.awaitingAmt ? 'awaiting' : 'paid';
+  if (!batched) r.state = 'unsettled';
+  else if (!loose) r.state = settledTone;
+  else r.state = 'mixed';
+  return r;
+}
+
+// ---- labels ----
+function pad2(n) { return String(n).padStart(2, '0'); }
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  return fmtDate(d);
+}
+function mdLabel(dateStr) {
+  const p = dateStr.split('-');
+  return (+p[1]) + '月' + (+p[2]) + '日';
+}
+function mdSlash(dateStr) { return (+dateStr.slice(5, 7)) + '/' + (+dateStr.slice(8, 10)); }
+function platLabel(key) { return PLATFORMS.find(p => p.key === key).label; }
+function paidLabel(b) { return '已收 ' + mdSlash(b.paid_on); }
+// Display-only shortening; the raw string stays on the order.
+function shortPlace(s) {
+  const t = String(s || '').replace(/[(（][^)）]*[)）]\s*$/, '').trim();
+  if (/机场|機場/.test(t)) {
+    const m = t.match(/T[12]/i);
+    return '機場' + (m ? ' ' + m[0].toUpperCase() : '');
+  }
+  return t;
+}
+// Batches are normally whole consecutive days, so a range reads best; a
+// deliberately non-contiguous batch is listed out instead of being flattened
+// into a range that would claim days it does not hold.
+function dateSpanLabel(dates) {
+  const s = [...dates].sort();
+  if (!s.length) return '';
+  if (s.length === 1) return mdLabel(s[0]);
+  const contiguous = s.every((d, i) => i === 0 || d === addDays(s[i - 1], 1));
+  const a = s[0], z = s[s.length - 1];
+  if (contiguous) {
+    if (a.slice(0, 7) === z.slice(0, 7)) return (+a.slice(5, 7)) + '月' + (+a.slice(8)) + '–' + (+z.slice(8)) + '日';
+    return mdLabel(a) + '–' + mdLabel(z);
+  }
+  if (s.length <= 3 && s.every(d => d.slice(0, 7) === a.slice(0, 7))) {
+    return (+a.slice(5, 7)) + '月' + s.map(d => +d.slice(8)).join('、') + '日';
+  }
+  return mdLabel(a) + '–' + mdLabel(z);
+}
+// What the operator needs to recognise the leg on a platform statement: the
+// service, plus the endpoint he actually drove to (or the flight he met).
+function orderLabel(o) {
+  if (platform(o) !== 'ride') return svcLabel(o.service_type);
+  const svc = svcLabel(o.service_type);
+  const who = o.flight_number || shortPlace(o.service_type === '送机' ? o.pickup : o.dropoff) || o.passenger_name;
+  return who ? svc + ' · ' + who : svc;
+}
+function batchDates(b) {
+  return [...new Set(b.orders.map(orderDate))].sort();
+}
+
+// ---- load ----
+async function load() {
+  try {
+    const res = await fetch('/api/settle?month=' + curMonth + '&platform=' + curPlat);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (e) {
+    toast('載入失敗');
+    return;
+  }
+  NOW = data.now;
+  TODAY = NOW.slice(0, 10);
+  if (!settleOn) settleOn = TODAY;
+  reindex();
+  render();
+  repaintOpenView();
+}
+
+// A write here or on another device lands through load(): an open sheet has to
+// show the new state, and a batch that no longer exists cannot be shown at all.
+function repaintOpenView() {
+  if (!views.length) return;
+  views = views.filter(v => (v.kind !== 'batch' && v.kind !== 'undo') || batchById(v.id));
+  if (!views.length) { closeSheet(); return; }
+  paintView();
+}
+
+// ---- render ----
+function render() {
+  renderHeader();
+  renderChips();
+  renderCalendar();
+}
+
+function renderHeader() {
+  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
+  document.getElementById('monthBtn').innerHTML =
+    y + ' 年 ' + m + ' 月' + (curMonth === TODAY.slice(0, 7) ? '<small>今個月</small>' : '<small>&nbsp;</small>');
+  // Totals span the whole book, not the month on screen: old unsettled days
+  // are exactly the ones the operator is here to clear. The server computes
+  // them, so the chips and the calendar cannot disagree about the same money.
+  document.getElementById('summary').innerHTML =
+    '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting);
+}
+
+function renderChips() {
+  document.getElementById('chips').innerHTML = PLATFORMS.map(p => {
+    const n = data.counts[p.key] || 0;
+    const on = curPlat === p.key;
+    return '<button class="chip' + (on ? ' on' : (n ? '' : ' zero')) + '" data-f="' + p.key + '">' +
+      esc(p.label) + ' ' + n + '</button>';
+  }).join('');
+}
+
+function cellHtml(dateStr) {
+  const day = +dateStr.slice(8);
+  const s = dayState(dateStr);
+  const future = dateStr > TODAY;
+  const cls = ['cell'];
+  if (dateStr === TODAY) cls.push('today');
+  if (s.state === 'none') cls.push('none');
+  if (s.state === 'mixed' && !future) cls.push('mixed');
+  const inner = ['<span class="d">' + day + '</span>'];
+  if (s.state !== 'none') {
+    if (future) {
+      inner.push('<span class="amt future">$' + $(s.total) + '</span>');
+    } else if (s.state === 'mixed') {
+      // Remainder first: it is the only part the operator can act on today.
+      const lines = [['unsettled', s.unsettled]];
+      if (s.awaitingAmt) lines.push(['awaiting', s.awaitingAmt]);
+      if (s.paidAmt) lines.push(['paid', s.paidAmt]);
+      inner.push(lines.map(l =>
+        '<span class="amt ' + l[0] + '">$' + $(l[1]) + '</span>').join(''));
+    } else {
+      inner.push('<span class="amt ' + s.state + '">$' + $(s.total) + '</span>');
+    }
+  }
+  // Only an empty day is inert; every day holding work opens, past or future.
+  return '<button class="' + cls.join(' ') + '" data-d="' + dateStr + '"' +
+    (s.state === 'none' ? ' disabled' : '') + '>' + inner.join('') + '</button>';
+}
+
+function renderCalendar() {
+  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
+  const first = new Date(y, m - 1, 1);
+  const days = new Date(y, m, 0).getDate();
+  let html = '';
+  for (let i = 0; i < first.getDay(); i++) html += '<div class="cell pad"></div>';
+  for (let d = 1; d <= days; d++) html += cellHtml(curMonth + '-' + pad2(d));
+  document.getElementById('grid').innerHTML = html;
+  document.getElementById('calEmpty').innerHTML =
+    data.orders.length ? '' : '<div class="empty">呢個月冇紀錄</div>';
+}
+
+// ---- sheet ----
+// Sheets stack instead of replacing each other: a batch reached from a day has
+// to hand the operator back to that day, not to the calendar.
+let views = [];
+function curView() { return views[views.length - 1] || null; }
+function viewHtml(v) {
+  if (v.kind === 'day') return dayViewHtml(v);
+  if (v.kind === 'settle') return settleViewHtml(v);
+  if (v.kind === 'undo') return undoViewHtml(v);
+  return batchViewHtml(v);
+}
+function paintView() {
+  const v = curView();
+  if (!v) return;
+  const el = document.getElementById('sheet');
+  el.innerHTML = '<div class="grab"></div>' + viewHtml(v);
+  el.scrollTop = 0;
+  el.classList.add('show');
+  document.getElementById('scrim').classList.add('show');
+  if (v.kind === 'settle') syncSettle();
+}
+function openView(v) { views = [v]; paintView(); }
+function pushView(v) { views.push(v); paintView(); }
+function popView() {
+  views.pop();
+  if (views.length) paintView(); else closeSheet();
+}
+function closeSheet() {
+  views = [];
+  document.getElementById('sheet').classList.remove('show');
+  document.getElementById('scrim').classList.remove('show');
+}
+function sheetHead(title, sub) {
+  return '<div class="sheet-head">' +
+    (views.length > 1 ? '<button class="sheet-back" data-back="1" aria-label="返上一層">&#8249;</button>' : '') +
+    '<div class="sheet-title">' + title + '</div>' +
+    '<button class="sheet-x" data-close="1">&#10005;</button></div>' +
+    (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
+}
+
+// One row shape for all three sheets. The mode decides what the row can do:
+// 'day' and 'settle' tick the settle-able legs, 'ro' freezes a batch. A leg
+// that cannot be settled is a plain div, not a disabled button, so its order
+// number stays tappable -- that is the row the operator most needs to quote.
+function orderRowHtml(o, mode, ticks) {
+  const live = mode !== 'ro' && isSettleable(o);
+  const on = live && settleTicked.has(o.order_id);
+  const cls = 'orow' + (live ? (on ? ' on' : ' off') : (mode === 'settle' ? ' dis' : ' ro'));
+  // The blank keeps the time column aligned on rows that carry no checkbox.
+  // A day with nothing to tick drops the column instead of indenting past it.
+  const tick = mode === 'ro' || ticks === false ? ''
+    : live ? '<span class="tick">&#10003;</span>' : '<span class="tick blank"></span>';
+  let right;
+  if (mode === 'day') {
+    const tag = dayTag(o);
+    const amt = expectedOf(o);
+    right = '<span class="oend">' + (amt ? '<span class="oa">$' + $(amt) + '</span>' : '') +
+      '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span></span>';
+  } else {
+    const mark = !o.price ? '未入價' : (o.scheduled_time >= NOW ? '未完成' : '');
+    right = mark ? '<span class="omark">' + mark + '</span>'
+                 : '<span class="oa">$' + $(expectedOf(o)) + '</span>';
+  }
+  const body = tick +
+    '<span class="ot">' + esc(orderTime(o)) + '</span>' +
+    '<span class="ol"><span class="oll">' + esc(orderLabel(o)) + '</span>' +
+      '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(o.order_id) + '</span></span>' +
+    right;
+  return live ? '<button class="' + cls + '" data-o="' + esc(o.order_id) + '">' + body + '</button>'
+              : '<div class="' + cls + '">' + body + '</div>';
+}
+
+// ---- day sheet ----
+// The whole job is done from here: what the day earned, where each leg's money
+// has got to, the batches it belongs to, and the two things still to do --
+// bank a transfer that has landed, settle what is still loose.
+function dayTag(o) {
+  if (!o.price) return ['未入價', 'mute'];
+  if (o.scheduled_time >= NOW) return ['未完成', 'mute'];
+  const st = orderState(o);
+  if (st === 'unsettled') return ['未結算', 'unsettled'];
+  if (st === 'awaiting') return ['等過數', 'awaiting'];
+  return [paidLabel(batchOf(o.order_id)), 'paid'];
+}
+function dayTicksOf(dateStr) {
+  return new Set(ordersOn(dateStr).filter(isSettleable).map(o => o.order_id));
+}
+function dayTicked(dateStr) {
+  return ordersOn(dateStr).filter(o => isSettleable(o) && settleTicked.has(o.order_id));
+}
+function dayGoLabel(dateStr) {
+  const legs = dayTicked(dateStr);
+  return '結算 · ' + legs.length + ' 程 · $' + $(legs.reduce((t, o) => t + expectedOf(o), 0));
+}
+function batchesOn(dateStr) {
+  const seen = new Set();
+  const out = [];
+  for (const o of ordersOn(dateStr)) {
+    const b = batchOf(o.order_id);
+    if (b && !seen.has(b.id)) { seen.add(b.id); out.push(b); }
+  }
+  return out;
+}
+// Every settle-able leg starts ticked: the common case is settling the day
+// whole, and the checkbox is there for the exception.
+function openDay(dateStr) {
+  settleDays = [];
+  settleTicked = dayTicksOf(dateStr);
+  openView({ kind: 'day', date: dateStr });
+}
+function dayViewHtml(v) {
+  const list = ordersOn(v.date);
+  const batches = batchesOn(v.date);
+  const settleable = list.some(isSettleable);
+  return sheetHead(esc(mdLabel(v.date)) + ' 星期' + weekday(v.date), esc(platLabel(curPlat))) +
+    list.map(o => orderRowHtml(o, 'day', settleable)).join('') +
+    (batches.length ? '<div class="blinks">' + batches.map(b =>
+      '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
+      esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
+      ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
+      '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '') +
+    // Banking a transfer settles the whole batch, not the day, so the button
+    // names the batch it will close.
+    batches.filter(b => !b.paid_on).map(b =>
+      '<button class="primary-btn" data-p="' + b.id + '">已到帳 · 批次 ' +
+      esc(dateSpanLabel(batchDates(b))) + ' · $' + $(b.confirmed_amount) + '</button>').join('') +
+    (settleable ? '<button class="primary-btn" id="dayGo">' + dayGoLabel(v.date) + '</button>' : '');
+}
+function syncDay() {
+  const v = curView();
+  const btn = document.getElementById('dayGo');
+  if (!btn || !v || v.kind !== 'day') return;
+  btn.textContent = dayGoLabel(v.date);
+  btn.disabled = dayTicked(v.date).length === 0;
+}
+
+// ---- settle sheet ----
+function dayGap(a, b) {
+  return Math.abs(new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000;
+}
+// Platforms are settled in runs of days, so the sheet offers the neighbours of
+// the day it was opened from. Nearest first, because the run the operator is
+// closing almost always touches the day he started on; the cap keeps the row
+// from turning into a second calendar. The page holds one month, so a run
+// crossing a month boundary is settled as one batch per month.
+function addCandidates(origin) {
+  const days = new Set();
+  for (const o of data.orders) if (isSettleable(o)) days.add(orderDate(o));
+  days.delete(origin);
+  return [...days]
+    .sort((a, b) => dayGap(a, origin) - dayGap(b, origin) || a.localeCompare(b))
+    .slice(0, 8);
+}
+function addChipLabel(d, origin) {
+  return '+ ' + (d.slice(0, 7) === origin.slice(0, 7) ? (+d.slice(8)) + '日' : mdLabel(d));
+}
+function openSettleFrom(dateStr) {
+  settleDays = [dateStr];
+  // Carries the day sheet's ticks in, and drops anything a previous pass added
+  // from other days: the sheet always opens on this day alone.
+  settleTicked = new Set(dayTicked(dateStr).map(o => o.order_id));
+  confirmedTouched = false;
+  confirmedText = '';
+  settleOn = TODAY;
+  pushView({ kind: 'settle', origin: dateStr });
+}
+function settleViewHtml(v) {
+  const days = settleDays.slice().sort();
+  const cands = addCandidates(v.origin);
+  let body = '';
+  for (const d of days) {
+    // Everything still outstanding on the day, including the rows that cannot
+    // be ticked: an operator who sees a day total he cannot match needs to see
+    // which leg is holding it back.
+    const list = ordersOn(d).filter(o => !batchOf(o.order_id));
+    if (!list.length) continue;
+    body += '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
+      list.map(o => orderRowHtml(o, 'settle')).join('');
+  }
+  return sheetHead('結算 ' + esc(dateSpanLabel(days)), esc(platLabel(curPlat))) +
+    (cands.length ? '<div class="addrow"><span class="addlab">加埋</span>' + cands.map(d =>
+      '<button class="chip' + (settleDays.indexOf(d) >= 0 ? ' on' : '') + '" data-add="' + d + '">' +
+      esc(addChipLabel(d, v.origin)) + '</button>').join('') + '</div>' : '') +
+    body +
+    '<div class="sum-rows"><div class="sum-row"><span class="k">應收</span>' +
+      '<span class="v" id="expV"></span></div></div>' +
+    '<div class="conf-row"><span class="k">平台確認</span>' +
+      '<span class="conf-box"><span class="cur">$</span>' +
+      '<input class="conf-in" id="confIn" type="text" inputmode="decimal" aria-label="平台確認金額"></span></div>' +
+    '<div class="diff" id="diffLine"></div>' +
+    '<div class="conf-row"><span class="k">結算日</span>' +
+      '<span class="conf-box">' +
+      '<input class="conf-in date" id="settleDate" type="date" value="' + settleOn + '" aria-label="結算日"></span></div>' +
+    '<button class="primary-btn" id="settleGo">確認結算</button>' +
+    '<button class="ghost-btn" data-back="1">取消</button>';
+}
+function toggleAddDay(d) {
+  const i = settleDays.indexOf(d);
+  if (i >= 0) {
+    settleDays.splice(i, 1);
+    for (const o of ordersOn(d)) settleTicked.delete(o.order_id);
+  } else {
+    settleDays.push(d);
+    settleDays.sort();
+    for (const o of ordersOn(d)) if (isSettleable(o)) settleTicked.add(o.order_id);
+  }
+  paintView();
+}
+function settleExpected() {
+  let s = 0;
+  settleTicked.forEach(id => { s += expectedOf(byId(id)); });
+  return s;
+}
+function paintDiff() {
+  const el = document.getElementById('diffLine');
+  const conf = parseFloat(document.getElementById('confIn').value);
+  const d = isNaN(conf) ? 0 : conf - settleExpected();
+  el.innerHTML = d ? '差額 ' + (d < 0 ? '&minus;' : '+') + '$' + $(Math.abs(d)) : '';
+}
+function syncSettle() {
+  const exp = settleExpected();
+  document.getElementById('expV').textContent = '$' + $(exp);
+  document.getElementById('confIn').value = confirmedTouched ? confirmedText : String(exp);
+  document.getElementById('settleGo').disabled = settleTicked.size === 0;
+  paintDiff();
+}
+
+// ---- batch sheet ----
+function batchViewHtml(v) {
+  const b = batchById(v.id);
+  if (!b) return '';
+  const rows = b.orders.slice().sort((x, y) => x.scheduled_time.localeCompare(y.scheduled_time));
+  const dates = batchDates(b);
+  let body;
+  // A one-day batch needs no day heading; the title above already names the day.
+  if (dates.length > 1) {
+    body = dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
+      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'ro')).join('')).join('');
+  } else {
+    body = rows.map(o => orderRowHtml(o, 'ro')).join('');
+  }
+  const diff = b.confirmed_amount - b.expected_amount;
+  const sums = [
+    ['應收', '$' + $(b.expected_amount)],
+    ['平台確認', '$' + $(b.confirmed_amount)],
+  ];
+  if (diff) sums.push(['差額', (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff))]);
+  sums.push(['結算日', b.settled_on]);
+  sums.push(['到帳', b.paid_on || '等緊過數']);
+  return sheetHead('結算 ' + esc(dateSpanLabel(dates)),
+      esc(platLabel(b.platform)) + ' · ' + b.orders.length + ' 程') +
+    body +
+    '<div class="sum-rows">' + sums.map(r =>
+      '<div class="sum-row"><span class="k">' + r[0] +
+      '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
+    (b.paid_on ? '' : '<button class="primary-btn" data-p="' + b.id + '">已到帳</button>') +
+    '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
+    '<button class="ghost-btn" data-back="1">收埋</button>';
+}
+
+// Undo is destructive enough to confirm, and confirming in a pushed view
+// rather than an armed button means a refresh mid-decision cannot wipe the
+// armed state.
+function undoViewHtml(v) {
+  const b = batchById(v.id);
+  if (!b) return '';
+  return sheetHead('撤銷結算', esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程') +
+    '<div class="undo-info">呢 ' + b.orders.length + ' 程會變返未結算，' +
+      '$' + $(b.confirmed_amount) + ' 嘅結算紀錄會刪走。</div>' +
+    '<button class="primary-btn danger" data-undogo="' + b.id + '">確認撤銷</button>' +
+    '<button class="ghost-btn" data-back="1">返回</button>';
+}
+
+// ---- actions ----
+async function markPaid(id) {
+  try {
+    await apiWrite('POST', '/api/settlements/' + id + '/paid', {});
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  // Banking a transfer answers a question the operator asked on this day, so
+  // the sheet stays put and load() repaints it with the answer.
+  await load();
+}
+
+// Undo returns the legs to unsettled rather than flagging the batch: an
+// unbatched order is already the "not settled" state, so a mistake costs
+// nothing to unwind and the days simply go amber again.
+async function undoBatch(id) {
+  try {
+    await apiWrite('DELETE', '/api/settlements/' + id);
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  // The batch the sheet was showing no longer exists, so it closes back to the
+  // day, where its legs are loose and offered again.
+  while (views.length && (curView().kind === 'undo' || curView().kind === 'batch')) views.pop();
+  const under = curView();
+  await load();
+  if (under && under.kind === 'day') {
+    settleTicked = dayTicksOf(under.date);
+    paintView();
+  }
+  toast('已撤銷結算');
+}
+
+async function confirmSettle() {
+  if (!settleTicked.size) return;
+  const typed = parseFloat(document.getElementById('confIn').value);
+  const exp = settleExpected();
+  const btn = document.getElementById('settleGo');
+  btn.disabled = true;
+  btn.textContent = '結算緊…';
+  try {
+    await apiWrite('POST', '/api/settlements', {
+      platform: curPlat,
+      order_ids: [...settleTicked],
+      confirmed_amount: isNaN(typed) ? exp : typed,
+      settled_on: document.getElementById('settleDate').value || TODAY,
+    });
+  } catch (e) {
+    toast(e.message);
+    btn.disabled = false;
+    btn.textContent = '確認結算';
+    return;
+  }
+  settleDays = [];
+  settleTicked = new Set();
+  closeSheet();
+  await load();
+  toast('已結算');
+}
+
+function copyId(id) {
+  // The async clipboard can be refused depending on where the page is served
+  // from; the toast is the feedback either way.
+  if (navigator.clipboard) navigator.clipboard.writeText(id).catch(() => {});
+  toast('已複製 ' + id);
+}
+
+// ---- events ----
+function shiftMonth(n) {
+  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7) + n;
+  curMonth = m < 1 ? (y - 1) + '-12' : m > 12 ? (y + 1) + '-01' : y + '-' + pad2(m);
+  load();
+}
+document.getElementById('prevM').addEventListener('click', () => shiftMonth(-1));
+document.getElementById('nextM').addEventListener('click', () => shiftMonth(1));
+document.getElementById('monthBtn').addEventListener('click', () => {
+  if (!TODAY || curMonth === TODAY.slice(0, 7)) return;
+  curMonth = TODAY.slice(0, 7);
+  load();
+});
+document.getElementById('chips').addEventListener('click', e => {
+  const c = e.target.closest('.chip');
+  if (!c || c.dataset.f === curPlat) return;
+  curPlat = c.dataset.f;
+  savePlat();
+  load();
+});
+document.getElementById('grid').addEventListener('click', e => {
+  const cell = e.target.closest('.cell');
+  if (!cell || !cell.dataset.d) return;
+  openDay(cell.dataset.d);
+});
+document.getElementById('scrim').addEventListener('click', closeSheet);
+document.getElementById('sheet').addEventListener('click', e => {
+  if (e.target.closest('[data-close]')) { closeSheet(); return; }
+  if (e.target.closest('[data-back]')) { popView(); return; }
+  // Before the row: the order number sits inside a row that would otherwise
+  // treat the tap as a toggle.
+  const cp = e.target.closest('[data-copy]');
+  if (cp) { copyId(cp.dataset.copy); return; }
+  const pay = e.target.closest('[data-p]');
+  if (pay) { markPaid(pay.dataset.p); return; }
+  const undo = e.target.closest('[data-undo]');
+  if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
+  const undoGo = e.target.closest('[data-undogo]');
+  if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
+  const link = e.target.closest('[data-bl]');
+  if (link) { pushView({ kind: 'batch', id: +link.dataset.bl }); return; }
+  if (e.target.closest('#dayGo')) { openSettleFrom(curView().date); return; }
+  const add = e.target.closest('[data-add]');
+  if (add) { toggleAddDay(add.dataset.add); return; }
+  if (e.target.closest('#settleGo')) { confirmSettle(); return; }
+  const row = e.target.closest('.orow');
+  if (row && row.dataset.o) {
+    const id = row.dataset.o;
+    if (settleTicked.has(id)) { settleTicked.delete(id); row.classList.replace('on', 'off'); }
+    else { settleTicked.add(id); row.classList.replace('off', 'on'); }
+    if (curView().kind === 'settle') syncSettle(); else syncDay();
+  }
+});
+document.getElementById('sheet').addEventListener('input', e => {
+  if (e.target.id === 'settleDate') { settleOn = e.target.value || TODAY; return; }
+  if (e.target.id !== 'confIn') return;
+  confirmedTouched = true;
+  confirmedText = e.target.value;
+  paintDiff();
+});
+
+// ---- init ----
+loadPlat();
+load();
+const es = new EventSource('/api/events');
+es.onmessage = () => load();
+</script>
+</body>
+</html>
