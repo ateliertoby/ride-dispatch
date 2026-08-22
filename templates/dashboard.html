@@ -32,6 +32,9 @@
     --fp-bg: rgba(255,63,133,.16);      --fp-fg: #ff6ba3;
     --transfer-bg: rgba(150,160,175,.14); --transfer-fg: #a8b1c0;
     --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
+    --urgent-bg: rgba(255,97,97,.14);
+    --tight-bg: rgba(255,176,46,.14);
+    --next-bg: rgba(61,220,132,.06);
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -56,6 +59,9 @@
       --fp-bg: #fce4ef;      --fp-fg: #d70f64;
       --transfer-bg: #f0f1f3; --transfer-fg: #666;
       --banner-bg: #fff8e1;  --banner-fg: #c77800;
+      --urgent-bg: #fdeaea;
+      --tight-bg: #fff8e1;
+      --next-bg: #edfaf2;
     }
   }
   html { -webkit-text-size-adjust: 100%; }
@@ -64,16 +70,17 @@
     background: var(--bg); color: var(--text);
     max-width: 480px; margin: 0 auto;
     padding-bottom: env(safe-area-inset-bottom);
+    overflow-x: hidden;
   }
   button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
   .header {
     position: sticky; top: 0; z-index: 10;
-    background: var(--bg); padding: 10px 14px;
+    background: var(--bg); padding: 10px 14px 8px;
     padding-top: calc(10px + env(safe-area-inset-top));
-    display: flex; align-items: center; gap: 8px;
     border-bottom: 1px solid var(--line);
   }
+  .header-row { display: flex; align-items: center; gap: 8px; }
   .nav-btn, .icon-btn {
     background: var(--surface); border: none; border-radius: 10px;
     width: 42px; height: 40px; font-size: 17px; cursor: pointer;
@@ -90,52 +97,115 @@
   .date-btn small { display: block; font-size: 11px; font-weight: 500; color: var(--text-3); }
   .add-btn { background: var(--surface); color: var(--text); font-size: 22px; font-weight: 400; }
 
-  .hero { text-align: center; padding: 22px 16px 4px; }
-  .hero .label { font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
-  .hero .amount { font-size: 38px; font-weight: 750; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
-  .hero .sub { font-size: 13px; color: var(--text-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
-  .hero .sub .warn { color: var(--amber); }
+  .summary {
+    text-align: center; font-size: 13px; color: var(--text-2);
+    font-variant-numeric: tabular-nums; padding-top: 4px;
+  }
+  .summary .warn { color: var(--amber); }
 
-  .chips {
-    display: flex; gap: 8px; padding: 14px 14px 4px;
-  }
+  .chips { display: flex; gap: 6px; padding: 10px 14px 2px; }
   .chip {
-    flex: 1; border: none; border-radius: 10px; cursor: pointer;
-    background: var(--surface); color: var(--text-2);
-    padding: 8px 0 7px; font-size: 13px; font-weight: 600;
-    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    position: relative; flex: 1; height: 28px; border: none; border-radius: 8px;
+    cursor: pointer; background: var(--surface); color: var(--text-2);
+    font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
   }
-  .chip small { font-size: 11px; font-weight: 500; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  /* The pill is 28px by design, but the tappable area must stay >= 44px. */
+  .chip::after { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
   .chip.on { background: var(--text); color: var(--bg); }
-  .chip.on small { color: var(--bg); opacity: .65; }
   .chip.zero { opacity: .4; }
 
-  .orders { padding: 12px 12px 32px; }
-  .card {
-    width: 100%; text-align: left; border: none; cursor: pointer;
-    background: var(--surface); border-radius: 14px; padding: 13px 15px;
-    margin-bottom: 9px; display: block; font-size: 15px;
+  .orders { padding: 8px 0 24px; }
+  .row {
+    display: flex; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 14px; min-height: 56px; gap: 10px;
+    border-left: 3px solid transparent;
   }
-  .card:active { background: var(--surface-press); }
-  /* Done cards collapse to one dim row (badge+time | passenger | price);
-     full details remain available in the detail sheet */
-  .card.done { opacity: .5; padding: 8px 15px; display: flex; align-items: center; gap: 10px; }
-  .card.done .card-top { margin-bottom: 0; flex-shrink: 0; }
-  .card.done .time { font-size: 14px; }
-  .card.done .phase { display: none; }
-  .card.done .passenger {
-    font-size: 13px; margin-bottom: 0; flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .row:active { background: var(--surface-press); }
+  .row.done { opacity: .45; }
+  .row.next { background: var(--next-bg); border-left-color: var(--green); }
+
+  /* Fixed width so every big time starts on the same x. The width is set by the
+     widest sub-line ("出發 14:43"), which must stay on one line: broken across
+     two it reads as two separate facts. */
+  .rail { width: 84px; flex-shrink: 0; }
+  .rail .t {
+    font-size: 26px; font-weight: 750; letter-spacing: -.5px;
+    font-variant-numeric: tabular-nums; line-height: 1.1;
   }
-  .card.done .flight, .card.done .route, .card.done .flight-gate, .card.done .svc-time { display: none; }
-  .card.done .price { font-size: 13px; margin-top: 0; margin-left: auto; flex-shrink: 0; }
-  .card.done .price .calc { display: none; }
-  .card.next { border: 2px solid var(--green); padding: 11px 13px; }
-  .next-tag {
-    font-size: 11px; font-weight: 750; padding: 3px 8px; border-radius: 6px;
-    background: var(--didi-bg); color: var(--green); margin-left: 5px;
+  .rail .st { font-size: 11.5px; color: var(--text-2); line-height: 1.5; font-variant-numeric: tabular-nums; }
+  .rail .st b { font-weight: 650; }
+
+  .row-body { flex: 1; min-width: 0; padding-top: 2px; }
+  /* The endpoint is the one thing on the row that must never be cut, so nothing
+     here truncates. The route is two units, FROM and "→ TO", and the second one
+     wraps whole, which keeps the arrow leading the second line. Each unit still
+     wraps internally when a single endpoint outgrows the column. */
+  .route {
+    display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0;
+    column-gap: 6px; font-size: 17px; line-height: 1.35;
   }
-  .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .route > span {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    min-width: 0; max-width: 100%;
+  }
+  /* Emphasis rule: the non-airport endpoint is the one the driver has to find,
+     so it carries the weight; the airport side stays compact because it is a
+     place he already knows. */
+  .route .big { font-weight: 650; color: var(--text); min-width: 0; }
+  .route .small { font-weight: 500; color: var(--text-2); min-width: 0; }
+  .route .reg { font-weight: 550; color: var(--text); min-width: 0; }
+  .route .arrow { color: var(--text-3); flex-shrink: 0; font-size: 15px; }
+  .flt {
+    display: inline-block; flex-shrink: 0;
+    font-size: 13px; font-weight: 600; letter-spacing: .09em; color: var(--text-2);
+    border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+    font-variant-numeric: tabular-nums; vertical-align: 1px;
+  }
+
+  .tags { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
+  .tag {
+    font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .tag.banner { background: var(--banner-bg); color: var(--banner-fg); }
+  .tag.urgent { background: var(--urgent-bg); color: var(--red); }
+  .tag.tight { background: var(--tight-bg); color: var(--amber); }
+  .tag.neutral { background: var(--key-bg); color: var(--text-3); }
+
+  /* Every row ends with money, so the amount lands in the same right-hand slot
+     as a quick order's. The slot never shrinks; the route wraps instead. */
+  .price {
+    flex-shrink: 0; padding-top: 4px; text-align: right;
+    font-size: 15px; font-weight: 600; color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .price.unset { color: var(--amber); }
+
+  /* Quick orders are filler between legs, so they get a lighter one-line row. */
+  .row.quick { min-height: 44px; align-items: center; padding: 4px 14px; }
+  .row.quick .rail .t { font-size: 17px; font-weight: 650; color: var(--text-2); }
+  .row.quick .row-body { display: flex; align-items: center; padding-top: 0; }
+  .qplat { font-size: 14px; font-weight: 650; }
+  .qplat.didi { color: var(--didi-fg); }
+  .qplat.uber { color: var(--uber-fg); }
+  .qplat.foodpanda { color: var(--fp-fg); }
+  .qprice { margin-left: auto; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .qprice.unset { color: var(--amber); }
+
+  /* Waiting time and the NOW marker are marks on the timeline the big times run
+     down, so both are indented to the rail rather than to the row. */
+  .gap { padding: 1px 0; }
+  .gap-label {
+    padding-left: 17px; font-size: 11px; color: var(--text-3);
+    font-variant-numeric: tabular-nums; line-height: 1.6;
+  }
+  .now { display: flex; align-items: center; gap: 8px; padding: 3px 14px 3px 17px; }
+  .now .now-t {
+    font-size: 12px; font-weight: 750; color: var(--red);
+    font-variant-numeric: tabular-nums; flex-shrink: 0; width: 58px;
+  }
+  .now .now-line { flex: 1; height: 1px; background: var(--red); opacity: .55; }
+
   .badge {
     font-size: 12px; font-weight: 650; padding: 3px 8px;
     border-radius: 6px; display: inline-block;
@@ -146,22 +216,6 @@
   .badge.uber { background: var(--uber-bg); color: var(--uber-fg); }
   .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
   .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
-  .badge.banner { background: var(--banner-bg); color: var(--banner-fg); margin-left: 5px; }
-  .badge.exit-urgent { background: rgba(255,97,97,.14); color: var(--red); margin-left: 5px; }
-  .badge.exit-tight { background: rgba(255,176,46,.14); color: var(--amber); margin-left: 5px; }
-  .time { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .phase { font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 3px; }
-  .phase.est { background: var(--pickup-bg); color: var(--pickup-fg); }
-  .phase.landed, .phase.gate { background: var(--didi-bg); color: var(--green); }
-  .passenger { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
-  .flight { font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
-  .flight-gate { font-size: 13px; color: var(--green); margin-bottom: 2px; }
-  .svc-time { font-size: 12px; color: var(--text-3); margin-bottom: 2px; }
-  .route { font-size: 13px; color: var(--text-2); line-height: 1.5; }
-  .route .arrow { color: var(--text-3); }
-  .price { font-size: 15px; font-weight: 650; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  .price .calc { font-weight: 400; color: var(--text-2); font-size: 13px; }
-  .price.none { color: var(--amber); font-weight: 500; font-size: 13px; }
   .empty { text-align: center; color: var(--text-3); padding: 60px 0; font-size: 15px; }
 
   /* ---- sheet ---- */
@@ -384,13 +438,15 @@
 </head>
 <body>
 <div class="header">
-  <button class="nav-btn" onclick="go(-1)" aria-label="前一日">&larr;</button>
-  <button class="date-btn" id="dateBtn" onclick="goToday()"></button>
-  <button class="nav-btn" onclick="go(1)" aria-label="後一日">&rarr;</button>
-  <button class="icon-btn" onclick="load()" aria-label="重新載入">&circlearrowright;</button>
-  <button class="icon-btn add-btn" onclick="openAdd()" aria-label="入單">+</button>
+  <div class="header-row">
+    <button class="nav-btn" onclick="go(-1)" aria-label="前一日">&larr;</button>
+    <button class="date-btn" id="dateBtn" onclick="goToday()"></button>
+    <button class="nav-btn" onclick="go(1)" aria-label="後一日">&rarr;</button>
+    <button class="icon-btn" onclick="load()" aria-label="重新載入">&circlearrowright;</button>
+    <button class="icon-btn add-btn" onclick="openAdd()" aria-label="入單">+</button>
+  </div>
+  <div class="summary" id="summary"></div>
 </div>
-<div class="hero" id="hero"></div>
 <div class="chips" id="chips"></div>
 <div class="orders" id="orders"></div>
 <div class="scrim" id="scrim" onclick="closeOverlays()"></div>
@@ -626,32 +682,23 @@ async function load() {
 
 // ---- render ----
 function stats(list) {
-  let total = 0, costs = 0, priced = 0;
-  list.forEach(o => {
-    if (o.price) { total += o.price + (o.banner_fee || 0); priced++; }
-    costs += (o.tunnel_fee || 0) + (o.parking_fee || 0);
-  });
-  return { total, costs, net: total - costs, priced };
+  let total = 0, priced = 0;
+  list.forEach(o => { if (o.price) { total += o.price + (o.banner_fee || 0); priced++; } });
+  return { total, priced };
 }
 
 function render() {
   const visible = filter ? orders.filter(o => platform(o) === filter) : orders;
   const s = stats(visible);
-  const label = filter ? PLATFORMS.find(p => p.key === filter).label + '收入' : '總收入';
   const unpriced = visible.length - s.priced;
-  document.getElementById('hero').innerHTML =
-    '<div class="label">' + esc(cur === fmtDate(new Date()) ? '今日' + label : label) + '</div>' +
-    '<div class="amount">$' + $(s.total) + '</div>' +
-    '<div class="sub">' +
-      (s.costs ? '淨收入 $' + $(s.net) + ' · ' : '') +
-      visible.length + ' 單' +
-      (unpriced > 0 ? ' · <span class="warn">' + unpriced + ' 未入價</span>' : '') +
-    '</div>';
+  document.getElementById('summary').innerHTML =
+    visible.length + ' 程 · $' + $(s.total) +
+    (unpriced > 0 ? ' · <span class="warn">' + unpriced + ' 未入價</span>' : '');
 
   document.getElementById('chips').innerHTML = PLATFORMS.map(p => {
     const n = orders.filter(o => platform(o) === p.key).length;
     return '<button class="chip' + (filter === p.key ? ' on' : '') + (n ? '' : ' zero') + '"' +
-      ' onclick="toggleFilter(\'' + p.key + '\')">' + p.label + '<small>' + n + ' 單</small></button>';
+      ' onclick="toggleFilter(\'' + p.key + '\')">' + p.label + ' ' + n + '</button>';
   }).join('');
 
   const box = document.getElementById('orders');
@@ -660,9 +707,13 @@ function render() {
     return;
   }
   const isToday = cur === fmtDate(new Date());
-  const nextOrder = isToday ? visible.find(o => !isDone(o)) : null;
-  const nextId = nextOrder ? nextOrder.order_id : null;
-  box.innerHTML = visible.map(o => cardHtml(o, nextId)).join('');
+  // The first not-yet-done order anchors both the NEXT styling and the NOW
+  // marker, which is drawn in the gap above it — i.e. after the last done row.
+  const nextIdx = isToday ? visible.findIndex(o => !isDone(o)) : -1;
+  const nextId = nextIdx >= 0 ? visible[nextIdx].order_id : null;
+  box.innerHTML = visible.map((o, i) =>
+    gapHtml(i ? visible[i - 1] : null, o, i === nextIdx) + rowHtml(o, nextId)
+  ).join('');
   if (revealId) {
     const el = box.querySelector('[data-oid="' + CSS.escape(revealId) + '"]');
     if (el) el.scrollIntoView({ block: 'nearest' });
@@ -679,72 +730,147 @@ function toggleFilter(key) {
   render();
 }
 
-function cardHtml(o, nextId) {
-  const done = isDone(o);
-  const isNext = o.order_id === nextId;
-  const isPickup = isFlightPickup(o.service_type);
-  const badge = svcBadge(o);
-  const label = svcLabel(o.service_type);
-  const banner = o.banner_fee || 0;
-  const costTotal = (o.tunnel_fee || 0) + (o.parking_fee || 0);
+// ---- row ----
+function toMin(hhmm) {
+  const p = String(hhmm || '').split(':');
+  if (p.length !== 2) return NaN;
+  return (+p[0]) * 60 + (+p[1]);
+}
+function fmtGap(min) {
+  const h = Math.floor(min / 60), m = min % 60;
+  if (!h) return m + 'm';
+  return m ? h + 'h ' + m + 'm' : h + 'h';
+}
+// Display-only shortening; the full address stays in the detail sheet.
+function shortPlace(s) {
+  const t = String(s || '').replace(/[(（][^)）]*[)）]\s*$/, '').trim();
+  if (/机场|機場/.test(t)) {
+    const m = t.match(/T[12]/i);
+    return '機場' + (m ? ' ' + m[0].toUpperCase() : '');
+  }
+  return t;
+}
 
-  let priceHtml;
-  if (o.price) {
-    const gross = o.price + banner;
-    priceHtml = '<div class="price">$' + $(o.price);
-    if (banner) priceHtml += ' + $' + $(banner);
-    if (costTotal) priceHtml += ' <span class="calc">&minus; $' + $(costTotal) + ' = $' + $(gross - costTotal) + '</span>';
-    priceHtml += '</div>';
+// Best known landing time, in feed-confidence order; '' when the flight never
+// showed up in the feed.
+function landingTime(o) {
+  if (o.flight_status === 'gate' && o.flight_gate) return o.flight_gate;
+  if ((o.flight_status === 'landed' || o.flight_status === 'est') && o.flight_eta) return o.flight_eta;
+  return o.flight_scheduled || '';
+}
+// 接机 rows show the flight's own time because the driver plans around landing:
+// it is the number he watches and the only one that moves.
+function rowTime(o) {
+  return isFlightPickup(o.service_type) ? (landingTime(o) || orderTime(o)) : orderTime(o);
+}
+function rowMin(o) { return toMin(rowTime(o)); }
+
+// Exit minutes run from touchdown, matching flight.py:svc_time — not from the
+// at-gate time the rail may be showing above.
+function meetTime(o) {
+  const land = o.flight_eta || o.flight_scheduled;
+  if (!land || !o.passenger_exit_minutes) return '';
+  const total = toMin(land) + o.passenger_exit_minutes;
+  if (isNaN(total)) return '';
+  return String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+}
+
+// Only the word: the big time above already IS the time this status refers to,
+// so printing the digits again would state the same fact twice. A flight with
+// nothing but a schedule has nothing to qualify, so it says nothing.
+function statusWord(o) {
+  if (o.flight_status === 'gate' && o.flight_gate) return '已到閘';
+  if (o.flight_status === 'landed' && o.flight_eta) return '已降落';
+  if (o.flight_status === 'est' && o.flight_eta) return '預計';
+  return '';
+}
+
+function railHtml(o) {
+  const lines = [];
+  if (isFlightPickup(o.service_type)) {
+    const st = statusWord(o);
+    if (st) lines.push(st);
+    if (o.depart_hhmm) lines.push('出發 <b>' + esc(o.depart_hhmm) + '</b>');
+    const meet = meetTime(o);
+    if (meet) lines.push('用車 <b>' + esc(meet) + '</b>');
+  }
+  return '<div class="rail"><div class="t">' + esc(rowTime(o)) + '</div>' +
+    lines.map(l => '<div class="st">' + l + '</div>').join('') + '</div>';
+}
+
+// The flight number stands in for a 接機 badge, and "機場" as a destination for
+// a 送機 one, so no row carries a service badge.
+function routeHtml(o) {
+  const from = shortPlace(o.pickup), to = shortPlace(o.dropoff);
+  const arrow = '<span class="arrow">&rarr;</span>';
+  let a = '', b = '';
+  if (isFlightPickup(o.service_type)) {
+    if (o.flight_number) a = '<span><span class="flt">' + esc(o.flight_number) + '</span></span>';
+    else if (from) a = '<span><span class="small">' + esc(from) + '</span></span>';
+    if (to) b = '<span>' + (a ? arrow : '') + '<span class="big">' + esc(to) + '</span></span>';
+  } else if (o.service_type === '送机') {
+    if (from) a = '<span><span class="big">' + esc(from) + '</span></span>';
+    if (to) b = '<span>' + (a ? arrow : '') + '<span class="small">' + esc(to) + '</span></span>';
   } else {
-    priceHtml = '<div class="price none">未入價</div>';
+    if (from) a = '<span><span class="reg">' + esc(from) + '</span></span>';
+    if (to) b = '<span>' + (a ? arrow : '') + '<span class="reg">' + esc(to) + '</span></span>';
   }
+  return a || b ? '<div class="route">' + a + b + '</div>' : '';
+}
 
-  let timeDisplay = orderTime(o);
-  let phaseBadge = '', gateHtml = '', svcTimeHtml = '';
-  if (isPickup) {
-    if (o.flight_status === 'gate' && o.flight_gate) {
-      timeDisplay = o.flight_gate;
-      phaseBadge = '<span class="phase gate">At gate</span>';
-    } else if (o.flight_status === 'landed' && o.flight_eta) {
-      timeDisplay = o.flight_eta;
-      phaseBadge = '<span class="phase landed">Landed</span>';
-    } else if (o.flight_status === 'est' && o.flight_eta) {
-      timeDisplay = o.flight_eta;
-      phaseBadge = '<span class="phase est">Est</span>';
-    } else if (o.flight_scheduled) {
-      timeDisplay = o.flight_scheduled;
-    }
-    // no flight data yet (not in feed / typo): keep booking time
-    if (o.flight_status === 'gate' && o.flight_eta) {
-      gateHtml = '<div class="flight-gate">Landed ' + esc(o.flight_eta) + '</div>';
-    }
-    const landingTime = o.flight_eta || o.flight_scheduled;
-    let svcT = null;
-    if (landingTime && o.passenger_exit_minutes) {
-      const [h, m] = landingTime.split(':').map(Number);
-      const total = h * 60 + m + o.passenger_exit_minutes;
-      svcT = String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
-    }
-    const parts = [];
-    if (o.depart_hhmm) parts.push('出發 ' + esc(o.depart_hhmm));
-    if (svcT) parts.push('用車 ' + svcT);
-    if (parts.length) svcTimeHtml = '<div class="svc-time">' + parts.join(' · ') + '</div>';
+function tagsHtml(o) {
+  const t = [];
+  if (o.banner_fee) t.push('<span class="tag banner">舉牌</span>');
+  if (o.passenger_exit_minutes) {
+    const cls = o.exit_urgency === 'urgent' ? 'urgent' : o.exit_urgency === 'tight' ? 'tight' : 'neutral';
+    t.push('<span class="tag ' + cls + '">出場 ' + esc(o.passenger_exit_minutes) + '</span>');
   }
+  return t.length ? '<div class="tags">' + t.join('') + '</div>' : '';
+}
 
-  return '<button class="card' + (done ? ' done' : '') + (isNext ? ' next' : '') +
-    '" data-oid="' + esc(o.order_id) + '" onclick="openDetail(this.dataset.oid)">' +
-    '<div class="card-top"><div><span class="badge ' + badge + '">' + label + '</span>' +
-    (banner ? '<span class="badge banner">舉牌</span>' : '') +
-    (o.exit_urgency ? '<span class="badge exit-' + o.exit_urgency + '">出場' + o.passenger_exit_minutes + '</span>' : '') +
-    (isNext ? '<span class="next-tag">NEXT</span>' : '') + '</div>' +
-    '<span class="time">' + esc(timeDisplay) + phaseBadge + '</span></div>' +
-    (o.passenger_name ? '<div class="passenger">' + esc(o.passenger_name) + '</div>' : '') +
-    (o.flight_number || o.vehicle_type ? '<div class="flight">' + esc(o.flight_number || '') +
-      (o.vehicle_type ? ' · ' + esc(o.vehicle_type) : '') + '</div>' : '') +
-    gateHtml + svcTimeHtml +
-    (o.pickup ? '<div class="route">' + esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff) + '</div>' : '') +
-    priceHtml +
-    '</button>';
+// Gross, matching the day total: the banner fee is money in, and the deductions
+// that follow it are only visible in the detail sheet's breakdown.
+function priceHtml(o) {
+  if (!o.price) return '<div class="price unset">未入價</div>';
+  return '<div class="price">$' + $(o.price + (o.banner_fee || 0)) + '</div>';
+}
+
+// Rows keep booked order while the rail shows flight times, so a flight landing
+// before the previous booking produces a negative gap; that is a real state,
+// not an error, and it simply has no waiting time to label.
+function gapHtml(prev, o, showNow) {
+  let inner = '';
+  if (prev) {
+    const gapMin = rowMin(o) - rowMin(prev);
+    if (gapMin >= 30) inner += '<div class="gap-label">' + fmtGap(gapMin) + '</div>';
+  }
+  if (showNow) {
+    const d = new Date();
+    const hhmm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    inner += '<div class="now"><span class="now-t">' + hhmm + '</span><span class="now-line"></span></div>';
+  }
+  return '<div class="gap">' + inner + '</div>';
+}
+
+// data-oid and the .next class name are what render() queries to scroll a row
+// into view; both must survive any markup change here.
+function rowHtml(o, nextId) {
+  const quick = _QUICK_TYPES.has(o.service_type);
+  const open = '<button class="row' + (quick ? ' quick' : '') + (isDone(o) ? ' done' : '') +
+    (o.order_id === nextId ? ' next' : '') + '" data-oid="' + esc(o.order_id) +
+    '" onclick="openDetail(this.dataset.oid)">';
+  if (quick) {
+    return open +
+      '<div class="rail"><div class="t">' + esc(orderTime(o)) + '</div></div>' +
+      '<div class="row-body"><span class="qplat ' + platform(o) + '">' +
+      esc(svcLabel(o.service_type)) + '</span>' +
+      (o.price ? '<span class="qprice">$' + $(o.price) + '</span>'
+               : '<span class="qprice unset">未入價</span>') +
+      '</div></button>';
+  }
+  return open + railHtml(o) +
+    '<div class="row-body">' + routeHtml(o) + tagsHtml(o) + '</div>' +
+    priceHtml(o) + '</button>';
 }
 
 // ---- sheet infra ----
@@ -1303,7 +1429,7 @@ scrollToNext = true;
 load();
 const es = new EventSource('/api/events');
 es.onmessage = () => load();
-setInterval(render, 60000);   // re-render each minute so cards dim as time passes; SSE only fires on DB changes
+setInterval(render, 60000);   // re-render each minute so the NOW marker moves and past rows dim; SSE only fires on DB changes
 </script>
 </body>
 </html>
