@@ -172,6 +172,32 @@ def test_parse_any_space_relay_source_from_suffix():
     assert order.passenger_phone == "13800001234"
 
 
+SPACE_FULL_KEY_MSG = """订单号：SPACE202608990002
+类型：香港-接机
+车型 ：特斯拉5座【特斯拉Model Y/S等同级车】
+用车日期：2026-08-22
+航班预计降落时间：11:50
+航班号： CA103
+上车地点：香港国际机场
+下车地点：黄埔必嘉坊
+乘车人数：一个人两件行李
+姓名:陈大文
+电话:13800001234"""
+
+
+def test_parse_any_space_full_key_variant_has_pickup_time():
+    order, source = parse_any(SPACE_FULL_KEY_MSG)
+    assert source == ""
+    assert order.order_id == "SPACE202608990002"
+    # Web paste rejects a scheduled_time with no time part, and every consumer
+    # reads it as '%Y-%m-%d %H:%M:%S'.
+    assert " " in order.scheduled_time
+    assert order.scheduled_time == "2026-08-22 11:50:00"
+    assert order.pickup == "香港国际机场"
+    assert order.dropoff == "黄埔必嘉坊"
+    assert order.driver_notes == "一个人两件行李"
+
+
 def test_space_does_not_match_xiecheng():
     order, source = parse_any(XIECHENG_MSG)
     assert source == "携程"

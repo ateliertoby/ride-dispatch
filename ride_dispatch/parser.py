@@ -408,6 +408,16 @@ _SPACE_FIELD_MAP = {
     "用车日期": "_date",
     "用车时间": "_time",
     "预计降落时间": "_landing_time",
+    # Relayed copies spell the pickup, dropoff and landing-time keys out in
+    # full. They label the same fields as the short keys above.
+    "上车地点": "pickup",
+    "下车地点": "dropoff",
+    "航班预计降落时间": "_landing_time",
+    # Head count and luggage arrive as one free-text phrase (乘车人数：一个人两件
+    # 行李). It goes to driver_notes, the only notes field the dispatch card and
+    # the dashboard render. Exact-key matching is what stops it being read as
+    # 乘车人; a prefix or substring match here would overwrite passenger_name.
+    "乘车人数": "driver_notes",
 }
 
 # The example-model suffix after 车型 comes in any of these bracket styles.
@@ -499,7 +509,7 @@ def parse_space(raw: str) -> Order:
         dropoff=parsed.get("dropoff", ""),
         distance_km=None,
         notes="",
-        driver_notes="",
+        driver_notes=parsed.get("driver_notes", ""),
         additional_services="",
         passenger_exit_minutes=None,
         third_party_contact="",

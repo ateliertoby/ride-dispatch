@@ -503,6 +503,53 @@ def test_parse_space_landing_time_prefix():
     assert order.scheduled_time == "2026-08-21 11:25:00"
 
 
+# Relayed 接机 variant: the pickup, dropoff and landing-time keys are spelled
+# out in full (上车地点/下车地点/航班预计降落时间), the contact pair uses 姓名/电话,
+# and 乘车人数 carries head count plus luggage as one phrase.
+SPACE_FULL_KEY_MSG = """订单号：SPACE202608990002
+类型：香港-接机
+车型 ：特斯拉5座【特斯拉Model Y/S等同级车】
+用车日期：2026-08-22
+航班预计降落时间：11:50
+航班号： CA103
+上车地点：香港国际机场
+下车地点：黄埔必嘉坊
+乘车人数：一个人两件行李
+姓名:陈大文
+电话:13800001234"""
+
+
+def test_parse_space_full_key_variant():
+    order = parse_space(SPACE_FULL_KEY_MSG)
+    assert order.order_id == "SPACE202608990002"
+    assert order.service_type == "接机"
+    assert order.vehicle_type == "特斯拉5座"
+    assert order.scheduled_time == "2026-08-22 11:50:00"
+    assert order.flight_number == "CA103"
+    assert order.pickup == "香港国际机场"
+    assert order.dropoff == "黄埔必嘉坊"
+    # Head count and luggage go to the field the dispatch card renders as 備註.
+    assert order.driver_notes == "一个人两件行李"
+    # 乘车人数 must not be read as the 乘车人 contact key.
+    assert order.passenger_name == "陈大文"
+    assert order.passenger_phone == "13800001234"
+    assert order.raw_message == SPACE_FULL_KEY_MSG
+
+
+def test_parse_space_head_count_does_not_become_passenger_name():
+    raw = """订单号：SPACE202608990003
+类型：香港-接机
+车型：特斯拉5座
+用车日期：2026-08-22
+航班预计降落时间：11:50
+上车地点：香港国际机场
+下车地点：黄埔必嘉坊
+乘车人数：两个人三件行李"""
+    order = parse_space(raw)
+    assert order.passenger_name == ""
+    assert order.driver_notes == "两个人三件行李"
+
+
 JIEZHAN_MSG = """服务类型: 接站
 接单车型: 特斯拉 Model S
 乘客姓名: 陈小明
