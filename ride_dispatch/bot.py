@@ -16,8 +16,12 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders
+from .db import init_db, resolve_db_path, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
+from . import parking
+from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
+                      pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
+                      FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS, HOURLY_FEE)
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
 from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError, cache_load as whiteboard_cache_load, cache_store as whiteboard_cache_store, cache_discard as whiteboard_cache_discard
@@ -491,6 +495,27 @@ _last_state: str | None = None
 _warned_statuses: set[tuple[str, str]] = set()
 _kick_server = None
 
+# Car park visit tracking. The client is built on first use from CAR_PLATE;
+# None means the feature is off. _parking_miss_at is the tick time of the
+# first "not inside" reply while a session is open — a second consecutive
+# miss confirms the exit. In-memory on purpose: losing it on a restart costs
+# one extra tick, nothing more.
+_parking_client: ParkingClient | None = None
+_parking_client_built = False
+_parking_miss_at: datetime | None = None
+_parking_logger = logging.getLogger("parking")
+
+
+def _get_parking_client() -> ParkingClient | None:
+    global _parking_client, _parking_client_built
+    # Build at most once, and never over a client that is already in place:
+    # _parking_client is also assigned directly from outside this module.
+    if _parking_client is None and not _parking_client_built:
+        _parking_client_built = True
+        if parking.is_configured():
+            _parking_client = ParkingClient(parking.CAR_PLATE, parking.PARKING_EMAIL)
+    return _parking_client
+
 
 def _log_state(state: str | None):
     # Idle states recur every tick; log transitions only.
@@ -588,6 +613,185 @@ async def _check_departure_reminders(bot, chat_id: int, now: datetime):
             logger.exception("departure reminder failed for %s", order.get('order_id', '?')[-4:])
 
 
+def _session_entry(session: dict) -> datetime:
+    return from_db_time(session["entry_time"])
+
+
+def _free_entries(now: datetime) -> list[datetime]:
+    cutoff = db_time(now - timedelta(hours=FREE_WINDOW_HOURS))
+    return [from_db_time(s) for s in free_parking_entries_since(DB_PATH, cutoff)]
+
+
+def _day_word(dt: datetime, now: datetime) -> str:
+    delta = (dt.date() - now.date()).days
+    if delta == 0:
+        return "今日"
+    if delta == 1:
+        return "明日"
+    if delta == -1:
+        return "昨日"
+    return dt.strftime("%m-%d")
+
+
+def _when(dt: datetime, now: datetime, day_always: bool = False) -> str:
+    # Same-day times read as bare HH:MM. A time the driver has to act before
+    # always carries its day word: a bare "13:40 後" is read as today.
+    hhmm = dt.strftime("%H:%M")
+    if day_always or dt.date() != now.date():
+        return f"{_day_word(dt, now)} {hhmm}"
+    return hhmm
+
+
+def _allowance_line(now: datetime) -> str:
+    entries = _free_entries(now)
+    if free_available(entries, now):
+        return "停車場 免費可用"
+    used = max(entries)
+    nxt = next_free_at(entries)
+    return f"停車場 免費已用 {_when(used, now)}，{_when(nxt, now, day_always=True)} 後先有"
+
+
+def _entry_message(session: dict, status: ParkingStatus, now: datetime) -> str:
+    entry = _session_entry(session)
+    lines = [f"已入 {status.location_name or status.location} {entry.strftime('%H:%M')}"]
+    if free_available(_free_entries(now), now):
+        lines.append(f"免費可用，{(entry + timedelta(minutes=FREE_MINUTES)).strftime('%H:%M')} 前出閘")
+    else:
+        hours, exit_at = pay_plan(entry, now)
+        lines.append(f"免費已用，泊 {hours} 粒鐘 ${HOURLY_FEE * hours:g} 到 {exit_at.strftime('%H:%M')}")
+    if session.get("order_id"):
+        o = get_order_by_id(DB_PATH, session["order_id"])
+        if o:
+            who = o.get("passenger_name") or ""
+            flight = o.get("flight_number") or ""
+            lines.append(f"乘客: {who} | {flight}" if flight else f"乘客: {who}")
+    return "\n".join(lines)
+
+
+async def _send_pay_link(bot, chat_id: int, session: dict, status: ParkingStatus,
+                         now: datetime, prefix: str = "") -> bool:
+    """Generate a fresh PayDollar link for the plan at this minute and send it.
+
+    Returns True once the message is out; the caller decides what to mark.
+    """
+    client = _get_parking_client()
+    if client is None:
+        return False
+    entry = _session_entry(session)
+    _, exit_at = pay_plan(entry, now)
+    fee = await client.fee_for_exit(status, exit_at)
+    amount = fee.fee if fee.fee is not None else 0
+    url, payment = await client.pay_link(status, exit_at, amount, now)
+    grace = exit_at + timedelta(minutes=GRACE_MINUTES)
+    text = f"{prefix}${amount:g} 泊到 {exit_at.strftime('%H:%M')}（寬限到 {grace.strftime('%H:%M')}）"
+    await bot.send_message(
+        chat_id=chat_id, text=text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"Apple Pay ${amount:g}", url=url)]]),
+    )
+    update_parking_session(DB_PATH, session["id"], payment_ref=payment["payment_ref"],
+                           scheduled_exit=db_time(exit_at), paid_amount=amount, link_sent_at=db_time(now))
+    return True
+
+
+def _pay_button(session_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("出 payment link", callback_data=f"park:pay:{session_id}")]])
+
+
+async def _close_visit(bot, chat_id: int, session: dict, exit_at: datetime, now: datetime):
+    entry = _session_entry(session)
+    kind = classify(bool(session.get("paid")), entry, exit_at)
+    close_parking_session(DB_PATH, session["id"], db_time(exit_at), 1 if kind == "free" else 0)
+    stayed = int((exit_at - entry).total_seconds() // 60)
+    if kind == "free":
+        tail = f"免費，下次 {_when(entry + timedelta(hours=FREE_WINDOW_HOURS), now, day_always=True)} 後"
+    elif kind == "paid":
+        tail = f"已付 ${(session.get('paid_amount') or 0):g}" if session.get("paid_amount") else "已付（網上）"
+    else:
+        tail = "閘口找數"
+    msg = f"已出閘 {exit_at.strftime('%H:%M')}，泊 {stayed} 分鐘 — {tail}"
+    order_id = session.get("order_id")
+    if order_id and kind == "free":
+        update_cost(DB_PATH, order_id, "parking", 0)
+        msg += f"\n#{order_id[-4:]} 停車費已改 $0"
+    elif order_id and kind == "paid" and session.get("paid_amount"):
+        update_cost(DB_PATH, order_id, "parking", float(session["paid_amount"]))
+    await bot.send_message(chat_id=chat_id, text=msg)
+
+
+async def _check_parking(bot, chat_id: int, now: datetime):
+    global _parking_miss_at
+    client = _get_parking_client()
+    if client is None:
+        return
+    session = get_open_parking_session(DB_PATH)
+    # An open visit outranks the arming window: the car is inside and its
+    # exit still has to be seen, however the pickup's window has moved.
+    orders = _orders_in(get_tracking_dates(DB_PATH, now)) if session is None else []
+    if session is None and not arming_orders(orders, now):
+        return
+    try:
+        status = await client.query()
+    except ParkingError as e:
+        # Unknown: neither inside nor outside. Leave every state untouched.
+        _parking_logger.warning("parking query failed: %s", e)
+        return
+
+    if not status.inside:
+        if session is None:
+            _parking_miss_at = None
+            return
+        if _parking_miss_at is None:
+            _parking_miss_at = now
+            return
+        exit_at = _parking_miss_at
+        _parking_miss_at = None
+        await _close_visit(bot, chat_id, session, exit_at, now)
+        return
+
+    _parking_miss_at = None
+    if session is not None and session["pv_nr"] != status.pv_nr:
+        # Left and re-entered within one tick; the old visit ended "now".
+        await _close_visit(bot, chat_id, session, now, now)
+        session = None
+    if session is None:
+        if not orders:
+            orders = _orders_in(get_tracking_dates(DB_PATH, now))
+        linked = pick_order(arming_orders(orders, now), from_db_time(status.entry_time))
+        sid = open_parking_session(
+            DB_PATH, pv_nr=status.pv_nr, plate=client.plate, location=status.location,
+            location_name=status.location_name, entry_time=status.entry_time,
+            order_id=linked["order_id"] if linked else None,
+        )
+        session = get_parking_session(DB_PATH, sid)
+        await bot.send_message(chat_id=chat_id, text=_entry_message(session, status, now),
+                               reply_markup=_pay_button(sid))
+        return
+
+    if status.paid and not session.get("paid"):
+        update_parking_session(DB_PATH, session["id"], paid=1)
+        session["paid"] = 1
+        msg = f"已收到付款 ${(session.get('paid_amount') or 0):g}" if session.get("paid_amount") else "已收到付款"
+        if session.get("scheduled_exit"):
+            # Only a payment made through our own link has a known paid-until
+            # time; a gate or QR payment leaves this empty.
+            until = from_db_time(session["scheduled_exit"])
+            grace = until + timedelta(minutes=GRACE_MINUTES)
+            msg += f"，{until.strftime('%H:%M')} 前出閘（寬限到 {grace.strftime('%H:%M')}）"
+        await bot.send_message(chat_id=chat_id, text=msg)
+        return
+
+    minutes = status.park_minutes if status.park_minutes is not None else int((now - _session_entry(session)).total_seconds() // 60)
+    if (not session.get("paid")) and (not session.get("auto_link_sent")) and minutes >= AUTO_LINK_MINUTE:
+        try:
+            sent = await _send_pay_link(bot, chat_id, session, status, now, prefix=f"泊咗 {AUTO_LINK_MINUTE} 分鐘未俾錢，")
+        except ParkingError as e:
+            # Marked sent only after a successful send, so this retries next tick.
+            _parking_logger.warning("auto pay link failed: %s", e)
+            sent = False
+        if sent:
+            update_parking_session(DB_PATH, session["id"], auto_link_sent=1)
+
+
 def _clamp_for_reminders(interval: int, now: datetime) -> int:
     all_orders: list[dict] = []
     dates = get_tracking_dates(DB_PATH, now=now)
@@ -621,6 +825,10 @@ async def _poll_and_notify(context) -> int:
         await _check_departure_reminders(bot, chat_id, now)
     except Exception:
         logger.exception("departure reminder check error")
+    try:
+        await _check_parking(bot, chat_id, now)
+    except Exception:
+        logger.exception("parking check error")
 
     # Flight tracking
     dates = get_tracking_dates(DB_PATH)
