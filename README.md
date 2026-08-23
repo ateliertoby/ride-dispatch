@@ -21,6 +21,7 @@ This bot parses pasted order messages into structured records and stores them in
 7. Dashboard shows daily revenue, net income, and live flight landing times; platform chips (接送/滴滴/Uber/foodpanda) filter the list and show that platform's total
 8. Tap **$** to open 埋數: a month grid of what each day earned, coloured by whether the money is still to chase (amber), settled and waiting on the transfer (plain), or banked (green). Tap a day, tick its legs, type what the platform confirmed, and it becomes one settlement batch; 已到帳 marks the transfer in, 撤銷結算 unwinds the whole batch. An order in a batch is locked against price and cancellation edits until it is unwound
 9. On landing, pickup orders with 舉牌 service get a preview of the sign text plus a 生成舉牌相 button — tapping it generates the whiteboard sign photo (via GPT-Image-2). `/board` generates manually for any pickup
+10. Around a pickup's landing time the bot watches the airport car parks for your plate: 已降落 says whether the once-per-24h free half hour is still available, entry and exit are pushed and recorded, and a tap on the entry message (or 50 minutes inside unpaid) returns an Apple Pay link that pays the car park online, which is cheaper than paying at the gate. `/parking` shows the current visit and the last five
 
 ## Run
 
@@ -37,6 +38,8 @@ cp .env.example .env
 | `RIDE_WEB_PORT` | No | Dashboard port (default: `3200`) |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs. Empty = allow all |
 | `FAL_KEY` | No | fal.ai API key for whiteboard sign photo generation. Unset = feature off |
+| `CAR_PLATE` | No | Plate to watch in the HKIA car parks. Unset = parking tracking off |
+| `PARKING_EMAIL` | No | Address HKIA attaches to an online parking payment. Blank is accepted |
 
 Tests: `pytest tests/`
 
