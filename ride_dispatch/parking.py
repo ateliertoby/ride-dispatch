@@ -5,12 +5,23 @@ Everything here is driven by HKIA's undocumented online-payment endpoints
 but can change without notice; callers treat a ParkingError as "no parking
 information right now", never as a reason to stop the flight poller.
 """
+import base64
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
+
+import httpx
+from dotenv import load_dotenv
 
 from .flight import landing_datetime
 from .service import is_flight_pickup
+
+# The config below is read at import time and this module is imported before
+# the bot calls load_dotenv(), so .env has to be loaded here as well.
+# load_dotenv is idempotent and never overrides a real environment variable.
+load_dotenv()
 
 FREE_MINUTES = 30          # leave within this and the visit is free (once per 24h)
 FREE_WINDOW_HOURS = 24     # rolling, from the free visit's entry time
@@ -151,3 +162,133 @@ def pick_order(orders: list[dict], entry: datetime) -> dict | None:
         if best is None or gap < best_gap:
             best, best_gap = o, gap
     return best
+
+
+BASE_URL = "https://parking.hongkongairport.com"
+QUERY_PATH = "/api/booking/getOnlinePayInfo"
+STORE_PATH = "/api/booking/storeOnlinePayment"
+GATEWAY_PATH = "/api/booking/payDollarParametersForIntegration"
+# Values the HKIA page sends as-is: 3 = identify the car by plate (ANPR),
+# channel "1" = the public web channel.
+ENTRY_METHOD = 3
+CHANNEL = "1"
+
+CAR_PLATE = os.environ.get("CAR_PLATE", "").strip().upper()
+# Optional: HKIA's pay path never validates it, and an empty address is
+# accepted. It only labels their own confirmation screen and receipt mail.
+PARKING_EMAIL = os.environ.get("PARKING_EMAIL", "").strip()
+
+
+def is_configured() -> bool:
+    return bool(CAR_PLATE)
+
+
+class ParkingClient:
+    def __init__(self, plate: str, email: str, transport=None, timeout: float = 15):
+        self.plate = plate.strip().upper()
+        self.email = email
+        self._transport = transport
+        self._timeout = timeout
+
+    async def _post(self, path: str, body: dict) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                resp = await client.post(BASE_URL + path, json=body)
+        except httpx.HTTPError as e:
+            raise ParkingError(f"{path}: {e}") from e
+        # A 412 carries the legitimate "not inside" body; the JSON decides.
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise ParkingError(f"{path}: non-JSON reply (HTTP {resp.status_code})") from e
+
+    async def _query(self, schedule_exit=None, location=None, pv_nr=None) -> ParkingStatus:
+        body = {
+            "entryMethod": ENTRY_METHOD,
+            "cardNumber": self.plate,
+            "parkingLocation": location,
+            "PvNr": pv_nr,
+            "scheduleExit": schedule_exit,
+            "channel": CHANNEL,
+            "carPlateNo": self.plate,
+        }
+        return parse_status(await self._post(QUERY_PATH, body))
+
+    async def query(self) -> ParkingStatus:
+        return await self._query()
+
+    async def fee_for_exit(self, status: ParkingStatus, scheduled_exit: datetime) -> ParkingStatus:
+        return await self._query(api_time(scheduled_exit), status.location, status.pv_nr)
+
+    async def create_payment(self, status: ParkingStatus, scheduled_exit: datetime,
+                             amount: float, now: datetime) -> dict:
+        body = {
+            "entryMethod": ENTRY_METHOD,
+            "cardNo": self.plate,
+            "carPlateNo": self.plate,
+            "parkingLocation": status.location,
+            "entryDateTime": api_time(from_db_time(status.entry_time)),
+            "exitDateTime": api_time(scheduled_exit),
+            "paymentAmt": amount,
+            "paymentCurrency": "HKD",
+            "emailAddress": self.email,
+            "channel": int(CHANNEL),
+            "timeStamp": db_time(now),
+            "PvNr": status.pv_nr,
+        }
+        reply = await self._post(STORE_PATH, body)
+        if reply.get("resultCode") != 200 or not reply.get("refNoForPay"):
+            raise ParkingError(f"storeOnlinePayment: {reply!r}")
+        return {
+            "payment_ref": reply["paymentRefNo"],
+            "order_ref": reply["refNoForPay"],
+            "secure_hash": reply["secureHash"],
+            "process_time": now.strftime("%Y%m%d%H%M%S"),
+        }
+
+    async def gateway_params(self) -> dict:
+        reply = await self._post(GATEWAY_PATH, {"channel": int(CHANNEL), "function": "onlinePayment"})
+        if not reply.get("paymentGatwayUrl") or not reply.get("merchantId"):
+            raise ParkingError(f"gateway params: {reply!r}")
+        return reply
+
+    async def pay_link(self, status: ParkingStatus, scheduled_exit: datetime,
+                       amount: float, now: datetime) -> tuple[str, dict]:
+        payment = await self.create_payment(status, scheduled_exit, amount, now)
+        gateway = await self.gateway_params()
+        return build_pay_url(gateway, payment, amount, self.email), payment
+
+
+def callback_token(action: str, status_word: str, email: str, payment_ref: str, process_time: str) -> str:
+    # HKIA's page encodes its own post-payment routing into the callback
+    # URLs; the gateway bounces the browser back to that page with the token
+    # and the page reads it. Reproduced byte for byte.
+    raw = (f"action={action}&email={email}&paymentNo={payment_ref}"
+           f"&processTime={process_time}&function=onlinepayment&status={status_word}")
+    return base64.b64encode(raw.encode()).decode()
+
+
+def build_pay_url(gateway: dict, payment: dict, amount: float, email: str, lang: str = "C") -> str:
+    # PayDollar's form endpoint accepts the same fields as a GET, which is
+    # what lets a Telegram button open the payment page directly.
+    def cb(key: str, action: str, status_word: str) -> str:
+        base = gateway[key].replace("/en/", "/tc/")
+        tok = callback_token(action, status_word, email, payment["payment_ref"], payment["process_time"])
+        return f"{base}?token={tok}&lang=tc"
+
+    amount_str = f"{amount:g}"
+    params = [
+        ("merchantId", gateway["merchantId"]),
+        ("orderRef", payment["order_ref"]),
+        ("amount", amount_str),
+        ("currCode", gateway.get("currCode", "344")),
+        ("payType", gateway.get("payType", "N")),
+        ("payMethod", gateway.get("payMethod", "ALL")),
+        ("mpsMode", ""),
+        ("lang", lang),
+        ("secureHash", payment["secure_hash"]),
+        ("successUrl", cb("successUrl", "CONFIRMED", "pay-success")),
+        ("failUrl", cb("failUrl", "FAILED", "fail")),
+        ("cancelUrl", cb("cancelUrl", "CANCELLED", "cancel")),
+    ]
+    return gateway["paymentGatwayUrl"] + "?" + urlencode(params)
