@@ -770,7 +770,7 @@ async def _close_visit(bot, chat_id: int, session: dict, exit_at: datetime, now:
         tail = f"已付 ${(session.get('paid_amount') or 0):g}" if session.get("paid_amount") else "已付（網上）"
     else:
         tail = "閘口找數"
-    msg = f"已出閘 {exit_at.strftime('%H:%M')}，泊 {stayed} 分鐘 — {tail}"
+    msg = f"已出閘 {exit_at.strftime('%H:%M')}，泊 {stayed} 分鐘 | {tail}"
     order_id = session.get("order_id")
     if order_id and kind == "free":
         update_cost(DB_PATH, order_id, "parking", 0)
