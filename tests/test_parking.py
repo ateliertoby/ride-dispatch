@@ -1,11 +1,17 @@
+import asyncio
+import base64
+import json
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, parse_qs
 
+import httpx
 import pytest
 
 from ride_dispatch.parking import (
     ParkingError, ParkingStatus, parse_status, api_time, from_api_time,
     db_time, from_db_time, free_available, next_free_at, pay_plan, classify,
     arming_orders, is_armed, pick_order, FREE_MINUTES,
+    ParkingClient, callback_token, build_pay_url, BASE_URL,
 )
 from ride_dispatch.flight import landing_datetime
 
@@ -147,3 +153,125 @@ def test_pick_order_closest_landing_to_entry():
     b = order(order_id="B", flight_eta="19:10")
     assert pick_order([a, b], datetime(2026, 8, 23, 19, 5))["order_id"] == "B"
     assert pick_order([], datetime(2026, 8, 23, 19, 5)) is None
+
+
+STORE_REPLY = {"resultCode": 200, "resultMessage": "", "requestDateTime": "2026-08-23T10:59:46.497Z",
+               "paymentRefNo": "PPR9WOO9V", "refNoForPay": "PPR9WOO9V20260823105946409",
+               "secureHash": "1d5edb3d09a7e5912f3b2e1c8cf2ec51c8442c0d"}
+GATEWAY_REPLY = {"merchantId": "88615152",
+                 "paymentGatwayUrl": "https://www.paydollar.com/b2c2/eng/payment/payForm.jsp",
+                 "currCode": "344", "payType": "N", "payMethod": "ALL",
+                 "cancelUrl": "https://www.hongkongairport.com/en/transport/parking/car-park-booking.page",
+                 "failUrl": "https://www.hongkongairport.com/en/transport/parking/car-park-booking.page",
+                 "successUrl": "https://www.hongkongairport.com/en/transport/parking/car-park-booking.page",
+                 "resultCode": "200"}
+
+
+def _transport(routes: dict):
+    """routes: path -> (status, json) or callable(request) -> httpx.Response."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, json.loads(request.content or b"{}")))
+        r = routes[request.url.path]
+        if callable(r):
+            return r(request)
+        status, body = r
+        return httpx.Response(status, json=body)
+
+    return httpx.MockTransport(handler), calls
+
+
+def test_query_sends_plate_and_parses_inside():
+    transport, calls = _transport({"/api/booking/getOnlinePayInfo": (200, INSIDE_UNPAID)})
+    c = ParkingClient("yy3953", "me@example.com", transport=transport)
+    s = asyncio.run(c.query())
+    assert s.inside and s.pv_nr == 212022
+    path, body = calls[0]
+    assert body["carPlateNo"] == "YY3953" and body["cardNumber"] == "YY3953"
+    assert body["entryMethod"] == 3 and body["channel"] == "1" and body["scheduleExit"] is None
+
+
+def test_query_treats_412_not_inside_as_status():
+    transport, _ = _transport({"/api/booking/getOnlinePayInfo": (412, NOT_INSIDE)})
+    c = ParkingClient("YY3953", "me@example.com", transport=transport)
+    assert asyncio.run(c.query()).inside is False
+
+
+def test_query_raises_on_network_and_garbage():
+    def boom(request):
+        raise httpx.ConnectError("down")
+    transport, _ = _transport({"/api/booking/getOnlinePayInfo": boom})
+    with pytest.raises(ParkingError):
+        asyncio.run(ParkingClient("YY3953", "x", transport=transport).query())
+    transport, _ = _transport({"/api/booking/getOnlinePayInfo": lambda r: httpx.Response(200, text="<html>")})
+    with pytest.raises(ParkingError):
+        asyncio.run(ParkingClient("YY3953", "x", transport=transport).query())
+
+
+def test_fee_for_exit_fills_location_pvnr_and_schedule():
+    transport, calls = _transport({"/api/booking/getOnlinePayInfo": (200, FEE_FOR_EXIT)})
+    c = ParkingClient("YY3953", "x", transport=transport)
+    status = parse_status(INSIDE_UNPAID)
+    fee = asyncio.run(c.fee_for_exit(status, datetime(2026, 8, 23, 19, 48)))
+    assert fee.fee == 32
+    _, body = calls[0]
+    assert body["scheduleExit"] == "202608231948" and body["PvNr"] == 212022 and body["parkingLocation"] == "P4O"
+
+
+def test_create_payment_body_and_result():
+    transport, calls = _transport({"/api/booking/storeOnlinePayment": (200, STORE_REPLY)})
+    c = ParkingClient("YY3953", "me@example.com", transport=transport)
+    status = parse_status(INSIDE_UNPAID)
+    now = datetime(2026, 8, 23, 18, 59, 46)
+    p = asyncio.run(c.create_payment(status, datetime(2026, 8, 23, 19, 48), 32, now))
+    _, body = calls[0]
+    assert body == {"entryMethod": 3, "cardNo": "YY3953", "carPlateNo": "YY3953", "parkingLocation": "P4O",
+                    "entryDateTime": "202608231848", "exitDateTime": "202608231948", "paymentAmt": 32,
+                    "paymentCurrency": "HKD", "emailAddress": "me@example.com", "channel": 1,
+                    "timeStamp": "2026-08-23 18:59", "PvNr": 212022}
+    assert p == {"payment_ref": "PPR9WOO9V", "order_ref": "PPR9WOO9V20260823105946409",
+                 "secure_hash": "1d5edb3d09a7e5912f3b2e1c8cf2ec51c8442c0d", "process_time": "20260823185946"}
+
+
+def test_create_payment_raises_on_bad_result_code():
+    transport, _ = _transport({"/api/booking/storeOnlinePayment": (200, {"resultCode": 500})})
+    with pytest.raises(ParkingError):
+        asyncio.run(ParkingClient("YY3953", "x", transport=transport)
+                    .create_payment(parse_status(INSIDE_UNPAID), datetime(2026, 8, 23, 19, 48), 32, NOW))
+
+
+def test_callback_token_matches_hkia_format():
+    tok = callback_token("CONFIRMED", "pay-success", "me@example.com", "PPR9WOO9V", "20260823185946")
+    decoded = base64.b64decode(tok).decode()
+    assert decoded == ("action=CONFIRMED&email=me@example.com&paymentNo=PPR9WOO9V"
+                       "&processTime=20260823185946&function=onlinepayment&status=pay-success")
+
+
+def test_build_pay_url_is_get_with_every_form_field():
+    payment = {"payment_ref": "PPR9WOO9V", "order_ref": "PPR9WOO9V20260823105946409",
+               "secure_hash": "abc", "process_time": "20260823185946"}
+    url = build_pay_url(GATEWAY_REPLY, payment, 32, "me@example.com")
+    parsed = urlparse(url)
+    assert parsed.netloc == "www.paydollar.com" and parsed.path == "/b2c2/eng/payment/payForm.jsp"
+    q = parse_qs(parsed.query, keep_blank_values=True)
+    assert q["merchantId"] == ["88615152"] and q["orderRef"] == ["PPR9WOO9V20260823105946409"]
+    assert q["amount"] == ["32"] and q["currCode"] == ["344"] and q["payType"] == ["N"]
+    assert q["payMethod"] == ["ALL"] and q["mpsMode"] == [""] and q["lang"] == ["C"]
+    assert q["secureHash"] == ["abc"]
+    for key, status_word in (("successUrl", "pay-success"), ("failUrl", "fail"), ("cancelUrl", "cancel")):
+        cb = urlparse(q[key][0])
+        assert cb.path == "/tc/transport/parking/car-park-booking.page"
+        cbq = parse_qs(cb.query)
+        assert cbq["lang"] == ["tc"]
+        assert base64.b64decode(cbq["token"][0]).decode().endswith(f"&status={status_word}")
+
+
+def test_pay_link_chains_store_and_gateway():
+    transport, calls = _transport({"/api/booking/storeOnlinePayment": (200, STORE_REPLY),
+                                   "/api/booking/payDollarParametersForIntegration": (200, GATEWAY_REPLY)})
+    c = ParkingClient("YY3953", "me@example.com", transport=transport)
+    url, payment = asyncio.run(c.pay_link(parse_status(INSIDE_UNPAID), datetime(2026, 8, 23, 19, 48), 32, NOW))
+    assert url.startswith("https://www.paydollar.com/") and payment["payment_ref"] == "PPR9WOO9V"
+    assert [p for p, _ in calls] == ["/api/booking/storeOnlinePayment", "/api/booking/payDollarParametersForIntegration"]
+    assert calls[1][1] == {"channel": 1, "function": "onlinePayment"}
