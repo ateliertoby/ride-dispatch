@@ -258,6 +258,30 @@ async def handle_callback(update: Update, context):
             ),
         )
 
+    elif query.data.startswith("park:pay:"):
+        session_id = int(query.data.rsplit(":", 1)[1])
+        session = get_parking_session(DB_PATH, session_id)
+        await query.answer()
+        if not session or session.get("exit_time"):
+            await query.message.reply_text("搵唔到呢次泊車，或者已經出咗閘。")
+            return
+        client = _get_parking_client()
+        if client is None:
+            await query.message.reply_text("未設定 CAR_PLATE。")
+            return
+        now = datetime.now()
+        try:
+            status = await client.query()
+            if not status.inside:
+                await query.message.reply_text("架車已經唔喺停車場。")
+                return
+            # Every tap makes a new gateway order: a link's lifetime is
+            # unknown and a stale one fails silently at the gateway.
+            await _send_pay_link(context.application.bot, query.message.chat_id, session, status, now)
+        except ParkingError as e:
+            _parking_logger.warning("pay link failed: %s", e)
+            await query.message.reply_text("出唔到 link，再撳。")
+
     elif query.data.startswith("waive:"):
         _, cost_type, order_id = query.data.split(":", 2)
         update_cost(DB_PATH, order_id, cost_type, 0)
@@ -434,6 +458,44 @@ async def handle_board(update: Update, context):
             label += f" {flight}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"board:{o['order_id']}")])
     await msg.reply_text("揀邊張生成舉牌相：", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def handle_parking(update: Update, context):
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    client = _get_parking_client()
+    if client is None:
+        await msg.reply_text("未設定 CAR_PLATE，停車場功能關閉。")
+        return
+    now = datetime.now()
+    lines = []
+    session = get_open_parking_session(DB_PATH)
+    if session:
+        entry = _session_entry(session)
+        try:
+            status = await client.query()
+            minutes = status.park_minutes if status.inside and status.park_minutes is not None else int((now - entry).total_seconds() // 60)
+        except ParkingError:
+            minutes = int((now - entry).total_seconds() // 60)
+        state = "已付" if session.get("paid") else "未付"
+        lines.append(f"喺 {session.get('location_name') or session.get('location')} 入咗 {entry.strftime('%H:%M')}，泊咗 {minutes} 分鐘，{state}")
+    else:
+        lines.append("架車唔喺停車場")
+    lines.append(_allowance_line(now))
+    history = recent_parking_sessions(DB_PATH, 5)
+    if history:
+        lines.append("")
+        for s in history:
+            entry = _session_entry(s)
+            if s.get("exit_time"):
+                exit_at = from_db_time(s["exit_time"])
+                stayed = int((exit_at - entry).total_seconds() // 60)
+                kind = "免費" if s.get("free") else ("已付" if s.get("paid") else "閘口")
+                lines.append(f"{entry.strftime('%m-%d %H:%M')} 泊 {stayed} 分鐘 {kind}")
+            else:
+                lines.append(f"{entry.strftime('%m-%d %H:%M')} 泊緊")
+    await msg.reply_text("\n".join(lines), reply_markup=_pay_button(session["id"]) if session and not session.get("paid") else None)
 
 
 async def handle_start(update: Update, context):
@@ -1071,6 +1133,10 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
             msg += f" | 大堂{hall}"
         if order_data:
             msg += _order_lines(order_data, eta)
+        # The driver decides here whether to wait outside for the free half
+        # hour or go in and rest, so the verdict rides on this message.
+        if _get_parking_client() is not None:
+            msg += "\n" + _allowance_line(datetime.now())
         await bot.send_message(chat_id=chat_id, text=msg)
         # Offer the whiteboard sign on landing. The tag is written here, before
         # any image exists, so the landed→gate double transition cannot prompt
@@ -1086,6 +1152,8 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
             msg += f" | 大堂{hall}"
         if order_data:
             msg += _order_lines(order_data, order_data.get("flight_eta"))
+        if _get_parking_client() is not None:
+            msg += "\n" + _allowance_line(datetime.now())
         await bot.send_message(chat_id=chat_id, text=msg)
     if new == "cancelled" and old != "cancelled":
         msg = "航班取消"
@@ -1101,6 +1169,7 @@ async def _set_commands(app):
         BotCommand("uber", "Uber 快速入單"),
         BotCommand("cancel", "取消訂單"),
         BotCommand("board", "生成舉牌相"),
+        BotCommand("parking", "停車場狀態"),
     ])
 
 
@@ -1186,6 +1255,7 @@ def main():
     app.add_handler(CommandHandler("uber", handle_uber))
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CommandHandler("board", handle_board))
+    app.add_handler(CommandHandler("parking", handle_parking))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)

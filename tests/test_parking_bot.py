@@ -239,3 +239,113 @@ def test_allowance_line(db_path, monkeypatch):
     close_parking_session(db_path, sid, exit_time="2026-08-23 13:55", free=1)
     assert bot._allowance_line(now) == "停車場 免費已用 13:40，明日 13:40 後先有"
     assert bot._allowance_line(datetime(2026, 8, 24, 10, 0)) == "停車場 免費已用 昨日 13:40，今日 13:40 後先有"
+
+
+def _freeze_clock(monkeypatch, when: datetime):
+    """Pin bot.datetime.now() so a handler that reads the wall clock is testable."""
+    class _Fixed(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when
+
+    monkeypatch.setattr(bot, "datetime", _Fixed)
+
+
+def _callback(data, chat_id=123):
+    q = MagicMock()
+    q.data = data
+    q.message.chat_id = chat_id
+    q.message.message_id = 7
+    q.answer = AsyncMock()
+    q.message.reply_text = AsyncMock()
+    upd = MagicMock()
+    upd.callback_query = q
+    ctx = MagicMock()
+    ctx.application.bot = MagicMock()
+    ctx.application.bot.send_message = AsyncMock()
+    return upd, ctx, q
+
+
+def test_pay_callback_sends_link_and_records(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    client = FakeClient([inside(1), inside(10)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    _freeze_clock(monkeypatch, ENTRY + timedelta(minutes=10))
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    assert client.links == 1
+    sent = ctx.application.bot.send_message.call_args
+    assert "$32 泊到 19:48" in sent.kwargs["text"]
+    assert sent.kwargs["reply_markup"].inline_keyboard[0][0].url.startswith("https://www.paydollar.com/")
+    s = get_parking_session(db_path, sid)
+    assert s["payment_ref"] == "REF1" and s["scheduled_exit"] == "2026-08-23 19:48" and s["auto_link_sent"] == 0
+    q.answer.assert_awaited()
+
+
+def test_pay_callback_when_not_inside_or_failed(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx, q = _callback("park:pay:999")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    q.answer.assert_awaited()
+    assert "搵唔到" in q.message.reply_text.call_args.args[0]
+
+    client = FakeClient([inside(1), ParkingError("down")])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    assert "再撳" in q.message.reply_text.call_args.args[0]
+
+
+def _command(chat_id=123):
+    upd = MagicMock()
+    upd.message.chat_id = chat_id
+    upd.message.reply_text = AsyncMock()
+    ctx = MagicMock()
+    ctx.args = []
+    return upd, ctx
+
+
+def test_parking_command_inside_and_history(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    client = FakeClient([inside(1), inside(12)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    run(tg, ENTRY + timedelta(minutes=1))
+    upd, ctx = _command()
+    asyncio.run(bot.handle_parking(upd, ctx))
+    out = upd.message.reply_text.call_args.args[0]
+    assert "Car Park 4" in out and "18:48" in out and "12 分鐘" in out
+    assert "免費可用" in out
+    assert "18:48" in out   # history line
+
+
+def test_parking_command_when_unconfigured(db_path, monkeypatch):
+    monkeypatch.setattr(bot, "_parking_client", None)
+    monkeypatch.setattr(bot, "_parking_client_built", True)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx = _command()
+    asyncio.run(bot.handle_parking(upd, ctx))
+    assert "CAR_PLATE" in upd.message.reply_text.call_args.args[0]
+
+
+def test_landing_push_carries_allowance_line(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
+    info = {"scheduled": "18:50", "eta": "18:48", "gate": None, "status": "landed", "hall": "A"}
+    asyncio.run(bot._notify_status_change(tg, 123, "O1", info, "est", "landed"))
+    assert "停車場 免費可用" in texts(tg)[0]
+
+
+def test_landing_push_has_no_allowance_line_when_off(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", None)
+    monkeypatch.setattr(bot, "_parking_client_built", True)
+    info = {"scheduled": "18:50", "eta": "18:48", "gate": None, "status": "landed", "hall": "A"}
+    asyncio.run(bot._notify_status_change(tg, 123, "O1", info, "est", "landed"))
+    assert "停車場" not in texts(tg)[0]
