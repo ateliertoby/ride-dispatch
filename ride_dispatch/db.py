@@ -86,6 +86,32 @@ def init_db(db_path: str):
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        # One row per car park visit. pv_nr is HKIA's own visit number, so a
+        # bot restart mid-visit finds the open row again instead of opening
+        # a second one. `free` is derived exactly once, at close, from paid
+        # and the stay length; storing it keeps the 24h allowance check a
+        # single indexed read.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS parking_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pv_nr INTEGER UNIQUE,
+                plate TEXT,
+                location TEXT,
+                location_name TEXT,
+                entry_time TEXT,
+                exit_time TEXT,
+                paid INTEGER DEFAULT 0,
+                paid_amount REAL,
+                scheduled_exit TEXT,
+                payment_ref TEXT,
+                link_sent_at TEXT,
+                auto_link_sent INTEGER DEFAULT 0,
+                free INTEGER,
+                order_id TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_parking_free ON parking_sessions(free, entry_time)")
         conn.commit()
 
 
@@ -504,3 +530,76 @@ def get_settle_month(db_path: str, month: str, platform: str,
         "orders": orders,
         "settlements": settlements,
     }
+
+
+# --- car park visits ---
+
+PARKING_UPDATABLE = {"paid", "paid_amount", "scheduled_exit", "payment_ref",
+                     "link_sent_at", "auto_link_sent", "order_id"}
+
+
+def open_parking_session(db_path: str, *, pv_nr: int, plate: str, location: str | None,
+                         location_name: str | None, entry_time: str, order_id: str | None) -> int:
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO parking_sessions (pv_nr, plate, location, location_name, entry_time, order_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (pv_nr, plate, location, location_name, entry_time, order_id),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def get_open_parking_session(db_path: str) -> dict | None:
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM parking_sessions WHERE exit_time IS NULL ORDER BY entry_time DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_parking_session(db_path: str, session_id: int) -> dict | None:
+    with _conn(db_path) as conn:
+        row = conn.execute("SELECT * FROM parking_sessions WHERE id = ?", (session_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_parking_session(db_path: str, session_id: int, **fields):
+    bad = set(fields) - PARKING_UPDATABLE
+    if bad:
+        raise ValueError(f"not updatable: {sorted(bad)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    with _conn(db_path) as conn:
+        conn.execute(
+            f"UPDATE parking_sessions SET {assignments} WHERE id = ?",
+            (*fields.values(), session_id),
+        )
+        conn.commit()
+
+
+def close_parking_session(db_path: str, session_id: int, exit_time: str, free: int):
+    with _conn(db_path) as conn:
+        conn.execute(
+            "UPDATE parking_sessions SET exit_time = ?, free = ? WHERE id = ?",
+            (exit_time, free, session_id),
+        )
+        conn.commit()
+
+
+def recent_parking_sessions(db_path: str, limit: int = 5) -> list[dict]:
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM parking_sessions ORDER BY entry_time DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def free_parking_entries_since(db_path: str, cutoff: str) -> list[str]:
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT entry_time FROM parking_sessions WHERE free = 1 AND entry_time > ? ORDER BY entry_time",
+            (cutoff,),
+        ).fetchall()
+        return [r["entry_time"] for r in rows]
