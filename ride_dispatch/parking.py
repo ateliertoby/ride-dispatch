@@ -26,6 +26,9 @@ load_dotenv()
 FREE_MINUTES = 30          # leave within this and the visit is free (once per 24h)
 FREE_WINDOW_HOURS = 24     # rolling, from the free visit's entry time
 HOUR_MINUTES = 60
+# Published hourly tariff. Used only to preview a cost before any link is
+# generated; every amount actually sent to the gateway comes from the API.
+HOURLY_FEE = 32
 GRACE_MINUTES = 30         # granted after the paid-until time
 AUTO_LINK_MINUTE = 50      # unpaid this long inside -> send a link unprompted
 ARM_BEFORE_MINUTES = 30    # poll from this long before predicted landing
