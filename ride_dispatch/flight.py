@@ -70,6 +70,19 @@ def predicted_landing_hhmm(order: dict) -> str | None:
     return f"{total // 60 % 24:02d}:{total % 60:02d}"
 
 
+def landing_datetime(order: dict) -> datetime | None:
+    # predicted_landing_hhmm is a bare HH:MM; pin it to the order's date the
+    # same way the matcher does, so red-eye landings fall on the right day.
+    hhmm = predicted_landing_hhmm(order)
+    if not hhmm:
+        return None
+    try:
+        sched = datetime.strptime(order.get("scheduled_time") or "", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return _attach_date(hhmm, sched)
+
+
 def depart_hhmm(order: dict) -> str | None:
     """When the driver should leave for the airport: landing + exit - drive."""
     exit_min = order.get("passenger_exit_minutes")
