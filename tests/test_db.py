@@ -102,6 +102,83 @@ def test_duplicate_order_id_raises(db_path):
         save_order(db_path, order, telegram_msg_id=2)
 
 
+# ---- re-entry of a cancelled order ----
+
+def raw_row(db_path, order_id):
+    from ride_dispatch.db import _conn
+    with _conn(db_path) as conn:
+        row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def test_save_or_revive_inserts_when_free(db_path):
+    from ride_dispatch.db import save_or_revive_order
+    assert save_or_revive_order(db_path, make_order(), telegram_msg_id=1) is False
+    assert raw_row(db_path, "TEST001")["status"] == "active"
+
+
+def test_save_or_revive_active_duplicate_raises(db_path):
+    import sqlite3
+    from ride_dispatch.db import save_or_revive_order
+    save_or_revive_order(db_path, make_order(), telegram_msg_id=1)
+    with pytest.raises(sqlite3.IntegrityError):
+        save_or_revive_order(db_path, make_order(dropoff="中環"), telegram_msg_id=2)
+    assert raw_row(db_path, "TEST001")["dropoff"] == "尖沙咀"
+
+
+def test_save_or_revive_overwrites_cancelled_row(db_path):
+    from ride_dispatch.db import (_conn, cancel_order, mark_reminder_sent, save_or_revive_order,
+                                  update_cost, update_price)
+    save_or_revive_order(db_path, make_order(), telegram_msg_id=1, parking=32.0, source="携程")
+    update_price(db_path, "TEST001", 500.0)
+    update_cost(db_path, "TEST001", "tunnel", 50.0)
+    update_flight_info(db_path, "TEST001", scheduled="14:40", eta="14:26", gate="14:35",
+                       status="gate", hall="A")
+    mark_reminder_sent(db_path, "TEST001", "landed")
+    with _conn(db_path) as conn:
+        conn.execute("UPDATE orders SET estimated_landing = '2026-06-27 14:26:00', "
+                     "created_at = '2020-01-01 00:00:00' WHERE order_id = 'TEST001'")
+        conn.commit()
+    cancel_order(db_path, "TEST001")
+    before = raw_row(db_path, "TEST001")
+
+    again = make_order(scheduled_time="2026-06-28 08:00:00", flight_number="CX200",
+                       passenger_name="NEW/NAME", dropoff="中環", driver_notes="改咗地址",
+                       additional_services="举牌服务")
+    assert save_or_revive_order(db_path, again, telegram_msg_id=2, parking=0.0, source="同程") is True
+
+    row = raw_row(db_path, "TEST001")
+    assert row["id"] == before["id"]                      # same row, not a second one
+    assert row["status"] == "active"
+    assert row["scheduled_time"] == "2026-06-28 08:00:00"
+    assert row["flight_number"] == "CX200"
+    assert row["passenger_name"] == "NEW/NAME"
+    assert row["dropoff"] == "中環"
+    assert row["driver_notes"] == "改咗地址"
+    assert row["telegram_msg_id"] == 2
+    assert row["source"] == "同程"
+    assert row["parking_fee"] == 0.0
+    assert row["banner_fee"] == 40.0                      # re-derived from the new message
+    assert row["price"] is None                           # a re-booked leg is repriced
+    assert row["tunnel_fee"] == 0
+    assert row["reminders_sent"] == ""
+    for col in ("flight_scheduled", "flight_eta", "flight_gate", "flight_status",
+                "flight_hall", "estimated_landing"):
+        assert row[col] is None
+    assert row["settlement_id"] is None
+    assert row["created_at"] > "2020-01-01 00:00:00"
+
+
+def test_revive_leaves_one_row_and_one_active_order(db_path):
+    from ride_dispatch.db import _conn, cancel_order, count_active_orders, save_or_revive_order
+    save_or_revive_order(db_path, make_order(), telegram_msg_id=1)
+    cancel_order(db_path, "TEST001")
+    save_or_revive_order(db_path, make_order(), telegram_msg_id=2)
+    with _conn(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
+    assert count_active_orders(db_path) == 1
+
+
 def test_get_pickup_flights(db_path):
     save_order(db_path, make_order(order_id="P1", service_type="接机", flight_number="CX100", scheduled_time="2026-06-27 11:00:00"), 1)
     save_order(db_path, make_order(order_id="P2", service_type="送机", flight_number="QW916", scheduled_time="2026-06-27 12:00:00"), 2)
@@ -186,15 +263,27 @@ def test_flight_columns_null_by_default(db_path):
     assert rows[0]["flight_status"] is None
 
 
-def test_order_id_exists(tmp_path):
-    from ride_dispatch.db import init_db, save_quick_order, order_id_exists, update_order_fields
+def test_active_order_id_exists(tmp_path):
+    from ride_dispatch.db import init_db, save_quick_order, active_order_id_exists, update_order_fields
     path = str(tmp_path / "t.db")
     init_db(path)
-    assert order_id_exists(path, "Q9") is False
+    assert active_order_id_exists(path, "Q9") is False
     save_quick_order(path, "Q9", "滴滴", "2026-07-01 10:00:00", 100.0, 0.0)
-    assert order_id_exists(path, "Q9") is True
+    assert active_order_id_exists(path, "Q9") is True
     update_order_fields(path, "Q9", {"status": "cancelled"})
-    assert order_id_exists(path, "Q9") is True  # cancelled orders still hold the order_id (UNIQUE column)
+    # A cancelled row still holds the order_id (UNIQUE column) but re-entry revives it
+    assert active_order_id_exists(path, "Q9") is False
+
+
+def test_order_status(tmp_path):
+    from ride_dispatch.db import init_db, save_quick_order, order_status, update_order_fields
+    path = str(tmp_path / "t.db")
+    init_db(path)
+    assert order_status(path, "Q9") is None
+    save_quick_order(path, "Q9", "滴滴", "2026-07-01 10:00:00", 100.0, 0.0)
+    assert order_status(path, "Q9") == "active"
+    update_order_fields(path, "Q9", {"status": "cancelled"})
+    assert order_status(path, "Q9") == "cancelled"
 
 
 def test_resolve_db_path_expands_tilde(monkeypatch):
@@ -295,6 +384,17 @@ def test_create_settlement_rejects_cancelled(db_path):
     with pytest.raises(ValueError, match="GONE"):
         create_settlement(db_path, "ride", ["GONE"], 500.0, "2026-08-20", now=NOW)
     assert count_settlements(db_path) == 0
+
+
+def test_revived_order_can_be_settled(db_path):
+    from ride_dispatch.db import cancel_order, create_settlement, save_or_revive_order, update_price
+    order = make_order(order_id="RV1", scheduled_time="2026-08-17 09:00:00")
+    save_or_revive_order(db_path, order, telegram_msg_id=1)
+    cancel_order(db_path, "RV1")
+    assert save_or_revive_order(db_path, order, telegram_msg_id=2) is True
+    update_price(db_path, "RV1", 500.0)
+    sid = create_settlement(db_path, "ride", ["RV1"], 500.0, "2026-08-20", now=NOW)
+    assert settlement_id_of(db_path, "RV1") == sid
 
 
 def test_create_settlement_rejects_missing_order(db_path):

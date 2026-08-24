@@ -165,6 +165,13 @@ def test_parse_preview_duplicate_flag(client):
     assert res.get_json()["duplicate"] is True
 
 
+def test_parse_preview_cancelled_is_not_duplicate(client):
+    seed_order(order_id="1128000000000099")
+    client.patch("/api/orders/1128000000000099", json={"status": "cancelled"})
+    res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
+    assert res.get_json()["duplicate"] is False
+
+
 def test_parse_preview_rejects_garbage(client):
     assert client.post("/api/orders/parse", json={"text": "唔係單"}).status_code == 400
     assert client.post("/api/orders/parse", json={}).status_code == 400
@@ -214,6 +221,27 @@ def test_paste_duplicate_409(client):
     client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
     res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
     assert res.status_code == 409
+
+
+def test_paste_revives_cancelled_order(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    client.patch("/api/orders/1128000000000099", json={"status": "cancelled"})
+    assert get_order_by_id(web.DB_PATH, "1128000000000099") is None
+
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 620})
+    assert res.status_code == 201
+    data = res.get_json()
+    assert data["order_id"] == "1128000000000099"
+    assert data["revived"] is True
+
+    listed = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    assert [o["order_id"] for o in listed] == ["1128000000000099"]
+    assert listed[0]["price"] == 620
+
+
+def test_paste_new_order_is_not_revived(client):
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    assert res.get_json()["revived"] is False
 
 
 def test_paste_rejects_bad_input(client):
