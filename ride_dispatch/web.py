@@ -18,8 +18,8 @@ from .db import (
     get_order_by_id,
     get_settle_month,
     mark_settlement_paid,
-    order_id_exists,
-    save_order,
+    active_order_id_exists,
+    save_or_revive_order,
     save_quick_order,
     update_order_fields,
     update_price,
@@ -119,7 +119,7 @@ def api_parse_order():
         "source": source,
         "parking_fee": parking_fee(order, source),
         "banner_fee": banner_fee(order.additional_services),
-        "duplicate": order_id_exists(DB_PATH, order.order_id),
+        "duplicate": active_order_id_exists(DB_PATH, order.order_id),
         "suggested_price": suggest_price(DB_PATH, order),
         "exit_urgency": exit_urgency(order.passenger_exit_minutes),
     })
@@ -170,15 +170,16 @@ def _create_paste_order(body):
         if perr:
             return perr
     try:
-        save_order(DB_PATH, order, telegram_msg_id=None,
-                   parking=parking_fee(order, source), source=source)
+        revived = save_or_revive_order(DB_PATH, order, telegram_msg_id=None,
+                                       parking=parking_fee(order, source), source=source)
     except sqlite3.IntegrityError:
         return jsonify({"error": "訂單已存在"}), 409
     if price is not None:
         update_price(DB_PATH, order.order_id, price)
     _kick_bot()
     return jsonify({"order_id": order.order_id,
-                    "date": order.scheduled_time.split(" ")[0]}), 201
+                    "date": order.scheduled_time.split(" ")[0],
+                    "revived": revived}), 201
 
 
 def _sock_path():

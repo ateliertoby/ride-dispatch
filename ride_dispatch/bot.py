@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_order, save_quick_order, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -152,10 +152,11 @@ async def handle_message(update: Update, context):
         parking = parking_fee(pending_order, source)
         banner = banner_fee(pending_order.additional_services)
         try:
-            save_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
+            revived = save_or_revive_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
             update_price(DB_PATH, pending_order.order_id, price)
             _kick_poll(context)
-            reply = f"已入單 #{pending_order.order_id[-4:]}: ${price:g}"
+            head = "已重新入單" if revived else "已入單"
+            reply = f"{head} #{pending_order.order_id[-4:]}: ${price:g}"
             if banner:
                 reply += "（+舉牌$40）"
             await msg.reply_text(reply)
@@ -195,11 +196,16 @@ async def handle_callback(update: Update, context):
         try:
             parking = parking_fee(order, source)
             banner = banner_fee(order.additional_services)
-            prompt = f"訂單 #{order.order_id[-4:]} 已保存。直接打價錢。"
+            # Wording only: the prompt has to exist before the save because its
+            # message id becomes the row's telegram_msg_id (a reply to it sets
+            # the price).  The new-vs-revived decision itself stays inside
+            # save_or_revive_order.
+            head = "重新入單" if order_status(DB_PATH, order.order_id) == "cancelled" else "已保存"
+            prompt = f"訂單 #{order.order_id[-4:]} {head}。直接打價錢。"
             if banner:
                 prompt += f"（會自動加${banner:g}舉牌費）"
             sent = await query.message.reply_text(prompt)
-            save_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
+            save_or_revive_order(DB_PATH, order, telegram_msg_id=sent.message_id, parking=parking, source=source)
             _kick_poll(context)
             awaiting_price[query.message.chat_id] = (order.order_id, banner)
             await query.message.edit_reply_markup(reply_markup=None)

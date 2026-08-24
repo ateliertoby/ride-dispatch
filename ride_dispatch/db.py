@@ -115,35 +115,86 @@ def init_db(db_path: str):
         conn.commit()
 
 
-_INSERT_SQL = """
-    INSERT INTO orders (
-        order_id, service_type, vehicle_type, passenger_name,
-        scheduled_time, passenger_phone, overseas_phone, flight_number,
-        pickup, dropoff, distance_km, notes, driver_notes,
-        additional_services, passenger_exit_minutes,
-        third_party_contact, more_contacts, raw_message, telegram_msg_id,
-        parking_fee, banner_fee, source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
+# Every column an entered order writes, in one list: the insert and the revive
+# must stay in step, so both are built from it.
+_ORDER_COLS = (
+    "order_id", "service_type", "vehicle_type", "passenger_name",
+    "scheduled_time", "passenger_phone", "overseas_phone", "flight_number",
+    "pickup", "dropoff", "distance_km", "notes", "driver_notes",
+    "additional_services", "passenger_exit_minutes",
+    "third_party_contact", "more_contacts", "raw_message", "telegram_msg_id",
+    "parking_fee", "banner_fee", "source",
+)
+
+_INSERT_SQL = (
+    f"INSERT INTO orders ({', '.join(_ORDER_COLS)}) "
+    f"VALUES ({', '.join('?' * len(_ORDER_COLS))})"
+)
+
+# Re-entering a cancelled leg overwrites its row instead of adding one: the
+# platform re-books under the same order number, and the new message is the
+# current truth.  Everything the old booking derived is dropped with it —
+# price/tunnel_fee because the re-booked leg may be priced differently and a
+# stale price would silently suppress the 未入價 nudge, and the flight and
+# reminder state so the tracker re-matches from scratch.  created_at answers
+# "when was this active order entered", which is now.  settlement_id is
+# necessarily NULL here (a batched order cannot be cancelled, and a cancelled
+# one cannot be batched) and is deliberately left alone.
+_REVIVE_SQL = (
+    f"UPDATE orders SET {', '.join(f'{c} = ?' for c in _ORDER_COLS)}, "
+    "status = 'active', price = NULL, tunnel_fee = 0, "
+    "flight_scheduled = NULL, flight_eta = NULL, flight_gate = NULL, "
+    "flight_status = NULL, flight_hall = NULL, estimated_landing = NULL, "
+    "reminders_sent = '', created_at = datetime('now') "
+    "WHERE order_id = ? AND status = 'cancelled'"
+)
+
+
+def _order_params(order: Order, telegram_msg_id: int | None, parking: float, source: str) -> tuple:
+    return (
+        order.order_id, order.service_type, order.vehicle_type,
+        order.passenger_name, order.scheduled_time, order.passenger_phone,
+        order.overseas_phone, order.flight_number, order.pickup,
+        order.dropoff, order.distance_km, order.notes, order.driver_notes,
+        order.additional_services, order.passenger_exit_minutes,
+        order.third_party_contact, order.more_contacts, order.raw_message,
+        telegram_msg_id, parking, banner_fee(order.additional_services), source,
+    )
 
 
 def save_order(db_path: str, order: Order, telegram_msg_id: int, parking: float = 0.0, source: str = "") -> int:
-    banner = banner_fee(order.additional_services)
+    """Plain insert; any existing row on the order_id raises sqlite3.IntegrityError.
+
+    Order entry goes through save_or_revive_order instead — a cancelled row
+    holding the order_id must not block re-entry.
+    """
     with _conn(db_path) as conn:
-        cur = conn.execute(
-            _INSERT_SQL,
-            (
-                order.order_id, order.service_type, order.vehicle_type,
-                order.passenger_name, order.scheduled_time, order.passenger_phone,
-                order.overseas_phone, order.flight_number, order.pickup,
-                order.dropoff, order.distance_km, order.notes, order.driver_notes,
-                order.additional_services, order.passenger_exit_minutes,
-                order.third_party_contact, order.more_contacts, order.raw_message,
-                telegram_msg_id, parking, banner, source,
-            ),
-        )
+        cur = conn.execute(_INSERT_SQL, _order_params(order, telegram_msg_id, parking, source))
         conn.commit()
         return cur.lastrowid
+
+
+def save_or_revive_order(db_path: str, order: Order, telegram_msg_id: int | None,
+                         parking: float = 0.0, source: str = "") -> bool:
+    """Save an entered order; returns True when it revived a cancelled row.
+
+    An active row on the same order_id is still a duplicate and raises
+    sqlite3.IntegrityError.  order_id is UNIQUE, so the insert doubles as the
+    existence check and the revive's own WHERE decides the outcome: two
+    simultaneous re-entries cannot both resurrect the row.
+    """
+    params = _order_params(order, telegram_msg_id, parking, source)
+    with _conn(db_path) as conn:
+        try:
+            conn.execute(_INSERT_SQL, params)
+        except sqlite3.IntegrityError:
+            cur = conn.execute(_REVIVE_SQL, (*params, order.order_id))
+            if cur.rowcount == 0:
+                raise
+            conn.commit()
+            return True
+        conn.commit()
+        return False
 
 
 def save_quick_order(db_path: str, order_id: str, service_type: str, scheduled_time: str, price: float, tunnel_fee: float, source: str = "") -> int:
@@ -240,10 +291,19 @@ def get_order_by_id(db_path: str, order_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def order_id_exists(db_path: str, order_id: str) -> bool:
+def order_status(db_path: str, order_id: str) -> str | None:
+    """Stored status of the row holding this order_id, or None if no row does."""
     with _conn(db_path) as conn:
-        row = conn.execute("SELECT 1 FROM orders WHERE order_id = ?", (order_id,)).fetchone()
-        return row is not None
+        row = conn.execute(
+            "SELECT coalesce(status,'active') AS s FROM orders WHERE order_id = ?", (order_id,)
+        ).fetchone()
+        return row["s"] if row else None
+
+
+# A cancelled row keeps the order_id but no longer blocks entry (see
+# save_or_revive_order), so only a live row counts as a duplicate.
+def active_order_id_exists(db_path: str, order_id: str) -> bool:
+    return order_status(db_path, order_id) == "active"
 
 
 def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:

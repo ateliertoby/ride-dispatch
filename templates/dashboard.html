@@ -1254,7 +1254,7 @@ async function savePaste(price) {
     if (filter && filter !== 'ride') filter = null;    // pasted orders are platform rides; drop any filter that would hide the new card
     revealId = res.order_id;
     closeDrop();
-    toast('已入單 #' + shortId(res.order_id));
+    toast((res.revived ? '已重新入單 #' : '已入單 #') + shortId(res.order_id));
     load();
   } catch (e) {
     toast(e.message);
