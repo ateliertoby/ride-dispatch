@@ -140,9 +140,9 @@ SPACE_MSG = """订单号：SPACE12345678
 
 def test_parse_any_space():
     order, source = parse_any(SPACE_MSG)
-    # No 订单号 suffix means no known relaying distributor, and the format
-    # itself names no channel — an empty source beats guessing one.
-    assert source == ""
+    # No 订单号 suffix means no relaying distributor, so the order is the
+    # platform's own — which its order number already says.
+    assert source == "SPACE"
     assert order.order_id == "SPACE12345678"
     assert order.service_type == "送机"
     assert order.vehicle_type == "舒适5座"
@@ -172,6 +172,24 @@ def test_parse_any_space_relay_source_from_suffix():
     assert order.passenger_phone == "13800001234"
 
 
+SPACE_NO_SUFFIX_MSG = """订单号：SPACE202608231226
+类型：香港-接机
+车型：舒适5座【丰田雷凌等同级车】
+用车日期：2026-08-23
+航班预计降落时间：12:26
+航班号：GJ8007
+上车地点：香港国际机场
+下车地点：尖沙咀
+姓名:陈小明
+电话:13800005678"""
+
+
+def test_parse_any_space_no_suffix_source_is_space():
+    """订单号 prefix is the channel id; only a distributor suffix overrides it."""
+    _, source = parse_any(SPACE_NO_SUFFIX_MSG)
+    assert source == "SPACE"
+
+
 SPACE_FULL_KEY_MSG = """订单号：SPACE202608990002
 类型：香港-接机
 车型 ：特斯拉5座【特斯拉Model Y/S等同级车】
@@ -187,7 +205,7 @@ SPACE_FULL_KEY_MSG = """订单号：SPACE202608990002
 
 def test_parse_any_space_full_key_variant_has_pickup_time():
     order, source = parse_any(SPACE_FULL_KEY_MSG)
-    assert source == ""
+    assert source == "SPACE"
     assert order.order_id == "SPACE202608990002"
     # Web paste rejects a scheduled_time with no time part, and every consumer
     # reads it as '%Y-%m-%d %H:%M:%S'.
