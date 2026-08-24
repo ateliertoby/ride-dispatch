@@ -17,7 +17,7 @@
   body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
   .empty { padding: 28px 0 8px; }
   .sum-rows { padding: 8px 0 0; }
-  /* Sheets here stack (day -> batch -> confirm), so the head carries a back
+  /* Sheets here stack (day -> batch -> undo), so the head carries a back
      button and the title has to yield width to it. */
   .sheet-head { gap: 10px; }
   .sheet-title { flex: 1; min-width: 0; }
@@ -105,18 +105,20 @@
   .orow.ro:active { background: none; }
   .tick.blank { border-color: transparent; }
   .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  .ol { flex: 1; min-width: 0; font-size: 15px; }
-  .oll { display: block; }
-  /* The number the platform knows the leg by: the operator quotes it when he
-     disputes a leg, so it is on every row and tapping it copies. Negative
-     margins keep the digits aligned with the label while the padding gives the
-     tap something to land on. */
+  .ol { flex: 1; min-width: 0; }
+  /* Reconciling is done number by number against the platform's statement, so
+     the order number is the line the row is read by; the label under it only
+     jogs the memory of which leg that was. Tapping the number copies it.
+     Negative margins keep the digits flush with the label while the padding
+     gives the tap something to land on, and wrapping anywhere keeps a
+     19-digit number inside the row instead of widening the sheet. */
   .oid {
-    display: inline-block; margin: 2px -6px 0; padding: 1px 6px 2px;
-    font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums;
-    letter-spacing: .2px; cursor: pointer;
+    display: inline-block; margin: 0 -6px; padding: 2px 6px 1px;
+    font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums;
+    letter-spacing: .2px; overflow-wrap: anywhere; cursor: pointer;
   }
   .oid:active { color: var(--text-2); }
+  .oll { display: block; font-size: 11px; color: var(--text-3); }
   .oa { flex-shrink: 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .omark {
     flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
@@ -232,8 +234,9 @@ let NOW = '';
 let TODAY = '';
 let BY_ID = new Map();
 let BATCH_OF = new Map();
-// The batch being built lives outside the sheet's markup: adding a day
-// re-renders the whole sheet, and the typed fields have to survive that.
+// The batch being built lives outside the sheet's markup: adding a day and a
+// reload both re-render the whole sheet, and the typed fields have to survive
+// that.
 let settleDays = [];
 let settleTicked = new Set();
 let confirmedTouched = false;
@@ -367,6 +370,15 @@ function orderLabel(o) {
   const who = o.flight_number || shortPlace(o.service_type === '送机' ? o.pickup : o.dropoff) || o.passenger_name;
   return who ? svc + ' · ' + who : svc;
 }
+// A 16- or 19-digit number is read off a statement in chunks, so the digits
+// are grouped for the eye. Presentation only: data-copy and the clipboard
+// carry the raw id. A number carrying letters is a code rather than a run of
+// digits to be chunked, and a short one needs no help, so both stay as they
+// are.
+function groupId(id) {
+  const s = String(id);
+  return /^\d{9,}$/.test(s) ? s.replace(/(\d{4})(?=\d)/g, '$1\u2009') : s;
+}
 function batchDates(b) {
   return [...new Set(b.orders.map(orderDate))].sort();
 }
@@ -385,6 +397,7 @@ async function load() {
   TODAY = NOW.slice(0, 10);
   if (!settleOn) settleOn = TODAY;
   reindex();
+  pruneTicks();
   render();
   repaintOpenView();
 }
@@ -472,7 +485,6 @@ let views = [];
 function curView() { return views[views.length - 1] || null; }
 function viewHtml(v) {
   if (v.kind === 'day') return dayViewHtml(v);
-  if (v.kind === 'settle') return settleViewHtml(v);
   if (v.kind === 'undo') return undoViewHtml(v);
   return batchViewHtml(v);
 }
@@ -484,7 +496,7 @@ function paintView() {
   el.scrollTop = 0;
   el.classList.add('show');
   document.getElementById('scrim').classList.add('show');
-  if (v.kind === 'settle') syncSettle();
+  if (v.kind === 'day') syncDay();
 }
 function openView(v) { views = [v]; paintView(); }
 function pushView(v) { views.push(v); paintView(); }
@@ -505,14 +517,15 @@ function sheetHead(title, sub) {
     (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
 }
 
-// One row shape for all three sheets. The mode decides what the row can do:
-// 'day' and 'settle' tick the settle-able legs, 'ro' freezes a batch. A leg
-// that cannot be settled is a plain div, not a disabled button, so its order
-// number stays tappable -- that is the row the operator most needs to quote.
+// One row shape for every sheet. The mode decides what the row can do: 'day'
+// is a leg of the day being settled and 'add' a leg of a day pulled in beside
+// it, both ticking the settle-able legs; 'ro' freezes a batch. A leg that
+// cannot be settled is a plain div, not a disabled button, so its order number
+// stays tappable -- that is the row the operator most needs to quote.
 function orderRowHtml(o, mode, ticks) {
   const live = mode !== 'ro' && isSettleable(o);
   const on = live && settleTicked.has(o.order_id);
-  const cls = 'orow' + (live ? (on ? ' on' : ' off') : (mode === 'settle' ? ' dis' : ' ro'));
+  const cls = 'orow' + (live ? (on ? ' on' : ' off') : (mode === 'add' ? ' dis' : ' ro'));
   // The blank keeps the time column aligned on rows that carry no checkbox.
   // A day with nothing to tick drops the column instead of indenting past it.
   const tick = mode === 'ro' || ticks === false ? ''
@@ -530,17 +543,20 @@ function orderRowHtml(o, mode, ticks) {
   }
   const body = tick +
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
-    '<span class="ol"><span class="oll">' + esc(orderLabel(o)) + '</span>' +
-      '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(o.order_id) + '</span></span>' +
+    '<span class="ol">' +
+      '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(groupId(o.order_id)) + '</span>' +
+      '<span class="oll">' + esc(orderLabel(o)) + '</span></span>' +
     right;
   return live ? '<button class="' + cls + '" data-o="' + esc(o.order_id) + '">' + body + '</button>'
               : '<div class="' + cls + '">' + body + '</div>';
 }
 
 // ---- day sheet ----
-// The whole job is done from here: what the day earned, where each leg's money
-// has got to, the batches it belongs to, and the two things still to do --
-// bank a transfer that has landed, settle what is still loose.
+// One sheet does the whole job: what the day earned, where each leg's money
+// has got to, the batches it belongs to, and the two writes still open --
+// bank a transfer that has landed, settle what is still loose. The settle
+// write is confirmed here rather than in a pushed sheet, because a second
+// sheet would only ask the same question a second time.
 function dayTag(o) {
   if (!o.price) return ['未入價', 'mute'];
   if (o.scheduled_time >= NOW) return ['未完成', 'mute'];
@@ -552,12 +568,14 @@ function dayTag(o) {
 function dayTicksOf(dateStr) {
   return new Set(ordersOn(dateStr).filter(isSettleable).map(o => o.order_id));
 }
-function dayTicked(dateStr) {
-  return ordersOn(dateStr).filter(o => isSettleable(o) && settleTicked.has(o.order_id));
-}
-function dayGoLabel(dateStr) {
-  const legs = dayTicked(dateStr);
-  return '結算 · ' + legs.length + ' 程 · $' + $(legs.reduce((t, o) => t + expectedOf(o), 0));
+// Another device can batch or cancel a leg while the sheet sits open. A tick
+// left on a leg that is no longer settle-able would count money into 應收 that
+// the write is bound to reject, so the ticks are re-checked against every load.
+function pruneTicks() {
+  settleTicked.forEach(id => {
+    const o = byId(id);
+    if (!o || !isSettleable(o)) settleTicked.delete(id);
+  });
 }
 function batchesOn(dateStr) {
   const seen = new Set();
@@ -569,47 +587,29 @@ function batchesOn(dateStr) {
   return out;
 }
 // Every settle-able leg starts ticked: the common case is settling the day
-// whole, and the checkbox is there for the exception.
-function openDay(dateStr) {
-  settleDays = [];
+// whole, and the checkbox is there for the exception. The sheet always opens
+// on this day alone, dropping any day and any typed amount a previous pass
+// left behind.
+function resetSettleState(dateStr) {
+  settleDays = [dateStr];
   settleTicked = dayTicksOf(dateStr);
+  confirmedTouched = false;
+  confirmedText = '';
+  settleOn = TODAY;
+}
+function openDay(dateStr) {
+  resetSettleState(dateStr);
   openView({ kind: 'day', date: dateStr });
 }
-function dayViewHtml(v) {
-  const list = ordersOn(v.date);
-  const batches = batchesOn(v.date);
-  const settleable = list.some(isSettleable);
-  return sheetHead(esc(mdLabel(v.date)) + ' 星期' + weekday(v.date), esc(platLabel(curPlat))) +
-    list.map(o => orderRowHtml(o, 'day', settleable)).join('') +
-    (batches.length ? '<div class="blinks">' + batches.map(b =>
-      '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
-      esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
-      ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
-      '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '') +
-    // Banking a transfer settles the whole batch, not the day, so the button
-    // names the batch it will close.
-    batches.filter(b => !b.paid_on).map(b =>
-      '<button class="primary-btn" data-p="' + b.id + '">已到帳 · 批次 ' +
-      esc(dateSpanLabel(batchDates(b))) + ' · $' + $(b.confirmed_amount) + '</button>').join('') +
-    (settleable ? '<button class="primary-btn" id="dayGo">' + dayGoLabel(v.date) + '</button>' : '');
-}
-function syncDay() {
-  const v = curView();
-  const btn = document.getElementById('dayGo');
-  if (!btn || !v || v.kind !== 'day') return;
-  btn.textContent = dayGoLabel(v.date);
-  btn.disabled = dayTicked(v.date).length === 0;
-}
 
-// ---- settle sheet ----
 function dayGap(a, b) {
   return Math.abs(new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000;
 }
 // Platforms are settled in runs of days, so the sheet offers the neighbours of
-// the day it was opened from. Nearest first, because the run the operator is
-// closing almost always touches the day he started on; the cap keeps the row
-// from turning into a second calendar. The page holds one month, so a run
-// crossing a month boundary is settled as one batch per month.
+// the day it was opened on. Nearest first, because the run the operator is
+// closing almost always touches that day; the cap keeps the row from turning
+// into a second calendar. The page holds one month, so a run crossing a month
+// boundary is settled as one batch per month.
 function addCandidates(origin) {
   const days = new Set();
   for (const o of data.orders) if (isSettleable(o)) days.add(orderDate(o));
@@ -620,46 +620,6 @@ function addCandidates(origin) {
 }
 function addChipLabel(d, origin) {
   return '+ ' + (d.slice(0, 7) === origin.slice(0, 7) ? (+d.slice(8)) + '日' : mdLabel(d));
-}
-function openSettleFrom(dateStr) {
-  settleDays = [dateStr];
-  // Carries the day sheet's ticks in, and drops anything a previous pass added
-  // from other days: the sheet always opens on this day alone.
-  settleTicked = new Set(dayTicked(dateStr).map(o => o.order_id));
-  confirmedTouched = false;
-  confirmedText = '';
-  settleOn = TODAY;
-  pushView({ kind: 'settle', origin: dateStr });
-}
-function settleViewHtml(v) {
-  const days = settleDays.slice().sort();
-  const cands = addCandidates(v.origin);
-  let body = '';
-  for (const d of days) {
-    // Everything still outstanding on the day, including the rows that cannot
-    // be ticked: an operator who sees a day total he cannot match needs to see
-    // which leg is holding it back.
-    const list = ordersOn(d).filter(o => !batchOf(o.order_id));
-    if (!list.length) continue;
-    body += '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
-      list.map(o => orderRowHtml(o, 'settle')).join('');
-  }
-  return sheetHead('結算 ' + esc(dateSpanLabel(days)), esc(platLabel(curPlat))) +
-    (cands.length ? '<div class="addrow"><span class="addlab">加埋</span>' + cands.map(d =>
-      '<button class="chip' + (settleDays.indexOf(d) >= 0 ? ' on' : '') + '" data-add="' + d + '">' +
-      esc(addChipLabel(d, v.origin)) + '</button>').join('') + '</div>' : '') +
-    body +
-    '<div class="sum-rows"><div class="sum-row"><span class="k">應收</span>' +
-      '<span class="v" id="expV"></span></div></div>' +
-    '<div class="conf-row"><span class="k">平台確認</span>' +
-      '<span class="conf-box"><span class="cur">$</span>' +
-      '<input class="conf-in" id="confIn" type="text" inputmode="decimal" aria-label="平台確認金額"></span></div>' +
-    '<div class="diff" id="diffLine"></div>' +
-    '<div class="conf-row"><span class="k">結算日</span>' +
-      '<span class="conf-box">' +
-      '<input class="conf-in date" id="settleDate" type="date" value="' + settleOn + '" aria-label="結算日"></span></div>' +
-    '<button class="primary-btn" id="settleGo">確認結算</button>' +
-    '<button class="ghost-btn" data-back="1">取消</button>';
 }
 function toggleAddDay(d) {
   const i = settleDays.indexOf(d);
@@ -678,17 +638,80 @@ function settleExpected() {
   settleTicked.forEach(id => { s += expectedOf(byId(id)); });
   return s;
 }
+// The button is the write, so it states the scale of what it is about to
+// write; the operator commits with the count and the amount still in view.
+function settleGoLabel(total) {
+  return '確認結算 · ' + settleTicked.size + ' 程 · $' + $(total);
+}
+function confirmHtml() {
+  return '<div class="sum-rows"><div class="sum-row"><span class="k">應收</span>' +
+      '<span class="v" id="expV"></span></div></div>' +
+    '<div class="conf-row"><span class="k">平台確認</span>' +
+      '<span class="conf-box"><span class="cur">$</span>' +
+      '<input class="conf-in" id="confIn" type="text" inputmode="decimal" aria-label="平台確認金額"></span></div>' +
+    '<div class="diff" id="diffLine"></div>' +
+    '<div class="conf-row"><span class="k">結算日</span>' +
+      '<span class="conf-box">' +
+      '<input class="conf-in date" id="settleDate" type="date" value="' + settleOn + '" aria-label="結算日"></span></div>' +
+    '<button class="primary-btn" id="settleGo"></button>';
+}
+function dayViewHtml(v) {
+  const list = ordersOn(v.date);
+  const batches = batchesOn(v.date);
+  // Nothing to settle here -- fully batched, still to come, or unpriced -- and
+  // the sheet is a read of the day: no ticks, no neighbours to add, no write.
+  const settleable = list.some(isSettleable);
+  const cands = settleable ? addCandidates(v.date) : [];
+  // A day pulled in beside this one contributes everything still outstanding
+  // on it, the rows that cannot be ticked included: an operator looking at a
+  // total he cannot match needs to see which leg is holding it back.
+  let added = '';
+  for (const d of settleDays.slice().sort()) {
+    if (d === v.date) continue;
+    const rows = ordersOn(d).filter(o => !batchOf(o.order_id));
+    if (!rows.length) continue;
+    added += '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
+      rows.map(o => orderRowHtml(o, 'add')).join('');
+  }
+  return sheetHead(esc(mdLabel(v.date)) + ' 星期' + weekday(v.date), esc(platLabel(curPlat))) +
+    list.map(o => orderRowHtml(o, 'day', settleable)).join('') +
+    (cands.length ? '<div class="addrow"><span class="addlab">加埋</span>' + cands.map(d =>
+      '<button class="chip' + (settleDays.indexOf(d) >= 0 ? ' on' : '') + '" data-add="' + d + '">' +
+      esc(addChipLabel(d, v.date)) + '</button>').join('') + '</div>' : '') +
+    added +
+    (batches.length ? '<div class="blinks">' + batches.map(b =>
+      '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
+      esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
+      ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
+      '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '') +
+    // Banking a transfer settles the whole batch, not the day, so the button
+    // names the batch it will close.
+    batches.filter(b => !b.paid_on).map(b =>
+      '<button class="primary-btn" data-p="' + b.id + '">已到帳 · 批次 ' +
+      esc(dateSpanLabel(batchDates(b))) + ' · $' + $(b.confirmed_amount) + '</button>').join('') +
+    (settleable ? confirmHtml() : '');
+}
 function paintDiff() {
   const el = document.getElementById('diffLine');
   const conf = parseFloat(document.getElementById('confIn').value);
   const d = isNaN(conf) ? 0 : conf - settleExpected();
   el.innerHTML = d ? '差額 ' + (d < 0 ? '&minus;' : '+') + '$' + $(Math.abs(d)) : '';
 }
-function syncSettle() {
-  const exp = settleExpected();
-  document.getElementById('expV').textContent = '$' + $(exp);
-  document.getElementById('confIn').value = confirmedTouched ? confirmedText : String(exp);
-  document.getElementById('settleGo').disabled = settleTicked.size === 0;
+// Ticking a row moves money without repainting the sheet: the typed 平台確認
+// and 結算日 sit in the markup, and a repaint would throw a half-typed value
+// away. A repaint that does happen (an added day, a reload) reads the typed
+// amount back out of confirmedText.
+function syncDay() {
+  const v = curView();
+  if (!v || v.kind !== 'day') return;
+  const expEl = document.getElementById('expV');
+  if (!expEl) return;
+  const total = settleExpected();
+  expEl.textContent = '$' + $(total);
+  document.getElementById('confIn').value = confirmedTouched ? confirmedText : String(total);
+  const btn = document.getElementById('settleGo');
+  btn.textContent = settleGoLabel(total);
+  btn.disabled = settleTicked.size === 0;
   paintDiff();
 }
 
@@ -762,12 +785,13 @@ async function undoBatch(id) {
     return;
   }
   // The batch the sheet was showing no longer exists, so it closes back to the
-  // day, where its legs are loose and offered again.
+  // day, where its legs are loose and offered again. Anything the sheet was
+  // building against the old batch is void, so the day starts over.
   while (views.length && (curView().kind === 'undo' || curView().kind === 'batch')) views.pop();
   const under = curView();
   await load();
   if (under && under.kind === 'day') {
-    settleTicked = dayTicksOf(under.date);
+    resetSettleState(under.date);
     paintView();
   }
   toast('已撤銷結算');
@@ -789,8 +813,7 @@ async function confirmSettle() {
     });
   } catch (e) {
     toast(e.message);
-    btn.disabled = false;
-    btn.textContent = '確認結算';
+    syncDay();
     return;
   }
   settleDays = [];
@@ -848,7 +871,6 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
   const link = e.target.closest('[data-bl]');
   if (link) { pushView({ kind: 'batch', id: +link.dataset.bl }); return; }
-  if (e.target.closest('#dayGo')) { openSettleFrom(curView().date); return; }
   const add = e.target.closest('[data-add]');
   if (add) { toggleAddDay(add.dataset.add); return; }
   if (e.target.closest('#settleGo')) { confirmSettle(); return; }
@@ -857,7 +879,7 @@ document.getElementById('sheet').addEventListener('click', e => {
     const id = row.dataset.o;
     if (settleTicked.has(id)) { settleTicked.delete(id); row.classList.replace('on', 'off'); }
     else { settleTicked.add(id); row.classList.replace('off', 'on'); }
-    if (curView().kind === 'settle') syncSettle(); else syncDay();
+    syncDay();
   }
 });
 document.getElementById('sheet').addEventListener('input', e => {
