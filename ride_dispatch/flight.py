@@ -91,23 +91,38 @@ def depart_hhmm(order: dict) -> str | None:
     return svc_time(predicted_landing_hhmm(order), exit_min - DRIVE_MINUTES)
 
 
-def effective_service_time(order: dict) -> str:
-    """Sort key: predicted passenger walk-out time for 接机, else booked time.
+def _valid_hhmm(value: str | None) -> str | None:
+    """A feed time is only usable once it parses as HH:MM; blanks and '?' don't."""
+    return value if value and _TIME_RE.fullmatch(value) else None
+
+
+def row_time(order: dict) -> str:
+    """The single time a dashboard row shows, sorts by, and places the NOW line against.
 
     Returns a "%Y-%m-%d %H:%M:%S" string so lexicographic sort equals
-    chronological sort, and 接机 orders with flight data mix correctly
-    with orders that only have a booked scheduled_time.
+    chronological sort, and flight-driven 接机 rows interleave correctly with
+    rows that only carry a booked scheduled_time.
+
+    A 接机 row shows the flight's own landing time, so the sort key is that
+    same landing time: 出場時長 is deliberately not added, or the row would
+    sort at one number and display another.
+
+    JS twin: landingTime()/rowTime() in dashboard.html — the field precedence
+    below must stay identical in both.
     """
     sched_str = order.get("scheduled_time") or ""
     if not is_flight_pickup(order.get("service_type") or ""):
         return sched_str
 
-    landing_hhmm = None
-    for key in ("flight_eta", "flight_scheduled"):
-        v = order.get(key)
-        if v and _TIME_RE.fullmatch(v):
-            landing_hhmm = v
-            break
+    status = order.get("flight_status")
+    gate = _valid_hhmm(order.get("flight_gate"))
+    eta = _valid_hhmm(order.get("flight_eta"))
+    if status == "gate" and gate:
+        landing_hhmm = gate
+    elif status in ("landed", "est") and eta:
+        landing_hhmm = eta
+    else:
+        landing_hhmm = _valid_hhmm(order.get("flight_scheduled"))
     if not landing_hhmm:
         return sched_str
 
@@ -121,17 +136,14 @@ def effective_service_time(order: dict) -> str:
         minute=int(landing_hhmm[3:5]),
         second=0,
     )
-    # Midnight crossing: HKIA ETAs are bare HH:MM. Normally the ETA is
-    # close to or earlier than the booked time (booked = landing + exit
-    # buffer). A gap > 12h means the flight lands just after midnight on
-    # the next calendar day (e.g. booked 23:50, ETA 00:10). Only the
-    # forward shift applies — no reverse (mirrors dashboard doneAt()).
+    # Midnight crossing: HKIA times are bare HH:MM. Normally the flight time
+    # is close to or earlier than the booked time (booked = landing + exit
+    # buffer). A gap > 12h means the flight lands just after midnight on the
+    # next calendar day (e.g. booked 23:50, landing 00:10). Only the forward
+    # shift applies — no reverse (mirrors dashboard doneAt()).
     if (sched_dt - landing_dt).total_seconds() > 12 * 3600:
         landing_dt += timedelta(days=1)
-
-    exit_min = order.get("passenger_exit_minutes") or 0
-    service_dt = landing_dt + timedelta(minutes=exit_min)
-    return service_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return landing_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_status(status: str) -> dict:

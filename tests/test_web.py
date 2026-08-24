@@ -264,12 +264,12 @@ def test_orders_enrichment_none_for_quick_orders(client):
     assert rows[0]["exit_urgency"] is None
 
 
-# ---- effective service time sort ----
+# ---- row time sort ----
 
 
-def test_api_orders_sorted_by_effective_service_time(client):
+def test_api_orders_sorted_by_row_time(client):
     """Regression: delayed EK384 (booked 18:15, eta 20:30) must sort after
-    UO213 (booked 19:18, eta 18:58+40min exit = svc 19:38)."""
+    UO213 (booked 19:18, eta 18:58)."""
     import sqlite3
     from ride_dispatch.db import update_flight_info
 
@@ -285,8 +285,31 @@ def test_api_orders_sorted_by_effective_service_time(client):
 
     rows = client.get("/api/orders?date=2026-07-23").get_json()["orders"]
     assert len(rows) == 2
-    assert rows[0]["order_id"] == "UO213-order"   # svc 19:38 < 20:30
+    assert rows[0]["order_id"] == "UO213-order"   # 18:58 < 20:30
     assert rows[1]["order_id"] == "EK384-order"
+
+
+def test_api_orders_at_gate_pickup_sorts_by_the_time_it_displays(client):
+    """Regression: a 接机 showing its at-gate 12:55 must not sort above a
+    12:50 送机 on the strength of an ETA the row no longer shows."""
+    from ride_dispatch.db import update_flight_info
+
+    save_quick_order(web.DB_PATH, "GJ8007-order", "接机", "2026-08-24 12:55:00", 500, 0)
+    update_flight_info(web.DB_PATH, "GJ8007-order", "12:55", "12:40", "12:55", "gate")
+    save_quick_order(web.DB_PATH, "dropoff-order", "送机", "2026-08-24 12:50:00", 500, 0)
+
+    rows = client.get("/api/orders?date=2026-08-24").get_json()["orders"]
+    assert [r["order_id"] for r in rows] == ["dropoff-order", "GJ8007-order"]
+    assert rows[0]["row_time"] == "2026-08-24 12:50:00"
+    assert rows[1]["row_time"] == "2026-08-24 12:55:00"
+
+
+def test_api_orders_carry_row_time(client):
+    """The dashboard places its NOW line against this field, so every row
+    carries it — quick orders included."""
+    seed_order()
+    rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
+    assert rows[0]["row_time"] == "2026-07-01 14:30:00"
 
 
 # ---- pages ----

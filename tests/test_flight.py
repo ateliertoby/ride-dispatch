@@ -6,7 +6,7 @@ from ride_dispatch.flight import (
     exit_urgency,
     predicted_landing_hhmm,
     depart_hhmm,
-    effective_service_time,
+    row_time,
 )
 
 
@@ -328,10 +328,10 @@ def test_depart_none_without_exit_minutes():
     assert depart_hhmm({"flight_eta": "14:00", "passenger_exit_minutes": 0}) is None
 
 
-# ---- effective_service_time sort key ----
+# ---- row_time: the one time a dashboard row shows and sorts by ----
 
 
-def test_effective_svc_time_delayed_pickup():
+def test_row_time_delayed_pickup():
     order = {
         "service_type": "接机",
         "scheduled_time": "2026-07-23 18:15:00",
@@ -339,60 +339,143 @@ def test_effective_svc_time_delayed_pickup():
         "flight_eta": "20:30",
         "passenger_exit_minutes": None,
     }
-    assert effective_service_time(order) == "2026-07-23 20:30:00"
+    assert row_time(order) == "2026-07-23 20:30:00"
 
 
-def test_effective_svc_time_early_with_exit():
+def test_row_time_prefers_gate_over_eta():
+    """At-gate is the row's displayed time, so it must also be its sort key."""
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-08-24 12:55:00",
+        "flight_status": "gate",
+        "flight_scheduled": "12:55",
+        "flight_eta": "12:40",
+        "flight_gate": "12:55",
+        "passenger_exit_minutes": None,
+    }
+    assert row_time(order) == "2026-08-24 12:55:00"
+
+
+def test_row_time_gate_status_without_gate_time_falls_back_to_scheduled():
+    """The est→gate jump can carry no gate time; the ETA belongs to est only."""
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-08-24 12:55:00",
+        "flight_status": "gate",
+        "flight_scheduled": "12:55",
+        "flight_eta": "12:40",
+        "flight_gate": None,
+    }
+    assert row_time(order) == "2026-08-24 12:55:00"
+
+
+def test_row_time_ignores_exit_minutes():
+    """出場時長 shifts 用車時間, not the landing time the row prints."""
     order = {
         "service_type": "接机",
         "scheduled_time": "2026-07-23 19:18:00",
+        "flight_status": "est",
         "flight_eta": "18:58",
         "passenger_exit_minutes": 40,
     }
-    assert effective_service_time(order) == "2026-07-23 19:38:00"
+    assert row_time(order) == "2026-07-23 18:58:00"
 
 
-def test_effective_svc_time_no_flight_data():
+def test_row_time_eta_needs_a_status_that_backs_it():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 19:18:00",
+        "flight_scheduled": "18:40",
+        "flight_eta": "18:58",
+    }
+    assert row_time(order) == "2026-07-23 18:40:00"
+
+
+def test_row_time_scheduled_arrival_without_status():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 18:15:00",
+        "flight_scheduled": "18:00",
+    }
+    assert row_time(order) == "2026-07-23 18:00:00"
+
+
+def test_row_time_no_flight_data():
     order = {
         "service_type": "接机",
         "scheduled_time": "2026-07-23 18:15:00",
     }
-    assert effective_service_time(order) == "2026-07-23 18:15:00"
+    assert row_time(order) == "2026-07-23 18:15:00"
 
 
-def test_effective_svc_time_送机_ignores_flight():
+def test_row_time_送机_ignores_flight():
     order = {
         "service_type": "送机",
         "scheduled_time": "2026-07-23 10:00:00",
+        "flight_status": "est",
         "flight_eta": "09:30",
         "passenger_exit_minutes": 30,
     }
-    assert effective_service_time(order) == "2026-07-23 10:00:00"
+    assert row_time(order) == "2026-07-23 10:00:00"
 
 
-def test_effective_svc_time_quick_order():
+def test_row_time_quick_order():
     order = {
         "service_type": "滴滴",
         "scheduled_time": "2026-07-23 14:00:00",
+        "flight_status": "est",
         "flight_eta": "13:00",
     }
-    assert effective_service_time(order) == "2026-07-23 14:00:00"
+    assert row_time(order) == "2026-07-23 14:00:00"
 
 
-def test_effective_svc_time_midnight_crossing():
+def test_row_time_midnight_crossing():
     order = {
         "service_type": "接机",
         "scheduled_time": "2026-07-23 23:50:00",
+        "flight_status": "est",
         "flight_eta": "00:10",
         "passenger_exit_minutes": None,
     }
-    assert effective_service_time(order) == "2026-07-24 00:10:00"
+    assert row_time(order) == "2026-07-24 00:10:00"
 
 
-def test_effective_svc_time_malformed_scheduled():
+def test_row_time_midnight_crossing_at_gate():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 23:50:00",
+        "flight_status": "gate",
+        "flight_gate": "00:25",
+    }
+    assert row_time(order) == "2026-07-24 00:25:00"
+
+
+def test_row_time_early_landing_stays_on_the_booked_day():
+    """Booked = landing + exit buffer, so an earlier landing is the normal case."""
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 19:18:00",
+        "flight_status": "landed",
+        "flight_eta": "18:58",
+    }
+    assert row_time(order) == "2026-07-23 18:58:00"
+
+
+def test_row_time_malformed_flight_time_ignored():
+    order = {
+        "service_type": "接机",
+        "scheduled_time": "2026-07-23 18:15:00",
+        "flight_status": "est",
+        "flight_eta": "?",
+    }
+    assert row_time(order) == "2026-07-23 18:15:00"
+
+
+def test_row_time_malformed_scheduled():
     order = {
         "service_type": "接机",
         "scheduled_time": "bad-data",
+        "flight_status": "est",
         "flight_eta": "18:00",
     }
-    assert effective_service_time(order) == "bad-data"
+    assert row_time(order) == "bad-data"
