@@ -24,7 +24,7 @@ from .db import (
     update_order_fields,
     update_price,
 )
-from .flight import depart_hhmm, effective_service_time, exit_urgency
+from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
@@ -53,11 +53,14 @@ def settle():
 def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
-    orders.sort(key=effective_service_time)
     for o in orders:
+        # Sort key and payload field are the same value: the dashboard places
+        # its NOW line against it, so re-deriving it there could disagree.
+        o["row_time"] = row_time(o)
         is_pickup = is_flight_pickup(o.get("service_type") or "")
         o["depart_hhmm"] = depart_hhmm(o) if is_pickup else None
         o["exit_urgency"] = exit_urgency(o.get("passenger_exit_minutes")) if is_pickup else None
+    orders.sort(key=lambda o: o["row_time"])
     return jsonify({"orders": orders, "date": date_str})
 
 

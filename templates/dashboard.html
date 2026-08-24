@@ -494,6 +494,16 @@ async function load() {
 }
 
 // ---- render ----
+function hhmmOf(d) {
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+// Local wall clock in the server's row_time format, so the NOW line can be
+// placed by plain string comparison against the row times.
+function nowStamp() {
+  const d = new Date();
+  return fmtDate(d) + ' ' + hhmmOf(d) + ':' + String(d.getSeconds()).padStart(2, '0');
+}
+
 function stats(list) {
   let total = 0, priced = 0;
   list.forEach(o => { if (o.price) { total += o.price + (o.banner_fee || 0); priced++; } });
@@ -520,13 +530,21 @@ function render() {
     return;
   }
   const isToday = cur === fmtDate(new Date());
-  // The first not-yet-done order anchors both the NEXT styling and the NOW
-  // marker, which is drawn in the gap above it — i.e. after the last done row.
+  // Two independent marks: NEXT is "the order to do next" and follows the
+  // first not-yet-done row; the NOW line is a clock reading and sits at its
+  // chronological place, which can be above a row that is already done.
   const nextIdx = isToday ? visible.findIndex(o => !isDone(o)) : -1;
   const nextId = nextIdx >= 0 ? visible[nextIdx].order_id : null;
-  box.innerHTML = visible.map((o, i) =>
-    gapHtml(i ? visible[i - 1] : null, o, i === nextIdx) + rowHtml(o, nextId)
-  ).join('');
+  // row_time is the server's sort key (flight.py:row_time), so comparing
+  // against it puts the line exactly where the list's own order puts it.
+  const nowStr = isToday ? nowStamp() : null;
+  const nowIdx = nowStr ? visible.findIndex(o => (o.row_time || '') > nowStr) : -1;
+  const html = visible.map((o, i) =>
+    gapHtml(i ? visible[i - 1] : null, o, i === nowIdx) + rowHtml(o, nextId)
+  );
+  // Every row's time has passed: the line belongs after the last of them.
+  if (nowStr && nowIdx < 0) html.push(gapHtml(null, null, true));
+  box.innerHTML = html.join('');
   if (revealId) {
     const el = box.querySelector('[data-oid="' + CSS.escape(revealId) + '"]');
     if (el) el.scrollIntoView({ block: 'nearest' });
@@ -573,6 +591,8 @@ function landingTime(o) {
 }
 // 接机 rows show the flight's own time because the driver plans around landing:
 // it is the number he watches and the only one that moves.
+// Python twin: flight.py:row_time, which sorts the list by this same choice —
+// the two must pick the same field or a row sorts where it does not read.
 function rowTime(o) {
   return isFlightPickup(o.service_type) ? (landingTime(o) || orderTime(o)) : orderTime(o);
 }
@@ -648,9 +668,11 @@ function priceHtml(o) {
   return '<div class="price">$' + $(o.price + (o.banner_fee || 0)) + '</div>';
 }
 
-// Rows keep booked order while the rail shows flight times, so a flight landing
-// before the previous booking produces a negative gap; that is a real state,
-// not an error, and it simply has no waiting time to label.
+// One canonical row time drives the server's sort, the rail display and the NOW
+// line alike, so a later row can never show an earlier number. rowMin compares
+// HH:MM alone, so only a landing past midnight still yields a negative
+// difference — a real state with no waiting time to label, not an error.
+// A trailing NOW line is drawn with no neighbours, so both may be null.
 function gapHtml(prev, o, showNow) {
   let inner = '';
   if (prev) {
@@ -658,9 +680,8 @@ function gapHtml(prev, o, showNow) {
     if (gapMin >= 30) inner += '<div class="gap-label">' + fmtGap(gapMin) + '</div>';
   }
   if (showNow) {
-    const d = new Date();
-    const hhmm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    inner += '<div class="now"><span class="now-t">' + hhmm + '</span><span class="now-line"></span></div>';
+    inner += '<div class="now"><span class="now-t">' + hhmmOf(new Date()) +
+      '</span><span class="now-line"></span></div>';
   }
   return '<div class="gap">' + inner + '</div>';
 }
