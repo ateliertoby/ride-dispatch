@@ -11,10 +11,11 @@ def parse_any(text: str) -> tuple[Order, str]:
     if "用车日期" in text:
         order = parse_space(text)
         if order.order_id:
-            # Several channels relay this format, so it no longer identifies
-            # one. Only the 订单号 suffix names the relaying distributor;
-            # without it the source stays empty rather than misattributing.
-            source = ""
+            # Several channels relay this format, so the format itself no
+            # longer identifies one. The 订单号 tells them apart: its SPACE
+            # prefix marks the platform's own orders, and a "-" suffix names
+            # the distributor relaying one through this channel.
+            source = "SPACE"
             for line in text.strip().splitlines():
                 line_s = line.strip()
                 if line_s.startswith("订单号") and ("：" in line_s or ":" in line_s):
