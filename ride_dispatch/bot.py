@@ -554,7 +554,9 @@ logger = logging.getLogger("flight_poller")
 # self-chaining run_once: APScheduler discards jobs that fire >1s late
 # (default misfire_grace_time=1), which silently killed the old chain — see
 # "was missed by" warnings in bot.log. The heartbeat always ticks; these
-# globals decide whether a tick does real work.
+# globals decide whether a tick does real work. They gate flight polling
+# only: work whose latency must not scale with the flight interval runs on
+# every tick instead.
 POLL_ERROR_BACKOFF = 300
 _JOB_KWARGS = {"misfire_grace_time": None, "coalesce": True}
 _next_poll_at: datetime | None = None
@@ -568,9 +570,16 @@ _kick_server = None
 # first "not inside" reply while a session is open — a second consecutive
 # miss confirms the exit. In-memory on purpose: losing it on a restart costs
 # one extra tick, nothing more.
+#
+# The check runs on every heartbeat tick, never behind _next_poll_at: an exit
+# takes two consecutive misses to confirm, so gating it on the flight-poll
+# schedule would make exit latency twice the flight interval, which ranges
+# from a minute to hours. _parking_running keeps a slow HKIA query from
+# overlapping the next tick.
 _parking_client: ParkingClient | None = None
 _parking_client_built = False
 _parking_miss_at: datetime | None = None
+_parking_running = False
 _parking_logger = logging.getLogger("parking")
 
 
@@ -593,6 +602,11 @@ def _log_state(state: str | None):
     _last_state = state
 
 
+def _notify_chat_id() -> int:
+    """Chat every push goes to; 0 when the bot has no configured destination."""
+    return int(os.environ.get("NOTIFY_CHAT_ID", list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else "0"))
+
+
 def _kick_poll(context):
     global _next_poll_at
     _next_poll_at = None
@@ -600,7 +614,17 @@ def _kick_poll(context):
 
 
 async def _poll_tick(context):
-    global _next_poll_at, _poll_running
+    global _next_poll_at, _poll_running, _parking_running
+    if not _parking_running:
+        _parking_running = True
+        try:
+            chat_id = _notify_chat_id()
+            if chat_id:
+                await _check_parking(context.application.bot, chat_id, datetime.now())
+        except Exception:
+            logger.exception("parking check error")
+        finally:
+            _parking_running = False
     if _poll_running:
         return
     if _next_poll_at and datetime.now() < _next_poll_at:
@@ -873,7 +897,7 @@ def _clamp_for_reminders(interval: int, now: datetime) -> int:
 async def _poll_and_notify(context) -> int:
     """One polling pass; returns seconds until the next pass is due."""
     bot = context.application.bot
-    chat_id = int(os.environ.get("NOTIFY_CHAT_ID", list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else "0"))
+    chat_id = _notify_chat_id()
     if not chat_id:
         _log_state("No NOTIFY_CHAT_ID/ALLOWED_CHAT_IDS configured, not polling")
         return 3600
@@ -893,10 +917,6 @@ async def _poll_and_notify(context) -> int:
         await _check_departure_reminders(bot, chat_id, now)
     except Exception:
         logger.exception("departure reminder check error")
-    try:
-        await _check_parking(bot, chat_id, now)
-    except Exception:
-        logger.exception("parking check error")
 
     # Flight tracking
     dates = get_tracking_dates(DB_PATH)

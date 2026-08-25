@@ -349,3 +349,116 @@ def test_landing_push_has_no_allowance_line_when_off(db_path, tg, monkeypatch):
     info = {"scheduled": "18:50", "eta": "18:48", "gate": None, "status": "landed", "hall": "A"}
     asyncio.run(bot._notify_status_change(tg, 123, "O1", info, "est", "landed"))
     assert "停車場" not in texts(tg)[0]
+
+
+# --- heartbeat integration ---
+
+
+@pytest.fixture
+def poll_globals(monkeypatch):
+    monkeypatch.setenv("NOTIFY_CHAT_ID", "123")
+    monkeypatch.setattr(bot, "_next_poll_at", None)
+    monkeypatch.setattr(bot, "_poll_running", False)
+    monkeypatch.setattr(bot, "_parking_running", False)
+    monkeypatch.setattr(bot, "_parking_miss_at", None)
+
+
+@pytest.fixture
+def ctx(tg):
+    c = MagicMock()
+    c.application.bot = tg
+    return c
+
+
+class CountingClient(FakeClient):
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.queries = 0
+
+    async def query(self):
+        self.queries += 1
+        return await super().query()
+
+
+def open_session(db_path):
+    from ride_dispatch.db import open_parking_session
+    return open_parking_session(db_path, pv_nr=212022, plate="YY3953", location="P4O",
+                                location_name="Car Park 4", entry_time=ENTRY.strftime("%Y-%m-%d %H:%M"),
+                                order_id=None)
+
+
+def poll_spy(monkeypatch, interval: int = 600):
+    calls = []
+
+    async def spy(context):
+        calls.append(context)
+        return interval
+
+    monkeypatch.setattr(bot, "_poll_and_notify", spy)
+    return calls
+
+
+def test_tick_checks_parking_while_the_flight_poll_is_gated(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    client = CountingClient([OUT, OUT])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    monkeypatch.setattr(bot, "_next_poll_at", datetime(2099, 1, 1))
+    calls = poll_spy(monkeypatch)
+
+    asyncio.run(bot._poll_tick(ctx))
+    assert get_open_parking_session(db_path) is not None   # first miss only
+
+    asyncio.run(bot._poll_tick(ctx))
+    assert get_open_parking_session(db_path) is None
+    assert any("已出閘" in t for t in texts(tg))
+    assert client.queries == 2
+    assert calls == []                                     # flight poll stayed gated
+
+
+def test_due_tick_checks_parking_once_and_polls(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    client = CountingClient([inside(30)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    monkeypatch.setattr(bot, "_next_poll_at", datetime(2000, 1, 1))
+    calls = poll_spy(monkeypatch)
+
+    asyncio.run(bot._poll_tick(ctx))
+
+    assert client.queries == 1
+    assert len(calls) == 1
+    assert bot._next_poll_at > datetime.now()
+
+
+def test_poll_and_notify_no_longer_checks_parking(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    client = CountingClient([inside(30)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+
+    asyncio.run(bot._poll_and_notify(ctx))
+
+    assert client.queries == 0
+
+
+def test_tick_skips_parking_while_a_check_is_running(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    client = CountingClient([OUT])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    monkeypatch.setattr(bot, "_parking_running", True)
+    monkeypatch.setattr(bot, "_next_poll_at", datetime(2099, 1, 1))
+    poll_spy(monkeypatch)
+
+    asyncio.run(bot._poll_tick(ctx))
+
+    assert client.queries == 0
+    assert get_open_parking_session(db_path) is not None
+
+
+def test_parking_failure_does_not_block_the_flight_poll(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    monkeypatch.setattr(bot, "_parking_client", CountingClient([RuntimeError("boom")]))
+    calls = poll_spy(monkeypatch)
+
+    asyncio.run(bot._poll_tick(ctx))
+
+    assert len(calls) == 1
+    assert bot._parking_running is False
