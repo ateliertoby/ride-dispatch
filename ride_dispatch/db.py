@@ -1,3 +1,5 @@
+import json
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -83,9 +85,18 @@ def init_db(db_path: str):
                 confirmed_amount REAL,
                 settled_on TEXT,
                 paid_on TEXT,
+                statement TEXT,
+                statement_image TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Existing databases predate the statement columns; ALTER is the only
+        # migration mechanism this project has (see the orders loop above).
+        for col in ["statement TEXT", "statement_image TEXT"]:
+            try:
+                conn.execute(f"ALTER TABLE settlements ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         # One row per car park visit. pv_nr is HKIA's own visit number, so a
         # bot restart mid-visit finds the open row again instead of opening
         # a second one. `free` is derived exactly once, at close, from paid
@@ -576,9 +587,19 @@ def _now_str(now: datetime | None) -> str:
     return (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def statements_dir(db_path: str) -> str:
+    """Where statement screenshots live: a sibling of the database file."""
+    return os.path.join(os.path.dirname(os.path.abspath(db_path)), "statements")
+
+
+def statement_image_path(db_path: str, settlement_id: int) -> str:
+    return os.path.join(statements_dir(db_path), f"{settlement_id}.jpg")
+
+
 def create_settlement(db_path: str, platform: str, order_ids: list[str],
                       confirmed_amount: float, settled_on: str,
-                      now: datetime | None = None) -> int:
+                      now: datetime | None = None,
+                      statement: dict | None = None, image: bytes | None = None) -> int:
     """Batch one platform's settleable orders; returns the settlement id.
 
     All-or-nothing: any order that is missing, cancelled, unpriced, still in
@@ -586,6 +607,12 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
     call with ValueError naming it, and nothing is written.  expected_amount is
     summed from the stored rows rather than taken from the caller, so a stale
     client cannot disagree with the DB about what is owed.
+
+    `statement` is what the platform's statement said (stored as JSON, shown
+    beside the system's numbers in batch detail); `image` is the screenshot
+    it was read from.  The screenshot is written after the commit: a failed
+    file write must not undo a batch the operator has just confirmed, so it
+    only leaves statement_image NULL.
     """
     if platform not in PLATFORMS:
         raise ValueError(f"unknown platform: {platform}")
@@ -616,9 +643,10 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
                 raise ValueError(f"{order_id}: 唔屬於呢個平台")
             expected += expected_of(dict(row))
         cur = conn.execute(
-            "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on) "
-            "VALUES (?, ?, ?, ?)",
-            (platform, expected, confirmed_amount, settled_on),
+            "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on, statement) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (platform, expected, confirmed_amount, settled_on,
+             json.dumps(statement, ensure_ascii=False) if statement is not None else None),
         )
         settlement_id = cur.lastrowid
         conn.execute(
@@ -627,6 +655,17 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
             [settlement_id, *order_ids],
         )
         conn.commit()
+        if image is not None:
+            try:
+                os.makedirs(statements_dir(db_path), exist_ok=True)
+                with open(statement_image_path(db_path, settlement_id), "wb") as f:
+                    f.write(image)
+                conn.execute("UPDATE settlements SET statement_image = ? WHERE id = ?",
+                             (os.path.basename(statement_image_path(db_path, settlement_id)),
+                              settlement_id))
+                conn.commit()
+            except (OSError, sqlite3.Error):
+                logging.getLogger("db").exception("statement image not stored for batch %s", settlement_id)
         return settlement_id
 
 
@@ -664,6 +703,15 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
         )
         conn.execute("DELETE FROM settlements WHERE id = ?", (settlement_id,))
         conn.commit()
+        # The batch rows are already gone, so a file that will not go away must
+        # not fail the call: the caller has nothing left to retry.
+        try:
+            os.remove(statement_image_path(db_path, settlement_id))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logging.getLogger("db").warning(
+                "statement image not removed for batch %s", settlement_id, exc_info=True)
         return True
 
 
@@ -681,6 +729,14 @@ def _settlement_orders(conn, settlement_ids: list[int]) -> dict[int, list[dict]]
     return grouped
 
 
+def _settlement_dict(row) -> dict:
+    """Row → dict with the statement JSON decoded (None when the batch has none)."""
+    out = dict(row)
+    raw = out.get("statement")
+    out["statement"] = json.loads(raw) if raw else None
+    return out
+
+
 def get_settlement(db_path: str, settlement_id: int) -> dict | None:
     with _conn(db_path) as conn:
         row = conn.execute(
@@ -688,7 +744,7 @@ def get_settlement(db_path: str, settlement_id: int) -> dict | None:
         ).fetchone()
         if row is None:
             return None
-        out = dict(row)
+        out = _settlement_dict(row)
         out["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
         return out
 
@@ -722,7 +778,7 @@ def get_settle_month(db_path: str, month: str, platform: str,
                 settlement_ids,
             ).fetchall()
             for row in rows:
-                batch = dict(row)
+                batch = _settlement_dict(row)
                 batch["orders"] = members[row["id"]]
                 settlements.append(batch)
 
@@ -749,6 +805,59 @@ def get_settle_month(db_path: str, month: str, platform: str,
         "orders": orders,
         "settlements": settlements,
     }
+
+
+def find_awaiting_settlements(db_path: str, amount: float | None = None) -> list[dict]:
+    """Batches still waiting for their transfer, oldest first, each with its orders.
+
+    `amount` narrows to batches whose confirmed amount equals it to the cent:
+    the operator identifies a transfer by the figure on the bank statement.
+    """
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM settlements WHERE paid_on IS NULL ORDER BY id"
+        ).fetchall()
+        batches = [_settlement_dict(r) for r in rows
+                   if amount is None or abs((r["confirmed_amount"] or 0) - amount) < 0.005]
+        members = _settlement_orders(conn, [b["id"] for b in batches])
+        for b in batches:
+            b["orders"] = members[b["id"]]
+        return batches
+
+
+def settlement_candidates(db_path: str, dates: list[str], now: datetime | None = None) -> list[dict]:
+    """Ride-platform orders a statement listing `dates` could refer to.
+
+    Every active or cancelled ride order scheduled within a day of one of the
+    dates, plus every settleable ride order of any date: a leg the platform
+    held back reappears under its own service date on a later statement, so
+    it is normally in the window already, and the tail is a cheap safety net.
+    Cancelled rows are included on purpose — a statement that pays for a
+    cancelled trip is exactly the kind of thing reconciliation must surface.
+    """
+    cutoff = _now_str(now)
+    days: set[str] = set()
+    for d in dates:
+        base = datetime.strptime(d, "%Y-%m-%d")
+        for delta in (-1, 0, 1):
+            days.add((base + timedelta(days=delta)).strftime("%Y-%m-%d"))
+    cols = f"{_SETTLE_ORDER_COLS}, coalesce(status,'active') AS status"
+    with _conn(db_path) as conn:
+        by_id: dict[str, dict] = {}
+        if days:
+            placeholders = " OR ".join("scheduled_time LIKE ?" for _ in days)
+            for row in conn.execute(
+                f"SELECT {cols} FROM orders WHERE ({placeholders}) ORDER BY scheduled_time",
+                [f"{d}%" for d in sorted(days)],
+            ):
+                if platform_of(row["service_type"]) == "ride":
+                    by_id[row["order_id"]] = dict(row)
+        for row in conn.execute(
+            f"SELECT {cols} FROM orders WHERE {_SETTLEABLE_SQL} ORDER BY scheduled_time", (cutoff,)
+        ):
+            if platform_of(row["service_type"]) == "ride" and row["order_id"] not in by_id:
+                by_id[row["order_id"]] = dict(row)
+        return sorted(by_id.values(), key=lambda r: r["scheduled_time"] or "")
 
 
 # --- car park visits ---
