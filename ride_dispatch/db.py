@@ -264,7 +264,16 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
 # afterwards (update_cost), same as price.  banner_fee has no such edit worth
 # defending — it is a pure function of 附加服务 — so it rides along with the
 # rest and is re-derived from the new message.
+#
+# A re-send does not have to repeat everything the first message carried: the
+# contact numbers in particular are often dropped from it.  An empty field
+# therefore means "not mentioned", never "cleared" — it is left out of the diff
+# and out of the write, so the stored value survives.  raw_message and
+# telegram_msg_id are the exceptions and are always written: they describe this
+# entry of the order rather than the booking.
 _UPDATE_COLS = tuple(c for c in _ORDER_COLS if c != "parking_fee")
+
+_ALWAYS_UPDATE_COLS = ("raw_message", "telegram_msg_id")
 
 _FLIGHT_STATE_COLS = (
     "flight_scheduled", "flight_eta", "flight_gate", "flight_status",
@@ -319,6 +328,25 @@ def _diff_text(field: str, value) -> str:
     return str(value).strip()
 
 
+def _diff_absent(key) -> bool:
+    """Whether a normalised value (see _diff_key) says nothing at all."""
+    return key is None or key == ""
+
+
+def _message_carries(field: str, values: dict) -> bool:
+    """Whether a re-sent message says anything about one column.
+
+    banner_fee is decided by 附加服务, the field it is derived from: a message
+    silent about the service must not zero the fee derived from the service
+    still stored.
+    """
+    if field in _ALWAYS_UPDATE_COLS:
+        return True
+    if field == "banner_fee":
+        field = "additional_services"
+    return not _diff_absent(_diff_key(field, values[field]))
+
+
 def diff_order_against_row(order: Order, row, source: str = "") -> list[tuple[str, str, str]]:
     """What a re-sent message changes on the row already holding its order_id.
 
@@ -329,8 +357,14 @@ def diff_order_against_row(order: Order, row, source: str = "") -> list[tuple[st
     changes = []
     for field in DIFF_LABELS:
         new = source if field == "source" else getattr(order, field)
+        new_key = _diff_key(field, new)
+        # Silence is not an instruction to erase: a re-send that omits the
+        # field leaves whatever is stored in place, so there is nothing to
+        # report and nothing to write.
+        if _diff_absent(new_key):
+            continue
         old = row[field]
-        if _diff_key(field, old) != _diff_key(field, new):
+        if _diff_key(field, old) != new_key:
             changes.append((field, _diff_text(field, old), _diff_text(field, new)))
     return changes
 
@@ -360,8 +394,9 @@ def update_order_from_message(db_path: str, order: Order, telegram_msg_id: int |
         changed = [f for f, _, _ in diff_order_against_row(order, row, source)]
         if not changed:
             return []
-        sets = [f"{c} = ?" for c in _UPDATE_COLS]
-        params = [values[c] for c in _UPDATE_COLS]
+        cols = [c for c in _UPDATE_COLS if _message_carries(c, values)]
+        sets = [f"{c} = ?" for c in cols]
+        params = [values[c] for c in cols]
         # An already-matched tracker is worth more than a clean slate, so the
         # flight state is dropped only when the message moved the flight or the
         # pickup time — the two inputs the match is made from.

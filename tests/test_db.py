@@ -308,6 +308,58 @@ def test_update_from_message_unknown_order(db_path):
                                      source="携程") is None
 
 
+def test_update_from_message_keeps_fields_the_resend_omits(db_path):
+    """A re-send drops the contact lines; they are not the customer's deletion."""
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path, more_contacts="【同行人】852-69000001")
+    changed = update_order_from_message(
+        db_path,
+        make_order(dropoff="新界坑口裕明苑裕昌閣B座", passenger_phone="", overseas_phone="",
+                   more_contacts="", third_party_contact="", flight_number="",
+                   passenger_exit_minutes=None, distance_km=None),
+        telegram_msg_id=2, source="携程",
+    )
+    assert changed == ["dropoff"]
+
+    row = raw_row(db_path, "TEST001")
+    assert row["dropoff"] == "新界坑口裕明苑裕昌閣B座"
+    assert row["passenger_phone"] == "86 13800000000"
+    assert row["more_contacts"] == "【同行人】852-69000001"
+    assert row["flight_number"] == "CX100"
+    assert row["passenger_exit_minutes"] == 30
+    assert row["distance_km"] == 30
+    # an absent flight number is not a changed one, so the matched flight stays
+    assert row["flight_eta"] == "14:26"
+    assert row["flight_status"] == "gate"
+    assert row["reminders_sent"] == "landed"
+
+
+def test_update_from_message_omitting_everything_writes_nothing(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    before = raw_row(db_path, "TEST001")
+    blank = {f: "" for f in ("passenger_name", "passenger_phone", "overseas_phone",
+                             "flight_number", "pickup", "dropoff", "vehicle_type",
+                             "service_type", "scheduled_time", "notes", "driver_notes",
+                             "additional_services", "third_party_contact", "more_contacts")}
+    assert update_order_from_message(db_path, make_order(distance_km=None,
+                                                         passenger_exit_minutes=None, **blank),
+                                     telegram_msg_id=2, source="携程") == []
+    assert raw_row(db_path, "TEST001") == before
+
+
+def test_update_from_message_omitted_services_keep_the_banner_fee(db_path):
+    """banner_fee follows 附加服务; silence about the service leaves the fee alone."""
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path, additional_services="举牌")
+    assert raw_row(db_path, "TEST001")["banner_fee"] == 40.0
+    update_order_from_message(db_path, make_order(dropoff="中環", additional_services=""),
+                              telegram_msg_id=2, source="携程")
+    row = raw_row(db_path, "TEST001")
+    assert row["additional_services"] == "举牌"
+    assert row["banner_fee"] == 40.0
+
+
 # ---- diff ----
 
 def test_diff_reports_label_order_and_display_values(db_path):
@@ -318,12 +370,23 @@ def test_diff_reports_label_order_and_display_values(db_path):
         row=row, source="携程",
         order=make_order(distance_km=49.105, dropoff="坑口", passenger_exit_minutes=None),
     )
+    # 出場 is left out: the re-send omitting it says nothing about it.
     assert changes == [
         ("dropoff", "尖沙咀", "坑口"),
         ("distance_km", "30 km", "49.105 km"),
-        ("passenger_exit_minutes", "30分鐘", ""),
     ]
-    assert [DIFF_LABELS[f] for f, _, _ in changes] == ["目的地", "里程", "出場"]
+    assert [DIFF_LABELS[f] for f, _, _ in changes] == ["目的地", "里程"]
+
+
+def test_diff_skips_fields_the_resend_omits(db_path):
+    from ride_dispatch.db import diff_order_against_row
+    seed_active(db_path, more_contacts="【同行人】852-69000001")
+    row = raw_row(db_path, "TEST001")
+    changes = diff_order_against_row(
+        make_order(dropoff="坑口", passenger_phone="", more_contacts="", flight_number=""),
+        row, "携程",
+    )
+    assert [f for f, _, _ in changes] == ["dropoff"]
 
 
 def test_diff_ignores_banner_fee_when_services_unchanged(db_path):
