@@ -14,15 +14,17 @@ from .db import (
     count_active_orders,
     create_settlement,
     delete_settlement,
+    diff_order_against_row,
     get_orders_by_date,
     get_order_by_id,
     get_settle_month,
     mark_settlement_paid,
-    active_order_id_exists,
     save_or_revive_order,
     save_quick_order,
     update_order_fields,
+    update_order_from_message,
     update_price,
+    DIFF_LABELS,
 )
 from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
@@ -114,12 +116,21 @@ def api_parse_order():
     order, source = parse_any(text)
     if not order.order_id:
         return jsonify({"error": "認唔到格式"}), 400
+    # A live row on the same order_id means the platform re-sent the booking
+    # after the customer changed something: the paste is an amendment, and
+    # changes says what it would rewrite.
+    row = get_order_by_id(DB_PATH, order.order_id)
+    changes = diff_order_against_row(order, row, source) if row else []
     return jsonify({
         "order": asdict(order),
         "source": source,
         "parking_fee": parking_fee(order, source),
         "banner_fee": banner_fee(order.additional_services),
-        "duplicate": active_order_id_exists(DB_PATH, order.order_id),
+        "duplicate": row is not None,
+        "changes": [{"field": f, "label": DIFF_LABELS[f], "old": old, "new": new}
+                    for f, old, new in changes],
+        "locked": bool(row and row["settlement_id"] is not None),
+        "current_price": row["price"] if row else None,
         "suggested_price": suggest_price(DB_PATH, order),
         "exit_urgency": exit_urgency(order.passenger_exit_minutes),
     })
@@ -169,6 +180,25 @@ def _create_paste_order(body):
         price, perr = _parse_money(body.get("price"), "price")
         if perr:
             return perr
+    date_str = order.scheduled_time.split(" ")[0]
+    # A message landing on a live row is the customer's amendment, not a
+    # duplicate — apply it in place.  None means no live row holds the id, so
+    # this is a first entry or the re-entry of a cancelled leg.
+    try:
+        changed = update_order_from_message(DB_PATH, order, telegram_msg_id=None, source=source)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    if changed is not None:
+        kept = (get_order_by_id(DB_PATH, order.order_id) or {}).get("price")
+        if price is not None:
+            update_price(DB_PATH, order.order_id, price)
+        if changed:
+            _kick_bot()
+        return jsonify({"order_id": order.order_id,
+                        "date": date_str,
+                        "updated": bool(changed),
+                        "changed": [DIFF_LABELS[f] for f in changed],
+                        "price_kept": kept if price is None else None}), 200
     try:
         revived = save_or_revive_order(DB_PATH, order, telegram_msg_id=None,
                                        parking=parking_fee(order, source), source=source)
@@ -178,7 +208,7 @@ def _create_paste_order(body):
         update_price(DB_PATH, order.order_id, price)
     _kick_bot()
     return jsonify({"order_id": order.order_id,
-                    "date": order.scheduled_time.split(" ")[0],
+                    "date": date_str,
                     "revived": revived}), 201
 
 

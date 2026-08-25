@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -75,6 +75,17 @@ def format_card(order) -> str:
     return "\n".join(lines)
 
 
+CHANGE_EMPTY = "—"
+
+
+def format_change_lines(changes: list[tuple[str, str, str]]) -> str:
+    """One "label：old → new" line per changed field."""
+    return "\n".join(
+        f"{DIFF_LABELS[field]}：{old or CHANGE_EMPTY} → {new or CHANGE_EMPTY}"
+        for field, old, new in changes
+    )
+
+
 def _latest_pending_for_chat(pending_dict: dict, chat_id: int) -> tuple[int, tuple] | None:
     """Return (card_msg_id, entry) for the newest pending card in a chat, or None."""
     result = None
@@ -82,6 +93,67 @@ def _latest_pending_for_chat(pending_dict: dict, chat_id: int) -> tuple[int, tup
         if entry[2] == chat_id:
             result = (msg_id, entry)
     return result
+
+
+def _pending_is_update(entry: tuple) -> bool:
+    """Whether a pending card offers an update rather than a new entry.
+
+    A card is (order, source, chat_id); one raised for a message re-sent
+    against a row that is already active carries a fourth element saying so.
+    """
+    return len(entry) > 3 and bool(entry[3])
+
+
+async def _apply_update(message, context, order, source: str, price: float | None = None) -> bool:
+    """Write a re-sent message onto its active row; True once it landed.
+
+    The reply is sent before the write because its message id becomes the row's
+    telegram_msg_id — a reply to it sets the price, exactly as on the confirm
+    path.
+    """
+    short = order.order_id[-4:]
+    row = get_order_by_id(DB_PATH, order.order_id)
+    if row is None:
+        await message.reply_text(f"訂單 #{short} 已經唔喺度，冇更新到。")
+        return False
+    if row["settlement_id"] is not None:
+        await message.reply_text(f"#{short} {SETTLED_LOCK_MSG}")
+        return False
+    changed = diff_order_against_row(order, row, source)
+    if not changed:
+        await message.reply_text(f"#{short} 同 DB 一樣，冇嘢改")
+        return False
+
+    banner = banner_fee(order.additional_services)
+    text = f"已更新 #{short}：" + "、".join(DIFF_LABELS[f] for f, _, _ in changed)
+    if price is not None:
+        text += f"\n價錢 ${price:g}"
+        if banner:
+            text += f"（+舉牌${banner:g}）"
+    elif row["price"] is not None:
+        text += f"\n價錢 ${row['price']:g} 保留，要改直接打新價"
+    else:
+        text += "\n直接打價錢。"
+        if banner:
+            text += f"（會自動加${banner:g}舉牌費）"
+    sent = await message.reply_text(text)
+
+    try:
+        applied = update_order_from_message(DB_PATH, order, telegram_msg_id=sent.message_id,
+                                            source=source)
+    except ValueError as e:
+        await message.reply_text(f"#{short} {e}")
+        return False
+    if applied is None:
+        await message.reply_text(f"訂單 #{short} 已經唔喺度，冇更新到。")
+        return False
+    if price is not None:
+        update_price(DB_PATH, order.order_id, price)
+    else:
+        awaiting_price[message.chat_id] = (order.order_id, banner)
+    # A changed flight or 用車時間 needs the tracker to re-match right away.
+    _kick_poll(context)
+    return True
 
 
 async def handle_message(update: Update, context):
@@ -148,26 +220,56 @@ async def handle_message(update: Update, context):
             return
         card_msg_id, entry = hit
         pending.pop(card_msg_id)
-        pending_order, source, _ = entry
-        parking = parking_fee(pending_order, source)
-        banner = banner_fee(pending_order.additional_services)
-        try:
-            revived = save_or_revive_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
-            update_price(DB_PATH, pending_order.order_id, price)
-            _kick_poll(context)
-            head = "已重新入單" if revived else "已入單"
-            reply = f"{head} #{pending_order.order_id[-4:]}: ${price:g}"
-            if banner:
-                reply += "（+舉牌$40）"
-            await msg.reply_text(reply)
-        except sqlite3.IntegrityError:
-            await msg.reply_text("呢張單已經存在。")
+        pending_order, source = entry[0], entry[1]
+        if _pending_is_update(entry):
+            await _apply_update(msg, context, pending_order, source, price=price)
+        else:
+            parking = parking_fee(pending_order, source)
+            banner = banner_fee(pending_order.additional_services)
+            try:
+                revived = save_or_revive_order(DB_PATH, pending_order, telegram_msg_id=card_msg_id, parking=parking, source=source)
+                update_price(DB_PATH, pending_order.order_id, price)
+                _kick_poll(context)
+                head = "已重新入單" if revived else "已入單"
+                reply = f"{head} #{pending_order.order_id[-4:]}: ${price:g}"
+                if banner:
+                    reply += "（+舉牌$40）"
+                await msg.reply_text(reply)
+            except sqlite3.IntegrityError:
+                await msg.reply_text("呢張單已經存在。")
         try:
             await context.bot.edit_message_reply_markup(
                 chat_id=chat_id, message_id=card_msg_id, reply_markup=None
             )
         except Exception:
             pass
+        return
+
+    # The platform re-sends the whole message when the customer changes a
+    # detail, so a message landing on a live row is an amendment, not a
+    # duplicate: the card offers the diff instead of the parsed order.  A
+    # cancelled row falls through to the normal card and the revive path.
+    existing = get_order_by_id(DB_PATH, order.order_id)
+    if existing:
+        short = order.order_id[-4:]
+        if existing["settlement_id"] is not None:
+            await msg.reply_text(f"#{short} {SETTLED_LOCK_MSG}")
+            return
+        changes = diff_order_against_row(order, existing, source)
+        if not changes:
+            await msg.reply_text(f"#{short} 同 DB 一樣，冇嘢改")
+            return
+        keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("更新", callback_data="update"),
+                InlineKeyboardButton("略過", callback_data="skip"),
+            ]]
+        )
+        sent = await msg.reply_text(
+            f"#{short} 已有此單，變更：\n" + format_change_lines(changes),
+            reply_markup=keyboard,
+        )
+        pending[sent.message_id] = (order, source, chat_id, True)
         return
 
     text = format_card(order)
@@ -214,6 +316,20 @@ async def handle_callback(update: Update, context):
             await query.message.edit_reply_markup(reply_markup=None)
             await query.answer("訂單已存在")
             await query.message.reply_text("呢張單已經存在。")
+
+    elif query.data == "update":
+        entry = pending.pop(msg_id, None)
+        if not entry:
+            await query.answer("訂單已過期")
+            return
+        await query.message.edit_reply_markup(reply_markup=None)
+        applied = await _apply_update(query.message, context, entry[0], entry[1])
+        await query.answer("已更新" if applied else "冇更新到")
+
+    elif query.data == "skip":
+        pending.pop(msg_id, None)
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer("已略過")
 
     elif query.data == "cancel":
         pending.pop(msg_id, None)
