@@ -149,6 +149,11 @@ PASTE_MSG = """服务类型: 接机
 PASTE_CHANGED_MSG = PASTE_MSG.replace(
     "下车点: 九龙塘又一城", "下车点: 新界坑口裕明苑裕昌閣B座\n订单里程: 49.105")
 
+# A re-send does not have to repeat every line the first message carried; the
+# contact numbers are the ones it usually drops.
+PASTE_NO_PHONE_MSG = "\n".join(
+    l for l in PASTE_CHANGED_MSG.splitlines() if not l.startswith("乘客电话"))
+
 
 # ---- parse preview ----
 
@@ -193,6 +198,13 @@ def test_parse_preview_reports_changes_against_a_live_row(client):
         {"field": "dropoff", "label": "目的地", "old": "九龙塘又一城", "new": "新界坑口裕明苑裕昌閣B座"},
         {"field": "distance_km", "label": "里程", "old": "", "new": "49.105 km"},
     ]
+
+
+def test_parse_preview_ignores_fields_the_resend_omits(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    data = client.post("/api/orders/parse", json={"text": PASTE_NO_PHONE_MSG}).get_json()
+    # the dropped 乘客电话 line is silence, not a request to clear the number
+    assert [c["field"] for c in data["changes"]] == ["dropoff", "distance_km"]
 
 
 def test_parse_preview_identical_resend_has_no_changes(client):
@@ -284,6 +296,16 @@ def test_paste_on_a_live_order_updates_it(client):
     # one row, not two
     listed = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
     assert [o["order_id"] for o in listed] == ["1128000000000099"]
+
+
+def test_paste_update_keeps_the_phone_the_resend_omits(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_NO_PHONE_MSG})
+    assert res.status_code == 200
+    assert res.get_json()["changed"] == ["目的地", "里程"]
+    row = get_order_by_id(web.DB_PATH, "1128000000000099")
+    assert row["passenger_phone"] == "86 13800000003"
+    assert row["dropoff"] == "新界坑口裕明苑裕昌閣B座"
 
 
 def test_paste_update_with_a_new_price_sets_it(client):
