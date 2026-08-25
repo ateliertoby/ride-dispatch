@@ -216,6 +216,49 @@ def test_parse_tongcheng_unparsable_distance():
     assert parse_tongcheng(raw).distance_km is None
 
 
+# 订单号 suffixes: the message is re-sent with a different one whenever the
+# customer changes a detail, and every variant has to resolve to the one id.
+def _tc_oid(value: str) -> str:
+    raw = TONGCHENG_MSG.replace("VBKTEST00000000000001-同程", value)
+    return parse_tongcheng(raw).order_id
+
+
+def test_parse_tongcheng_order_id_strips_channel_suffix():
+    assert _tc_oid("VBKTEST00000000000001-同程") == "VBKTEST00000000000001"
+
+
+def test_parse_tongcheng_order_id_strips_service_type_suffix():
+    assert _tc_oid("VBKTEST00000000000001（接机）") == "VBKTEST00000000000001"
+
+
+def test_parse_tongcheng_order_id_bare_is_unchanged():
+    assert _tc_oid("VBKTEST00000000000001") == "VBKTEST00000000000001"
+
+
+def test_parse_tongcheng_order_id_empty_without_leading_alnum():
+    assert _tc_oid("（接机）") == ""
+
+
+TONGCHENG_RESENT_MSG = """订单号：VBKSYNTHETIC0000002（接机）
+车型：经济5座
+用车时间：2026-08-25 17:25:00
+出发地：香港国际机场 T1
+目的地：新界坑口裕明苑裕昌閣B座
+订单里程：49.105 km
+行驶时长：44 分钟
+航班号：￥ 3U3959
+乘客姓名CHAN,TAIMAN"""
+
+
+def test_parse_tongcheng_resent_message():
+    order = parse_tongcheng(TONGCHENG_RESENT_MSG)
+    assert order.order_id == "VBKSYNTHETIC0000002"
+    assert order.service_type == "接机"
+    assert order.dropoff == "新界坑口裕明苑裕昌閣B座"
+    assert order.distance_km == 49.105
+    assert order.flight_number == "3U3959"
+
+
 # Same one-line layout, but the airport end is named by terminal only and the
 # direction is spelled out in 名称 — the shape that shipped an empty
 # service_type to production.

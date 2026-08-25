@@ -165,6 +165,13 @@ _TC_NO_COLON = {
 # labelled field, in either script depending on who relayed it.
 _TC_BANNER_MARKERS = ("舉牌", "举牌")
 
+# The order number is the leading alphanumeric run of 订单号; whatever follows
+# it annotates the message, not the booking — "-同程" names the channel, and a
+# message re-sent after the customer changed a detail carries the service type
+# instead ("（接机）").  Both must resolve to the same id, or the change lands
+# on a second row.
+_TC_OID_RE = re.compile(r"[A-Za-z0-9]+")
+
 
 def _tc_no_colon_fields(line: str):
     """Yield (field, value) for every unlabelled-field marker on one line.
@@ -222,9 +229,8 @@ def parse_tongcheng(raw: str) -> Order:
             for field, value in _tc_no_colon_fields(line):
                 parsed[field] = value
 
-    oid = parsed.get("order_id", "")
-    if "-" in oid:
-        oid = oid.split("-")[0]
+    m = _TC_OID_RE.match(parsed.get("order_id", ""))
+    oid = m.group(0) if m else ""
     parsed["order_id"] = oid
 
     if not oid:
