@@ -1,5 +1,6 @@
 import os
 import tempfile
+from datetime import datetime
 import pytest
 import ride_dispatch.web as web
 from ride_dispatch.db import init_db, save_quick_order, get_orders_by_date, get_order_by_id
@@ -144,6 +145,10 @@ PASTE_MSG = """服务类型: 接机
 乘客出场时长: 30
 乘客电话: 86 13800000003"""
 
+# The same booking re-sent after the customer gave a full address.
+PASTE_CHANGED_MSG = PASTE_MSG.replace(
+    "下车点: 九龙塘又一城", "下车点: 新界坑口裕明苑裕昌閣B座\n订单里程: 49.105")
+
 
 # ---- parse preview ----
 
@@ -170,6 +175,40 @@ def test_parse_preview_cancelled_is_not_duplicate(client):
     client.patch("/api/orders/1128000000000099", json={"status": "cancelled"})
     res = client.post("/api/orders/parse", json={"text": PASTE_MSG})
     assert res.get_json()["duplicate"] is False
+
+
+def test_parse_preview_reports_no_changes_for_a_new_order(client):
+    data = client.post("/api/orders/parse", json={"text": PASTE_MSG}).get_json()
+    assert data["changes"] == []
+    assert data["locked"] is False
+    assert data["current_price"] is None
+
+
+def test_parse_preview_reports_changes_against_a_live_row(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    data = client.post("/api/orders/parse", json={"text": PASTE_CHANGED_MSG}).get_json()
+    assert data["duplicate"] is True
+    assert data["current_price"] == 500.0
+    assert data["changes"] == [
+        {"field": "dropoff", "label": "目的地", "old": "九龙塘又一城", "new": "新界坑口裕明苑裕昌閣B座"},
+        {"field": "distance_km", "label": "里程", "old": "", "new": "49.105 km"},
+    ]
+
+
+def test_parse_preview_identical_resend_has_no_changes(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    data = client.post("/api/orders/parse", json={"text": PASTE_MSG}).get_json()
+    assert data["duplicate"] is True
+    assert data["changes"] == []
+
+
+def test_parse_preview_locked_when_settled(client):
+    from ride_dispatch.db import create_settlement
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                      now=datetime(2026, 7, 23, 9, 0))
+    data = client.post("/api/orders/parse", json={"text": PASTE_CHANGED_MSG}).get_json()
+    assert data["locked"] is True
 
 
 def test_parse_preview_rejects_garbage(client):
@@ -217,10 +256,53 @@ def test_paste_save_without_price(client):
     assert row["parking_fee"] == 0
 
 
-def test_paste_duplicate_409(client):
-    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+def test_paste_identical_resend_changes_nothing(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
     res = client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["updated"] is False
+    assert data["changed"] == []
+    assert get_order_by_id(web.DB_PATH, "1128000000000099")["price"] == 500
+
+
+def test_paste_on_a_live_order_updates_it(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_CHANGED_MSG})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["order_id"] == "1128000000000099"
+    assert data["date"] == "2026-07-22"
+    assert data["updated"] is True
+    assert data["changed"] == ["目的地", "里程"]
+    assert data["price_kept"] == 500.0
+    row = get_order_by_id(web.DB_PATH, "1128000000000099")
+    assert row["dropoff"] == "新界坑口裕明苑裕昌閣B座"
+    assert row["distance_km"] == 49.105
+    assert row["price"] == 500.0                    # operator-entered, kept
+    assert row["parking_fee"] == 32.0
+    # one row, not two
+    listed = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    assert [o["order_id"] for o in listed] == ["1128000000000099"]
+
+
+def test_paste_update_with_a_new_price_sets_it(client):
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_CHANGED_MSG, "price": 620})
+    assert res.status_code == 200
+    assert res.get_json()["price_kept"] is None
+    assert get_order_by_id(web.DB_PATH, "1128000000000099")["price"] == 620
+
+
+def test_paste_on_a_settled_order_409(client):
+    from ride_dispatch.db import SETTLED_LOCK_MSG, create_settlement
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                      now=datetime(2026, 7, 23, 9, 0))
+    res = client.post("/api/orders", json={"type": "paste", "text": PASTE_CHANGED_MSG})
     assert res.status_code == 409
+    assert res.get_json()["error"] == SETTLED_LOCK_MSG
+    assert get_order_by_id(web.DB_PATH, "1128000000000099")["dropoff"] == "九龙塘又一城"
 
 
 def test_paste_revives_cancelled_order(client):

@@ -226,6 +226,10 @@
   }
   .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
   .paste-preview .sum-row .v { text-align: right; }
+  /* A change row carries two addresses, so its value wraps to several lines;
+     the label must keep its own width instead of collapsing to one character
+     per line beside it. */
+  .paste-preview.changes .sum-row .k { flex-shrink: 0; }
   @keyframes row-in { from { opacity: 0; transform: translateY(4px); } }
   .paste-preview .sum-row {
     animation: row-in .25s both;
@@ -304,6 +308,10 @@
     border-radius: 10px; padding: 10px 12px; font-size: 14px;
     font-weight: 600; margin-top: 10px;
   }
+
+  /* Change rows read "was → now": the superseded value stays legible but
+     recedes, so the eye lands on what the message actually says. */
+  .sum-row .v .was { color: var(--text-3); }
 
   .sum-row .v.urgent { color: var(--red); }
   .sum-row .v.tight { color: var(--amber); }
@@ -1228,12 +1236,37 @@ function pastePriceView() {
     (r[2] ? ' ' + esc(r[2]) : '') + '">' + esc(r[1]) + '</span></div>'
   ).join('') + '</div>';
 
+  // A live row on the same order number means the platform re-sent the
+  // booking because the customer changed something: price the amendment
+  // instead of refusing it, and preview only what it rewrites.
   if (p.duplicate) {
-    return function view(sheet) {
+    const deadEnd = (title, warn) => function view(sheet) {
       sheet.insertAdjacentHTML('beforeend',
-        sheetHead('貼單 · 已入過', '#' + esc(shortId(o.order_id))) +
-        '<div class="dup-warn">呢張單已經入過</div>' + rowsHtml);
+        sheetHead(title, '#' + esc(shortId(o.order_id))) +
+        '<div class="dup-warn">' + esc(warn) + '</div>' + rowsHtml);
     };
+    if (p.locked) return deadEnd('貼單 · 已結算', '已結算嘅單要先撤銷結算');
+    if (!p.changes.length) {
+      return deadEnd('貼單 · 冇變更', '#' + shortId(o.order_id) + ' 同 DB 一樣，冇嘢改');
+    }
+    const changesHtml = '<div class="paste-preview changes">' + p.changes.map((c, i) =>
+      '<div class="sum-row" style="--i:' + i + '"><span class="k">' + esc(c.label) + '</span>' +
+      '<span class="v"><span class="was">' + esc(c.old || '—') + '</span> &rarr; ' +
+      esc(c.new || '—') + '</span></div>'
+    ).join('') + '</div>';
+    const kept = p.current_price;
+    return numpadView({
+      title: '#' + shortId(o.order_id) + ' · 更新',
+      above: changesHtml, mode: 'money', layout: 'pay',
+      // Confirming the prefilled price keeps what the order already earns —
+      // an amendment reprices only when the operator says so.
+      suggest: kept != null ? kept : null,
+      skip: {
+        label: kept != null ? '保留 $' + $(kept) + '，直接更新' : '先唔入價，直接更新',
+        onTap: () => savePaste(null),
+      },
+      onConfirm: v => savePaste(v),
+    });
   }
   return numpadView({
     title: '#' + shortId(o.order_id) + ' · 入價',
@@ -1254,7 +1287,10 @@ async function savePaste(price) {
     if (filter && filter !== 'ride') filter = null;    // pasted orders are platform rides; drop any filter that would hide the new card
     revealId = res.order_id;
     closeDrop();
-    toast((res.revived ? '已重新入單 #' : '已入單 #') + shortId(res.order_id));
+    // An amendment answers with updated; a fresh entry answers with revived.
+    const head = 'updated' in res ? (res.updated ? '已更新 #' : '冇嘢改 #')
+      : (res.revived ? '已重新入單 #' : '已入單 #');
+    toast(head + shortId(res.order_id));
     load();
   } catch (e) {
     toast(e.message);

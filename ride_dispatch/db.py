@@ -257,6 +257,130 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
         return cur.rowcount > 0
 
 
+# A platform re-sends the whole order message when the customer changes a
+# detail, so the fields the message carries follow the message and the values
+# the operator typed in are kept.  parking_fee is therefore absent from the
+# overwrite even though entry derives it: it is money the operator can edit
+# afterwards (update_cost), same as price.  banner_fee has no such edit worth
+# defending — it is a pure function of 附加服务 — so it rides along with the
+# rest and is re-derived from the new message.
+_UPDATE_COLS = tuple(c for c in _ORDER_COLS if c != "parking_fee")
+
+_FLIGHT_STATE_COLS = (
+    "flight_scheduled", "flight_eta", "flight_gate", "flight_status",
+    "flight_hall", "estimated_landing",
+)
+
+# The fields worth telling the operator about, in the order they are shown.
+# raw_message and telegram_msg_id are deliberately absent: they differ on every
+# re-send and would report a change where the booking has none.  banner_fee is
+# absent too — it is written, but it moves only with 附加服务, which is listed,
+# and diffing it as well would report an operator's waived fee as a change.
+DIFF_LABELS = {
+    "service_type": "類型",
+    "scheduled_time": "時間",
+    "passenger_name": "乘客",
+    "passenger_phone": "電話",
+    "overseas_phone": "境外電話",
+    "flight_number": "航班",
+    "pickup": "上車",
+    "dropoff": "目的地",
+    "distance_km": "里程",
+    "passenger_exit_minutes": "出場",
+    "vehicle_type": "車型",
+    "additional_services": "附加服務",
+    "driver_notes": "備註",
+    "notes": "訂單備註",
+    "third_party_contact": "第三方聯絡",
+    "more_contacts": "更多聯絡",
+    "source": "平台",
+}
+
+_NUMERIC_DIFF_FIELDS = {"distance_km", "passenger_exit_minutes"}
+
+
+def _diff_key(field: str, value):
+    """Comparison form of a field: what makes two entries the same booking."""
+    if field in _NUMERIC_DIFF_FIELDS:
+        return None if value is None or value == "" else float(value)
+    # A field the parser leaves empty is stored as "" by one entry path and as
+    # NULL by another; neither means the booking changed.
+    return (value or "").strip()
+
+
+def _diff_text(field: str, value) -> str:
+    """Display form of a field; "" when there is nothing to show."""
+    if value is None or value == "":
+        return ""
+    if field == "distance_km":
+        return f"{float(value):g} km"
+    if field == "passenger_exit_minutes":
+        return f"{int(value)}分鐘"
+    return str(value).strip()
+
+
+def diff_order_against_row(order: Order, row, source: str = "") -> list[tuple[str, str, str]]:
+    """What a re-sent message changes on the row already holding its order_id.
+
+    Returns (field, old_display, new_display) for every changed field, in
+    DIFF_LABELS order.  Bot and web both ask this so the two can never disagree
+    about what "changed" means.
+    """
+    changes = []
+    for field in DIFF_LABELS:
+        new = source if field == "source" else getattr(order, field)
+        old = row[field]
+        if _diff_key(field, old) != _diff_key(field, new):
+            changes.append((field, _diff_text(field, old), _diff_text(field, new)))
+    return changes
+
+
+def update_order_from_message(db_path: str, order: Order, telegram_msg_id: int | None,
+                              source: str = "") -> list[str] | None:
+    """Apply a re-sent message to the active row holding its order_id.
+
+    Returns the changed field names, [] when the message says nothing new (and
+    then nothing is written), or None when no active row holds the order_id any
+    more.  Raises ValueError(SETTLED_LOCK_MSG) for a batched row: its fields
+    were summed into a frozen expected_amount.
+    """
+    values = dict(zip(_ORDER_COLS, _order_params(order, telegram_msg_id, 0.0, source)))
+    # The parking fee handed to _order_params above is a placeholder: this call
+    # does not own that column.  Dropping it turns a future attempt to write it
+    # from here into a KeyError instead of a silent zero.
+    del values["parking_fee"]
+    with _conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE order_id = ? AND coalesce(status,'active') = 'active'",
+            (order.order_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        _assert_unbatched(conn, order.order_id)
+        changed = [f for f, _, _ in diff_order_against_row(order, row, source)]
+        if not changed:
+            return []
+        sets = [f"{c} = ?" for c in _UPDATE_COLS]
+        params = [values[c] for c in _UPDATE_COLS]
+        # An already-matched tracker is worth more than a clean slate, so the
+        # flight state is dropped only when the message moved the flight or the
+        # pickup time — the two inputs the match is made from.
+        if {"flight_number", "scheduled_time"} & set(changed):
+            sets += [f"{c} = NULL" for c in _FLIGHT_STATE_COLS] + ["reminders_sent = ''"]
+        # The status/settlement guard is repeated in the WHERE so a row
+        # cancelled or batched since the SELECT cannot be written behind
+        # the other writer's back.
+        cur = conn.execute(
+            f"UPDATE orders SET {', '.join(sets)} WHERE order_id = ? "
+            "AND coalesce(status,'active') = 'active' AND settlement_id IS NULL",
+            (*params, order.order_id),
+        )
+        if cur.rowcount == 0:
+            return None
+        conn.commit()
+        return changed
+
+
 def cancel_order(db_path: str, order_id: str):
     with _conn(db_path) as conn:
         _assert_unbatched(conn, order_id)

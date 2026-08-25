@@ -179,6 +179,161 @@ def test_revive_leaves_one_row_and_one_active_order(db_path):
     assert count_active_orders(db_path) == 1
 
 
+# ---- re-entry of an active order (the customer changed a detail) ----
+
+def seed_active(db_path, **overrides):
+    """An entered, priced order with a matched flight and a sent reminder."""
+    from ride_dispatch.db import (_conn, mark_reminder_sent, save_or_revive_order,
+                                  update_cost, update_price)
+    save_or_revive_order(db_path, make_order(**overrides), telegram_msg_id=1,
+                         parking=32.0, source="携程")
+    update_price(db_path, "TEST001", 500.0)
+    update_cost(db_path, "TEST001", "tunnel", 50.0)
+    update_flight_info(db_path, "TEST001", scheduled="14:40", eta="14:26", gate="14:35",
+                       status="gate", hall="A")
+    mark_reminder_sent(db_path, "TEST001", "landed")
+    with _conn(db_path) as conn:
+        conn.execute("UPDATE orders SET created_at = '2020-01-01 00:00:00' "
+                     "WHERE order_id = 'TEST001'")
+        conn.commit()
+
+
+def test_update_from_message_overwrites_message_fields(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    before = raw_row(db_path, "TEST001")
+
+    changed = update_order_from_message(
+        db_path,
+        make_order(dropoff="新界坑口裕明苑裕昌閣B座", distance_km=49.105,
+                   additional_services="举牌", raw_message="re-sent"),
+        telegram_msg_id=77, source="同程",
+    )
+    assert changed == ["dropoff", "distance_km", "additional_services", "source"]
+
+    row = raw_row(db_path, "TEST001")
+    assert row["id"] == before["id"]                       # same row, not a second one
+    assert row["dropoff"] == "新界坑口裕明苑裕昌閣B座"
+    assert row["distance_km"] == 49.105
+    assert row["raw_message"] == "re-sent"
+    assert row["telegram_msg_id"] == 77
+    assert row["source"] == "同程"
+    assert row["banner_fee"] == 40.0                       # re-derived from the new message
+    # operator-entered values survive
+    assert row["price"] == 500.0
+    assert row["tunnel_fee"] == 50.0
+    assert row["parking_fee"] == 32.0
+    assert row["status"] == "active"
+    assert row["settlement_id"] is None
+    assert row["created_at"] == "2020-01-01 00:00:00"
+
+
+def test_update_from_message_keeps_flight_state_when_flight_unchanged(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    assert update_order_from_message(db_path, make_order(dropoff="中環"),
+                                     telegram_msg_id=2, source="携程") == ["dropoff"]
+    row = raw_row(db_path, "TEST001")
+    assert row["flight_eta"] == "14:26"
+    assert row["flight_gate"] == "14:35"
+    assert row["flight_status"] == "gate"
+    assert row["reminders_sent"] == "landed"
+
+
+def test_update_from_message_resets_flight_state_on_new_flight(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    assert update_order_from_message(db_path, make_order(flight_number="CX200"),
+                                     telegram_msg_id=2, source="携程") == ["flight_number"]
+    row = raw_row(db_path, "TEST001")
+    for col in ("flight_scheduled", "flight_eta", "flight_gate", "flight_status",
+                "flight_hall", "estimated_landing"):
+        assert row[col] is None
+    assert row["reminders_sent"] == ""
+
+
+def test_update_from_message_resets_flight_state_on_new_time(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    assert update_order_from_message(db_path, make_order(scheduled_time="2026-06-27 13:00:00"),
+                                     telegram_msg_id=2, source="携程") == ["scheduled_time"]
+    assert raw_row(db_path, "TEST001")["flight_eta"] is None
+
+
+def test_update_from_message_identical_writes_nothing(db_path):
+    from ride_dispatch.db import update_order_from_message
+    seed_active(db_path)
+    before = raw_row(db_path, "TEST001")
+    # A re-send with a new telegram_msg_id and a re-pasted raw_message is still
+    # the same booking: neither may count as a change.
+    assert update_order_from_message(db_path, make_order(raw_message="pasted again"),
+                                     telegram_msg_id=999, source="携程") == []
+    assert raw_row(db_path, "TEST001") == before
+
+
+def test_update_from_message_treats_null_and_empty_as_the_same(db_path):
+    from ride_dispatch.db import _conn, update_order_from_message
+    seed_active(db_path)
+    with _conn(db_path) as conn:
+        conn.execute("UPDATE orders SET driver_notes = NULL WHERE order_id = 'TEST001'")
+        conn.commit()
+    assert update_order_from_message(db_path, make_order(driver_notes=""),
+                                     telegram_msg_id=2, source="携程") == []
+
+
+def test_update_from_message_settled_row_raises(db_path):
+    from ride_dispatch.db import SETTLED_LOCK_MSG, create_settlement, update_order_from_message
+    seed_active(db_path, scheduled_time="2026-06-27 11:00:00")
+    create_settlement(db_path, "ride", ["TEST001"], 500.0, "2026-06-28",
+                      now=datetime(2026, 6, 28, 9, 0))
+    with pytest.raises(ValueError, match=SETTLED_LOCK_MSG):
+        update_order_from_message(db_path, make_order(dropoff="中環"),
+                                  telegram_msg_id=2, source="携程")
+    assert raw_row(db_path, "TEST001")["dropoff"] == "尖沙咀"
+
+
+def test_update_from_message_leaves_a_cancelled_row_alone(db_path):
+    from ride_dispatch.db import cancel_order, update_order_from_message
+    seed_active(db_path)
+    cancel_order(db_path, "TEST001")
+    before = raw_row(db_path, "TEST001")
+    assert update_order_from_message(db_path, make_order(dropoff="中環"),
+                                     telegram_msg_id=2, source="携程") is None
+    assert raw_row(db_path, "TEST001") == before
+
+
+def test_update_from_message_unknown_order(db_path):
+    from ride_dispatch.db import update_order_from_message
+    assert update_order_from_message(db_path, make_order(), telegram_msg_id=1,
+                                     source="携程") is None
+
+
+# ---- diff ----
+
+def test_diff_reports_label_order_and_display_values(db_path):
+    from ride_dispatch.db import DIFF_LABELS, diff_order_against_row
+    seed_active(db_path)
+    row = raw_row(db_path, "TEST001")
+    changes = diff_order_against_row(
+        row=row, source="携程",
+        order=make_order(distance_km=49.105, dropoff="坑口", passenger_exit_minutes=None),
+    )
+    assert changes == [
+        ("dropoff", "尖沙咀", "坑口"),
+        ("distance_km", "30 km", "49.105 km"),
+        ("passenger_exit_minutes", "30分鐘", ""),
+    ]
+    assert [DIFF_LABELS[f] for f, _, _ in changes] == ["目的地", "里程", "出場"]
+
+
+def test_diff_ignores_banner_fee_when_services_unchanged(db_path):
+    from ride_dispatch.db import diff_order_against_row, update_order_fields
+    seed_active(db_path, additional_services="举牌")
+    update_order_fields(db_path, "TEST001", {"banner_fee": 0.0})   # operator waived it
+    row = raw_row(db_path, "TEST001")
+    assert diff_order_against_row(make_order(additional_services="举牌"), row, "携程") == []
+
+
 def test_get_pickup_flights(db_path):
     save_order(db_path, make_order(order_id="P1", service_type="接机", flight_number="CX100", scheduled_time="2026-06-27 11:00:00"), 1)
     save_order(db_path, make_order(order_id="P2", service_type="送机", flight_number="QW916", scheduled_time="2026-06-27 12:00:00"), 2)
