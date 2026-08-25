@@ -60,6 +60,28 @@ def test_parse_any_tongcheng():
     assert order.more_contacts == ""
 
 
+# The same booking re-sent after the customer changed the destination: the
+# 订单号 suffix names the service type instead of the channel.
+TONGCHENG_RESENT_MSG = """订单号：TC9876543（接机）
+车型：经济5座
+用车时间：2026-08-25 17:25:00
+出发地：香港国际机场 T1
+目的地：新界坑口裕明苑裕昌閣B座
+订单里程：49.105 km
+行驶时长：44 分钟
+航班号：￥ 3U3959
+乘客姓名CHAN,TAIMAN"""
+
+
+def test_parse_any_tongcheng_resent_message():
+    order, source = parse_any(TONGCHENG_RESENT_MSG)
+    assert source == "同程"
+    assert order.order_id == "TC9876543"
+    assert order.service_type == "接机"
+    assert order.dropoff == "新界坑口裕明苑裕昌閣B座"
+    assert order.distance_km == 49.105
+
+
 TONGCHENG_BANNER_MSG = """订单号：TC1234567-同程用车
 车型：舒适5座
 用车时间：2026-08-09 21:45:00
