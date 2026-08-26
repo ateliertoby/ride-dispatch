@@ -860,6 +860,19 @@ def settlement_candidates(db_path: str, dates: list[str], now: datetime | None =
         return sorted(by_id.values(), key=lambda r: r["scheduled_time"] or "")
 
 
+def get_settleable_recent(db_path: str, days: int, now: datetime | None = None) -> list[dict]:
+    """Settleable ride orders scheduled in the last `days` days, oldest first."""
+    cutoff = _now_str(now)
+    since = ((now or datetime.now()) - timedelta(days=days)).strftime("%Y-%m-%d")
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT {_SETTLE_ORDER_COLS} FROM orders WHERE {_SETTLEABLE_SQL} AND scheduled_time >= ? "
+            "ORDER BY scheduled_time",
+            (cutoff, since),
+        ).fetchall()
+        return [dict(r) for r in rows if platform_of(r["service_type"]) == "ride"]
+
+
 # --- car park visits ---
 
 PARKING_UPDATABLE = {"paid", "paid_amount", "scheduled_exit", "payment_ref",

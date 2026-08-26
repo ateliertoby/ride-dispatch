@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, find_awaiting_settlements, mark_settlement_paid, settlement_candidates, get_settleable_recent
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -24,6 +24,7 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS, HOURLY_FEE)
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
+from . import statement
 from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError, cache_load as whiteboard_cache_load, cache_store as whiteboard_cache_store, cache_discard as whiteboard_cache_discard
 
 load_dotenv()
@@ -43,6 +44,11 @@ awaiting_price: dict[int, str] = {}
 awaiting_cost: dict[int, tuple[str, str]] = {}
 didi_state: dict[int, dict] = {}
 uber_state: dict[int, dict] = {}
+
+# Card message id → (chat_id, Reconciliation, statement JSON, image bytes).
+# The screenshot is kept in memory until the operator confirms so it can be
+# stored beside the batch; a skipped or expired card drops it.
+pending_statements: dict[int, tuple] = {}
 
 
 def format_card(order) -> str:
@@ -380,6 +386,42 @@ async def handle_callback(update: Update, context):
             ),
         )
 
+    elif query.data == "stmt:confirm":
+        entry = pending_statements.pop(msg_id, None)
+        if not entry:
+            await query.answer("已過期，再 send 一次張圖")
+            return
+        _chat, rec, stmt_json, image = entry
+        dates = sorted({d.date for d in rec.days})
+        try:
+            settlement_id = create_settlement(
+                DB_PATH, "ride", rec.settle_ids, rec.confirmed or 0.0,
+                datetime.now().strftime("%Y-%m-%d"), statement=stmt_json, image=image,
+            )
+        except ValueError as e:
+            await query.message.edit_reply_markup(reply_markup=None)
+            await query.answer("結算唔到")
+            await query.message.reply_text(f"結算唔到：{e}。再 send 一次張圖。")
+            return
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer("已結算")
+        await query.message.reply_text(statement.settled_reply(settlement_id, rec, dates))
+
+    elif query.data == "stmt:skip":
+        pending_statements.pop(msg_id, None)
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer("已略過")
+
+    elif query.data.startswith("stmt:paid:"):
+        settlement_id = int(query.data.rsplit(":", 1)[1])
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not mark_settlement_paid(DB_PATH, settlement_id, today):
+            await query.answer("搵唔到呢個 batch")
+            return
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer("已到帳")
+        await query.message.reply_text(f"批次 #{settlement_id} 已到帳（{today}）")
+
     elif query.data.startswith("park:pay:"):
         session_id = int(query.data.rsplit(":", 1)[1])
         session = get_parking_session(DB_PATH, session_id)
@@ -618,6 +660,77 @@ async def handle_parking(update: Update, context):
             else:
                 lines.append(f"{entry.strftime('%m-%d %H:%M')} 泊緊")
     await msg.reply_text("\n".join(lines), reply_markup=_pay_button(session["id"]) if session and not session.get("paid") else None)
+
+
+async def handle_statement_image(update: Update, context):
+    msg = update.message
+    if not msg:
+        return
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    if not statement.ocr_available():
+        await msg.reply_text(statement.fallback_report(get_settleable_recent(DB_PATH, days=14)))
+        return
+    file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
+    tg_file = await context.bot.get_file(file_id)
+    data = bytes(await tg_file.download_as_bytearray())
+    # CPU-bound and ~2 s: off the event loop so the heartbeat keeps ticking.
+    stmt = await asyncio.to_thread(statement.read_image, data)
+    if not stmt.days:
+        await msg.reply_text("讀唔到張圖（" + "；".join(stmt.warnings or ["冇日期 / 訂單行"]) + "）— 再 send 一次，或者用「Send as file」send 原檔")
+        return
+    dates = statement.dates_of(stmt)
+    orders = settlement_candidates(DB_PATH, dates)
+    rec = statement.reconcile(stmt, orders, datetime.now())
+    text = statement.format_report(rec)
+    if not rec.can_settle:
+        await msg.reply_text(text)
+        return
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(statement.confirm_label(rec), callback_data="stmt:confirm"),
+        InlineKeyboardButton("唔確認", callback_data="stmt:skip"),
+    ]])
+    sent = await msg.reply_text(text, reply_markup=keyboard)
+    pending_statements[sent.message_id] = (msg.chat_id, rec, stmt.to_json(), data)
+
+
+async def handle_paid(update: Update, context):
+    msg = update.message
+    if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    amount = None
+    if len(parts) > 1:
+        try:
+            amount = float(parts[1].replace(",", "").replace("$", ""))
+        except ValueError:
+            await msg.reply_text("用法：/paid 2540")
+            return
+    awaiting = find_awaiting_settlements(DB_PATH)
+    if not awaiting:
+        await msg.reply_text("冇 batch 等緊過數。")
+        return
+    hits = [b for b in awaiting if amount is not None and abs(b["confirmed_amount"] - amount) < 0.005]
+    if amount is not None and len(hits) == 1:
+        b = hits[0]
+        today = datetime.now().strftime("%Y-%m-%d")
+        mark_settlement_paid(DB_PATH, b["id"], today)
+        dates = sorted({o["scheduled_time"][:10] for o in b["orders"]})
+        await msg.reply_text(f"批次 #{b['id']} 已到帳 {statement.money_str(b['confirmed_amount'])} · "
+                             f"{statement.date_span_label(dates)} · {len(b['orders'])} 程")
+        return
+    if amount is not None and not hits:
+        head = f"冇 {statement.money_str(amount)} 嘅 batch 等緊過數，等緊嘅係："
+        choices = awaiting
+    elif amount is not None:
+        head = f"{len(hits)} 個 batch 都係 {statement.money_str(amount)}，揀邊個："
+        choices = hits
+    else:
+        head = "等緊過數："
+        choices = awaiting
+    buttons = [[InlineKeyboardButton(statement.awaiting_label(b), callback_data=f"stmt:paid:{b['id']}")]
+               for b in choices]
+    await msg.reply_text(head, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def handle_start(update: Update, context):
@@ -1312,6 +1425,7 @@ async def _set_commands(app):
         BotCommand("cancel", "取消訂單"),
         BotCommand("board", "生成舉牌相"),
         BotCommand("parking", "停車場狀態"),
+        BotCommand("paid", "過咗數：/paid 金額"),
     ])
 
 
@@ -1398,6 +1512,8 @@ def main():
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CommandHandler("board", handle_board))
     app.add_handler(CommandHandler("parking", handle_parking))
+    app.add_handler(CommandHandler("paid", handle_paid))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_statement_image))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(_on_error)
