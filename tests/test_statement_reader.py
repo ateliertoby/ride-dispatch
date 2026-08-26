@@ -102,3 +102,23 @@ def test_ocr_available_false_without_package(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake)
     monkeypatch.setattr(statement, "_ocr", None)
     assert statement.ocr_available() is False
+
+
+def test_ocr_available_false_when_the_package_is_installed_but_broken(monkeypatch, caplog):
+    """A missing onnxruntime shared library raises OSError, not ImportError:
+    the bot must fall back to the no-OCR report instead of crashing."""
+    import builtins
+    real_import = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name.startswith("rapidocr_onnxruntime"):
+            raise OSError("libonnxruntime.so: cannot open shared object file")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", fake)
+    monkeypatch.setattr(statement, "_ocr", None)
+    monkeypatch.setattr(statement, "_ocr_broken_logged", False)
+    with caplog.at_level("WARNING", logger="statement"):
+        assert statement.ocr_available() is False
+        assert len(caplog.records) == 1
+        assert statement.ocr_available() is False
+        assert len(caplog.records) == 1  # once, not once per forwarded screenshot

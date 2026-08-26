@@ -7,7 +7,7 @@ import pytest
 from ride_dispatch.db import (
     init_db, save_order, update_price, cancel_order, create_settlement, delete_settlement,
     get_settlement, get_settle_month, mark_settlement_paid, find_awaiting_settlements,
-    settlement_candidates, statement_image_path,
+    settlement_candidates, statement_image_path, image_extension,
 )
 from ride_dispatch.parser import Order
 
@@ -75,7 +75,7 @@ def test_create_without_statement_leaves_columns_null(db_path):
 def test_settle_month_carries_statement(db_path):
     seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
     sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
-                            statement=STATEMENT, image=b"x")
+                            statement=STATEMENT, image=b"\xff\xd8x")
     data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
     batch = data["settlements"][0]
     assert batch["id"] == sid
@@ -86,7 +86,7 @@ def test_settle_month_carries_statement(db_path):
 def test_delete_removes_image_file(db_path):
     seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
     sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
-                            statement=STATEMENT, image=b"x")
+                            statement=STATEMENT, image=b"\xff\xd8x")
     path = statement_image_path(db_path, sid)
     assert os.path.exists(path)
     assert delete_settlement(db_path, sid) is True
@@ -165,3 +165,40 @@ def test_create_survives_an_unwritable_image(db_path, monkeypatch, caplog):
     assert [o["order_id"] for o in batch["orders"]] == ["A1"]
     assert batch["statement_image"] is None
     assert "statement image not stored" in caplog.text
+
+
+def test_candidates_skip_a_date_that_cannot_be_parsed(db_path):
+    """The reader's date pattern matches on shape, so an OCR slip can produce a
+    well-formed but impossible date: it must cost that one window, not the run."""
+    seed(db_path, "IN", "2026-08-23 11:00:00")   # in the window, not yet settleable
+    seed(db_path, "OLD", "2026-08-01 09:00:00")  # settleable tail
+    now = datetime(2026, 8, 23, 10, 30)
+    both = settlement_candidates(db_path, ["2026-88-23", "2026-08-23"], now=now)
+    assert {r["order_id"] for r in both} == {"IN", "OLD"}
+    only_bad = settlement_candidates(db_path, ["2026-88-23"], now=now)
+    assert {r["order_id"] for r in only_bad} == {"OLD"}
+
+
+def test_image_extension_reads_the_magic_bytes():
+    assert image_extension(b"\xff\xd8\xff\xe0\x00\x10JFIF") == "jpg"
+    assert image_extension(b"\x89PNG\r\n\x1a\n") == "png"
+    assert image_extension(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00") == "heic"
+    assert image_extension(b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00") == "heic"
+    assert image_extension(b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00") == "heic"
+    assert image_extension(b"\x00\x00\x00\x18ftypqt  \x00\x00\x00\x00") == "bin"
+    assert image_extension(b"not an image") == "bin"
+    assert image_extension(b"") == "bin"
+
+
+def test_create_stores_a_png_under_its_own_extension(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    png = b"\x89PNG\r\n\x1a\n" + b"x"
+    sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
+                            statement=STATEMENT, image=png)
+    assert get_settlement(db_path, sid)["statement_image"] == f"{sid}.png"
+    path = statement_image_path(db_path, sid, "png")
+    with open(path, "rb") as f:
+        assert f.read() == png
+    assert not os.path.exists(statement_image_path(db_path, sid, "jpg"))
+    assert delete_settlement(db_path, sid) is True
+    assert not os.path.exists(path)

@@ -668,30 +668,40 @@ async def handle_statement_image(update: Update, context):
         return
     if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
         return
-    if not statement.ocr_available():
-        await msg.reply_text(statement.fallback_report(get_settleable_recent(DB_PATH, days=14)))
-        return
-    file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
-    tg_file = await context.bot.get_file(file_id)
-    data = bytes(await tg_file.download_as_bytearray())
-    # CPU-bound and ~2 s: off the event loop so the heartbeat keeps ticking.
-    stmt = await asyncio.to_thread(statement.read_image, data)
-    if not stmt.days:
-        await msg.reply_text("讀唔到張圖（" + "；".join(stmt.warnings or ["冇日期 / 訂單行"]) + "）— 再 send 一次，或者用「Send as file」send 原檔")
-        return
-    dates = statement.dates_of(stmt)
-    orders = settlement_candidates(DB_PATH, dates)
-    rec = statement.reconcile(stmt, orders, datetime.now())
-    text = statement.format_report(rec)
-    if not rec.can_settle:
-        await msg.reply_text(text)
-        return
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(statement.confirm_label(rec), callback_data="stmt:confirm"),
-        InlineKeyboardButton("唔確認", callback_data="stmt:skip"),
-    ]])
-    sent = await msg.reply_text(text, reply_markup=keyboard)
-    pending_statements[sent.message_id] = (msg.chat_id, rec, statement.corrected_json(stmt, rec), data)
+    # This handler runs on every image the chat receives, and every step below
+    # works on bytes nobody vetted: a Telegram file that has expired, a decoder
+    # that chokes, a statement shaped in a way the reader never met.  An escaped
+    # exception would leave the operator staring at a bot that simply said
+    # nothing, so each failure comes back as a message naming the type and
+    # asking for the original file, which is the one thing that often fixes it.
+    try:
+        if not statement.ocr_available():
+            await msg.reply_text(statement.fallback_report(get_settleable_recent(DB_PATH, days=14)))
+            return
+        file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
+        tg_file = await context.bot.get_file(file_id)
+        data = bytes(await tg_file.download_as_bytearray())
+        # CPU-bound and ~2 s: off the event loop so the heartbeat keeps ticking.
+        stmt = await asyncio.to_thread(statement.read_image, data)
+        if not stmt.days:
+            await msg.reply_text("讀唔到張圖（" + "；".join(stmt.warnings or ["冇日期 / 訂單行"]) + "）— 再 send 一次，或者用「Send as file」send 原檔")
+            return
+        dates = statement.dates_of(stmt)
+        orders = settlement_candidates(DB_PATH, dates)
+        rec = statement.reconcile(stmt, orders, datetime.now())
+        text = statement.format_report(rec)
+        if not rec.can_settle:
+            await msg.reply_text(text)
+            return
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(statement.confirm_label(rec), callback_data="stmt:confirm"),
+            InlineKeyboardButton("唔確認", callback_data="stmt:skip"),
+        ]])
+        sent = await msg.reply_text(text, reply_markup=keyboard)
+        pending_statements[sent.message_id] = (msg.chat_id, rec, statement.corrected_json(stmt, rec), data)
+    except Exception as e:
+        logging.getLogger("bot").exception("statement image failed")
+        await msg.reply_text(f"讀圖出錯（{type(e).__name__}）— 再 send 一次，或者用「Send as file」send 原檔")
 
 
 async def handle_paid(update: Update, context):
@@ -710,7 +720,7 @@ async def handle_paid(update: Update, context):
     if not awaiting:
         await msg.reply_text("冇 batch 等緊過數。")
         return
-    hits = [b for b in awaiting if amount is not None and abs(b["confirmed_amount"] - amount) < 0.005]
+    hits = find_awaiting_settlements(DB_PATH, amount) if amount is not None else []
     if amount is not None and len(hits) == 1:
         b = hits[0]
         today = datetime.now().strftime("%Y-%m-%d")

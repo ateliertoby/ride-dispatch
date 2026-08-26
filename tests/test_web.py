@@ -716,3 +716,13 @@ def test_settle_batch_without_statement(client):
     assert batch["statement"] is None and batch["statement_image"] is False
     assert client.get(f"/api/settlements/{sid}/image").status_code == 404
     assert client.get("/api/settlements/9999/image").status_code == 404
+
+
+def test_settle_batch_image_keeps_its_own_type(client):
+    from ride_dispatch.db import create_settlement
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    png = b"\x89PNG\r\n\x1a\n" + b"x"
+    sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                            now=datetime(2026, 7, 23, 9, 0), statement=STATEMENT_JSON, image=png)
+    res = client.get(f"/api/settlements/{sid}/image")
+    assert res.status_code == 200 and res.mimetype == "image/png" and res.data == png

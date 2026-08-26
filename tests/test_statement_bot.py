@@ -134,7 +134,7 @@ def test_clean_statement_card_and_confirm(db_path, monkeypatch):
     b = batches[0]
     assert b["confirmed_amount"] == 490.0 and b["expected_amount"] == 490.0
     assert b["statement"]["total"] == 490.0 and b["statement"]["reader"] == "test"
-    assert os.path.exists(statement_image_path(db_path, b["id"]))
+    assert os.path.exists(statement_image_path(db_path, b["id"], "jpg"))
     assert get_order_by_id(db_path, "A1")["settlement_id"] == b["id"]
     reply = q.message.reply_text.call_args.args[0]
     assert reply.startswith(f"已結算 批次 #{b['id']}")
@@ -265,6 +265,35 @@ def test_unreadable_image(db_path, monkeypatch):
     upd, msg = photo_update()
     asyncio.run(bot.handle_statement_image(upd, context_with_file()))
     assert "讀唔到" in sent_text(msg) and buttons_of(msg) == []
+
+
+def test_download_failure_is_reported_not_raised(db_path, monkeypatch, caplog):
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    use_statement(monkeypatch, stmt_for({YESTERDAY: [("A1", 280.0)]}, 280.0))
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    ctx.bot.get_file = AsyncMock(side_effect=RuntimeError("expired"))
+    with caplog.at_level("ERROR", logger="bot"):
+        asyncio.run(bot.handle_statement_image(upd, ctx))
+    assert "statement image failed" in caplog.text
+    text = sent_text(msg)
+    assert "讀圖出錯" in text and "RuntimeError" in text and "Send as file" in text
+    assert bot.pending_statements == {}
+
+
+def test_read_failure_is_reported_not_raised(db_path, monkeypatch):
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    monkeypatch.setattr(statement, "ocr_available", lambda: True)
+
+    def boom(data):
+        raise ValueError("bad rectangle")
+
+    monkeypatch.setattr(statement, "read_image", boom)
+    upd, msg = photo_update()
+    asyncio.run(bot.handle_statement_image(upd, context_with_file()))
+    text = sent_text(msg)
+    assert "讀圖出錯" in text and "ValueError" in text
+    assert bot.pending_statements == {}
 
 
 def test_fallback_when_ocr_missing(db_path, monkeypatch):

@@ -592,8 +592,26 @@ def statements_dir(db_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(db_path)), "statements")
 
 
-def statement_image_path(db_path: str, settlement_id: int) -> str:
-    return os.path.join(statements_dir(db_path), f"{settlement_id}.jpg")
+def image_extension(data: bytes) -> str:
+    """The screenshot's type, from its magic bytes.
+
+    Telegram re-encodes a photo to JPEG but hands a file back untouched, so a
+    screenshot sent as a file arrives as whatever the phone made — PNG or HEIC
+    on iOS.  The extension is what the dashboard serves the Content-Type from,
+    so it has to describe the bytes rather than assume them.
+    """
+    if data[:2] == b"\xff\xd8":
+        return "jpg"
+    if data[:4] == b"\x89PNG":
+        return "png"
+    header = data[4:12]
+    if header[:4] == b"ftyp" and header[4:] in (b"heic", b"heix", b"mif1"):
+        return "heic"
+    return "bin"
+
+
+def statement_image_path(db_path: str, settlement_id: int, ext: str = "jpg") -> str:
+    return os.path.join(statements_dir(db_path), f"{settlement_id}.{ext}")
 
 
 def create_settlement(db_path: str, platform: str, order_ids: list[str],
@@ -656,13 +674,13 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
         )
         conn.commit()
         if image is not None:
+            path = statement_image_path(db_path, settlement_id, image_extension(image))
             try:
                 os.makedirs(statements_dir(db_path), exist_ok=True)
-                with open(statement_image_path(db_path, settlement_id), "wb") as f:
+                with open(path, "wb") as f:
                     f.write(image)
                 conn.execute("UPDATE settlements SET statement_image = ? WHERE id = ?",
-                             (os.path.basename(statement_image_path(db_path, settlement_id)),
-                              settlement_id))
+                             (os.path.basename(path), settlement_id))
                 conn.commit()
             except (OSError, sqlite3.Error):
                 logging.getLogger("db").exception("statement image not stored for batch %s", settlement_id)
@@ -693,11 +711,14 @@ def mark_settlement_paid(db_path: str, settlement_id: int, paid_on: str) -> bool
 def delete_settlement(db_path: str, settlement_id: int) -> bool:
     """Undo a settlement: unlink its orders and drop the batch, or False if unknown."""
     with _conn(db_path) as conn:
+        # The file name has to be read before the row goes: it is the only
+        # record of which extension the screenshot was stored under.
         row = conn.execute(
-            "SELECT 1 FROM settlements WHERE id = ?", (settlement_id,)
+            "SELECT statement_image FROM settlements WHERE id = ?", (settlement_id,)
         ).fetchone()
         if row is None:
             return False
+        image_name = row["statement_image"]
         conn.execute(
             "UPDATE orders SET settlement_id = NULL WHERE settlement_id = ?", (settlement_id,)
         )
@@ -705,13 +726,14 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
         conn.commit()
         # The batch rows are already gone, so a file that will not go away must
         # not fail the call: the caller has nothing left to retry.
-        try:
-            os.remove(statement_image_path(db_path, settlement_id))
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logging.getLogger("db").warning(
-                "statement image not removed for batch %s", settlement_id, exc_info=True)
+        if image_name:
+            try:
+                os.remove(os.path.join(statements_dir(db_path), image_name))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logging.getLogger("db").warning(
+                    "statement image not removed for batch %s", settlement_id, exc_info=True)
         return True
 
 
@@ -838,7 +860,15 @@ def settlement_candidates(db_path: str, dates: list[str], now: datetime | None =
     cutoff = _now_str(now)
     days: set[str] = set()
     for d in dates:
-        base = datetime.strptime(d, "%Y-%m-%d")
+        try:
+            base = datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            # Dates arrive from an OCR reader that matches on shape, so a
+            # mis-read digit can yield a well-formed but impossible date.  It
+            # costs that one day's window; the rest of the statement, and the
+            # settleable tail, still reconcile.
+            logging.getLogger("db").warning("statement date not usable: %s", d)
+            continue
         for delta in (-1, 0, 1):
             days.add((base + timedelta(days=delta)).strftime("%Y-%m-%d"))
     cols = f"{_SETTLE_ORDER_COLS}, coalesce(status,'active') AS status"

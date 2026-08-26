@@ -11,6 +11,7 @@ Two layers that never touch each other's concerns:
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field, asdict
@@ -198,7 +199,7 @@ def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
     Exact ids are settled first so a near-miss can never take an order that
     another line names outright, and an order can be claimed only once — two
     lines reaching for the same order leaves both unbound, the same verdict
-    ambiguity gets everywhere else.  Both rules are decided over the whole
+    that ambiguity gets everywhere else.  Both rules are decided over the whole
     statement rather than line by line, so the result does not depend on the
     order the lines or the candidates arrive in."""
     bound = {sid: (by_id[sid], False) for sid in merged if sid in by_id}
@@ -388,6 +389,7 @@ def parse_boxes(boxes: list, width: int) -> Statement:
 
 _ocr = None
 _ocr_lock = threading.Lock()
+_ocr_broken_logged = False
 
 
 def _engine():
@@ -399,9 +401,20 @@ def _engine():
 
 
 def ocr_available() -> bool:
+    global _ocr_broken_logged
     try:
         import rapidocr_onnxruntime  # noqa: F401
     except ImportError:
+        return False
+    except Exception:
+        # An installed but unusable package — a shared library onnxruntime
+        # cannot load — raises something other than ImportError.  Callers treat
+        # it as "no OCR" so the bot still answers, but unlike a plain absence
+        # it is a broken host worth a line in the log, once rather than once
+        # per forwarded screenshot.
+        if not _ocr_broken_logged:
+            _ocr_broken_logged = True
+            logging.getLogger("statement").warning("OCR installed but unusable", exc_info=True)
         return False
     return True
 
