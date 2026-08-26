@@ -12,6 +12,7 @@ Two layers that never touch each other's concerns:
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
@@ -282,3 +283,158 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
         confirmed=_confirmed(stmt),
         days=stmt.days, account=stmt.account,
     )
+
+
+# ---- the reader ----
+
+# Thousands separator may be read as "." on a compressed photo ("2.540.00");
+# lookarounds keep a dotted date ("2026.08.25") and sub-runs of a longer
+# number from matching.
+_MONEY_RE = re.compile(r"(?<![\d.])\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])")
+_DATE_RE = re.compile(r"20\d\d-\d\d-\d\d")
+_TIME_RE = re.compile(r"(?<!\d)\d\d:\d\d(?!\d)")
+_ID_RE = re.compile(r"(?<![\dA-Z])(?:SPACE)?(?=(?:[SOIlB]*\d){8})[\dSOIlB]{12,19}(?![\d])")
+_ACCOUNT_RE = re.compile(r"【([^】]+)】")
+_COUNT_RE = re.compile(r"(\d{1,3})$")
+_DIGIT_FIX = str.maketrans({"S": "5", "O": "0", "I": "1", "l": "1", "B": "8"})
+
+
+def _money(text: str) -> float:
+    s = text.replace(",", "")
+    if s.count(".") > 1:
+        head, tail = s.rsplit(".", 1)
+        s = head.replace(".", "") + "." + tail
+    return float(s)
+
+
+def _normalise_id(token: str) -> str:
+    if token.startswith("SPACE"):
+        return "SPACE" + token[5:].translate(_DIGIT_FIX)
+    return token.translate(_DIGIT_FIX)
+
+
+def _rows_from_boxes(boxes: list) -> list[list[tuple[float, float, str]]]:
+    """Group boxes into table rows by vertical centre; each row is (x, y, text) sorted by x."""
+    items = []
+    for quad, text, _score in boxes:
+        ys = [p[1] for p in quad]
+        xs = [p[0] for p in quad]
+        items.append((min(xs), (min(ys) + max(ys)) / 2, max(ys) - min(ys), str(text)))
+    if not items:
+        return []
+    heights = sorted(h for _, _, h, _ in items)
+    tol = max(4.0, 0.45 * heights[len(heights) // 2])
+    items.sort(key=lambda t: t[1])
+    rows: list[list] = []
+    centre = None
+    for x, y, _h, text in items:
+        if centre is None or y - centre > tol:
+            rows.append([])
+            centre = y
+        rows[-1].append((x, y, text))
+    return [sorted(r) for r in rows]
+
+
+def parse_boxes(boxes: list, width: int) -> Statement:
+    """RapidOCR boxes → Statement.  Only the numbers are trusted: labels such
+    as 求和 / 记录数 come out garbled on a Telegram-compressed photo, so rows
+    are classified by shape (a date at the left, an order id, an account
+    code) rather than by reading the labels."""
+    stmt = Statement(days=[])
+    current: StatementDay | None = None
+    for row in _rows_from_boxes(boxes):
+        text = " ".join(t for _, _, t in row)
+        moneys = [(x, m) for x, _, t in row for m in _MONEY_RE.findall(t)]
+        rightmost = _money(max(moneys, key=lambda t: t[0])[1]) if moneys else None
+        account = _ACCOUNT_RE.search(text)
+        ids = [(x, _normalise_id(m)) for x, _, t in row for m in _ID_RE.findall(t)]
+        dates = [(x, m) for x, _, t in row for m in _DATE_RE.findall(t)]
+        leading_date = dates and dates[0][0] < width * 0.15 and row and _DATE_RE.match(row[0][2].strip()) is not None
+        if account:
+            stmt.account = account.group(1).strip()
+            if rightmost is not None:
+                stmt.total = rightmost
+        elif leading_date and not ids:
+            current = StatementDay(date=dates[0][1], rows=[], sum=rightmost)
+            first_money_x = min((x for x, _ in moneys), default=width)
+            for x, _, t in row[1:]:
+                if x >= first_money_x:
+                    break
+                m = _COUNT_RE.search(t.strip())
+                if m:
+                    current.count = int(m.group(1))
+                    break
+            stmt.days.append(current)
+        elif ids:
+            if current is None:
+                stmt.warnings.append(f"row before any day header: {text[:40]}")
+                continue
+            if rightmost is None:
+                stmt.warnings.append(f"row without amount: {text[:40]}")
+                continue
+            times = _TIME_RE.findall(text)
+            right_dates = [m for x, m in dates if x > width * 0.5]
+            current.rows.append(StatementRow(
+                date=current.date, order_id=ids[0][1], amount=rightmost,
+                time=times[0] if times else None,
+                settle_date=right_dates[-1] if right_dates else None,
+            ))
+    return stmt
+
+
+_ocr = None
+_ocr_lock = threading.Lock()
+
+
+def _engine():
+    global _ocr
+    if _ocr is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr = RapidOCR()
+    return _ocr
+
+
+def ocr_available() -> bool:
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def reader_name() -> str:
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        return f"rapidocr-onnxruntime {version('rapidocr-onnxruntime')}"
+    except PackageNotFoundError:
+        return "rapidocr-onnxruntime"
+
+
+def _undecodable() -> Statement:
+    stmt = Statement(days=[])
+    stmt.warnings.append("image could not be decoded")
+    stmt.reader = reader_name()
+    return stmt
+
+
+def read_image(data: bytes) -> Statement:
+    """Decode and OCR one screenshot.  CPU-bound (~2 s on the server) and
+    serialised: callers run it in a worker thread."""
+    import cv2
+    import numpy as np
+    # Whatever the operator sent, this returns a Statement: empty input and a
+    # non-image both reach the warning path, which Telegram callers report as
+    # an unreadable screenshot rather than a crash.
+    if not data:
+        return _undecodable()
+    try:
+        img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except cv2.error:
+        return _undecodable()
+    if img is None:
+        return _undecodable()
+    with _ocr_lock:
+        result, _elapse = _engine()(img)
+    stmt = parse_boxes(result or [], img.shape[1])
+    stmt.reader = reader_name()
+    return stmt
