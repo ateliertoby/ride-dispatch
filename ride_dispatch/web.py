@@ -22,7 +22,7 @@ from .db import (
     mark_settlement_paid,
     save_or_revive_order,
     save_quick_order,
-    statement_image_path,
+    statements_dir,
     update_order_fields,
     update_order_from_message,
     update_price,
@@ -332,17 +332,25 @@ def api_delete_settlement(settlement_id):
     return jsonify({"ok": True})
 
 
+_IMAGE_MIMETYPES = {"jpg": "image/jpeg", "png": "image/png", "heic": "image/heic"}
+
+
 @app.get("/api/settlements/<int:settlement_id>/image")
 def api_settlement_image(settlement_id):
-    # The screenshot is always a JPEG written by the bot, so the type is stated
-    # rather than sniffed from the bytes on disk.
     batch = get_settlement(DB_PATH, settlement_id)
     if not batch or not batch.get("statement_image"):
         return jsonify({"error": "no statement image"}), 404
-    path = statement_image_path(DB_PATH, settlement_id)
+    name = batch["statement_image"]
+    # Only create_settlement ever writes this column, but it is still a stored
+    # value being joined onto a path: anything that could climb out of the
+    # statements directory is refused rather than resolved.
+    if os.sep in name or "/" in name or ".." in name:
+        return jsonify({"error": "no statement image"}), 404
+    path = os.path.join(statements_dir(DB_PATH), name)
     if not os.path.exists(path):
         return jsonify({"error": "no statement image"}), 404
-    return send_file(path, mimetype="image/jpeg")
+    ext = name.rsplit(".", 1)[-1].lower()
+    return send_file(path, mimetype=_IMAGE_MIMETYPES.get(ext, "application/octet-stream"))
 
 
 def _fingerprint():
