@@ -20,6 +20,10 @@
 
 **Settlement is a batch, and an order's money state is derived from it.** The platform pays for a run of days at once, so the unit of reconciliation is a batch of orders, not an order: `settlements` holds what the operator confirmed against the platform's statement, and `orders.settlement_id` points at it. Everything else is derived rather than stored — an order is unsettled with no batch, 等過數 with an unpaid one, 已收 once the batch has a `paid_on` — so there is no second copy of the truth to fall out of step, and undoing a settlement is just unlinking. The amount a batch expects is summed inside the write transaction from the stored rows, never taken from the client, and the fields it was summed from (`price`, `tunnel_fee`, `banner_fee`) plus cancellation are locked while an order is batched: changing them afterwards would silently make the recorded total wrong. `parking_fee` and `scheduled_time` do not feed the total and stay editable. A discrepancy between expected and confirmed is recorded as 差額 and displayed; the operator takes it up with the platform.
 
+**Statements are read on-device with RapidOCR, not with a vision model.** The platform's settlement statement arrives as a screenshot, re-encoded by Telegram to 1280 px, with order numbers seven pixels tall. Measured on that photo, PP-OCR read every order number and amount exactly in about two seconds on the server; a vision LLM mis-read two to four of twelve order numbers and took a minute per image. The reader trusts only the numbers — the printed labels (求和, 记录数) are garbled at that size — and classifies rows by shape: a date at the left edge opens a day, an order id makes a data row, the account code marks the total. The statement's own subtotals are checked first, so a mis-read digit is reported as a reading error rather than as a dispute with the platform; ids are then matched to orders exactly or by a unique near-miss on the same day. `reconcile()` is a pure function over the parsed statement and candidate orders, so the reader could be swapped without touching it. Tests replay recorded OCR output rather than the image, and the recording replaces every order number with a keyed hash whose salt is supplied from the environment and never committed, so the fixtures keep the reader's real input without carrying real order numbers. RapidOCR is installed with `--no-deps` and `opencv-python-headless` because its metadata asks for the full OpenCV, whose `cv2.so` links libGL — on this server that would mean Mesa and LLVM for nothing.
+
+**A statement is a batch.** The platform pays one statement with one transfer whatever number of days it spans, and a leg it held back appears on a later statement under its own date. The existing batch model already fits — a batch is not tied to a day and an order belongs to at most one — so the statement only adds two columns: the platform's lines as JSON (shown beside the system's figures in batch detail, keyed by the id the matcher settled on, with the text as read kept as `read_as` where a near-miss was corrected) and the screenshot file beside the database. Held-back legs stay unsettled with no extra state; the next statement that lists them picks them up. `/paid <amount>` identifies a transfer by the figure on the bank statement, which is always the confirmed amount.
+
 **A separate settle page rather than a mode in the dashboard.** The day view answers "what am I driving", the settle page answers "what am I owed" — different questions, different shapes (a timeline versus a month grid), and `dashboard.html` was already 1.4k lines. The two pages share their tokens and common components through `templates/_shared.css` and `templates/_shared.js`, pulled in with Jinja `{% include %}` inside each page's `<style>`/`<script>` — no build step and no extra request. Only genuinely common code moved: each page keeps its own view stack, because the dashboard's serves two hosts (bottom sheet and top drop panel) while the settle page's stacks day → batch → confirm views.
 
 **SSE for live updates.** The dashboard uses server-sent events rather than fixed-interval polling: the server watches a fingerprint of the day's orders (including flight ETAs) and connected dashboards refetch when it changes, so a flight update or an edit from another device shows up without a reload. The dashboard still works without it via manual refresh.
@@ -48,6 +52,15 @@ Settlement (埋數)
   → 已到帳 → POST /api/settlements/<id>/paid
   → 撤銷結算 → DELETE /api/settlements/<id> (unlinks its orders)
   → SSE fingerprint changes → the day view's 結算 row follows on other devices
+
+Settlement statement (結算單 screenshot)
+  → photo / image file to the bot
+  → statement.read_image (RapidOCR in a worker thread) → Statement
+  → db.settlement_candidates (orders on those dates + settleable tail)
+  → statement.reconcile → checksum, per-line verdict, settle set
+  → card with 確認結算 / 照平台數確認 → db.create_settlement(statement JSON, screenshot)
+  → /paid <amount> → db.find_awaiting_settlements → mark_settlement_paid
+  → settle page batch detail shows platform figures and links the screenshot
 
 HKIA endpoint
   → bot.py heartbeat (60s tick, tier-gated fetch)
@@ -81,6 +94,7 @@ HKIA parking endpoint (plate → inside? entry time, pvNr, paid)
 - `ride_dispatch/phone.py` — Display-time E.164 phone formatting (mirrored in dashboard JS — keep both in sync).
 - `ride_dispatch/parking.py` — HKIA car park client and the rules read off a visit: free-allowance verdict, payment plan, poll-arming window, PayDollar link assembly. Async httpx.
 - `ride_dispatch/whiteboard.py` — Whiteboard sign image generator. fal.ai queue API (GPT-Image-2 edit), async httpx, base image in `assets/`, VIP-marker name sanitization.
+- `ride_dispatch/statement.py` — Settlement statement reader (RapidOCR boxes → rows by shape) and the pure reconciliation of a statement against candidate orders; the bot's card text builders.
 - `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement create/paid/delete).
 - `templates/_shared.css`, `templates/_shared.js` — Tokens and components shared by the two pages, Jinja-included into each. A rule one page overrides belongs in that page instead.
 - `templates/settle.html` — Settle page (埋數). Month grid coloured by settlement state, day sheet, settle sheet, batch detail. Pure derivations (`expectedOf`, `platform`) are JS twins of `service.py` — keep them in sync.
