@@ -438,3 +438,146 @@ def read_image(data: bytes) -> Statement:
     stmt = parse_boxes(result or [], img.shape[1])
     stmt.reader = reader_name()
     return stmt
+
+
+# ---- text for the bot ----
+
+_KIND_LABEL = {
+    "amount_diff": "金額唔同",
+    "already_settled": "已結算",
+    "cancelled": "已取消",
+    "not_ready": "未可結算",
+    "unknown": "唔喺系統",
+}
+
+
+def short_id(order_id: str) -> str:
+    return "#…" + order_id[-4:]
+
+
+def money_str(v: float) -> str:
+    return f"${v:,.0f}" if float(v).is_integer() else f"${v:,.2f}"
+
+
+def date_span_label(dates: list[str]) -> str:
+    """8月23日 · 8月23–24日 · 8月30日–9月1日 · 8月30日、9月1日 (non-contiguous)."""
+    s = sorted(dates)
+    if not s:
+        return ""
+    if len(s) == 1:
+        return _md(s[0])
+    try:
+        contiguous = all(
+            datetime.strptime(s[i], "%Y-%m-%d") - datetime.strptime(s[i - 1], "%Y-%m-%d") == timedelta(days=1)
+            for i in range(1, len(s))
+        )
+    except ValueError:
+        # A date that will not parse cannot be proven adjacent to anything, and
+        # this builds operator-facing text: list the days rather than raise.
+        return "、".join(_md(d) for d in s)
+    if not contiguous:
+        return "、".join(_md(d) for d in s)
+    a, z = s[0], s[-1]
+    if a[:7] == z[:7]:
+        return f"{int(a[5:7])}月{int(a[8:10])}–{int(z[8:10])}日"
+    return f"{_md(a)}–{_md(z)}"
+
+
+def format_report(rec: Reconciliation) -> str:
+    n_rows = sum(len(d.rows) for d in rec.days)
+    head = f"結算單 {rec.account or '?'} · {len(rec.days)} 日 {n_rows} 行"
+    if rec.confirmed is not None:
+        head += f" · 平台 {money_str(rec.confirmed)}"
+    lines = [head, ""]
+    by_date: dict[str, list[Entry]] = {}
+    for e in rec.entries:
+        by_date.setdefault(e.date, []).append(e)
+    missing_by_date: dict[str, list[dict]] = {}
+    for o in rec.missing:
+        missing_by_date.setdefault(o["scheduled_time"][:10], []).append(o)
+    for day in rec.days:
+        problems = [e for e in by_date.get(day.date, []) if e.kind != "matched"]
+        held = missing_by_date.get(day.date, [])
+        day_sum = day.sum if day.sum is not None else round(sum(r.amount for r in day.rows), 2)
+        mark = " ✓" if not problems and not held and rec.checksum == "ok" else ""
+        lines.append(f"{_md(day.date)} · {len(day.rows)} 行 · {money_str(day_sum)}{mark}")
+        for e in problems:
+            label = _KIND_LABEL[e.kind]
+            if e.kind == "amount_diff":
+                detail = f"平台 {money_str(e.platform_amount)} · 系統 {money_str(e.expected)}"
+            elif e.kind == "already_settled":
+                detail = f"批次 #{e.settlement_id}"
+            elif e.kind == "not_ready":
+                detail = f"{e.reason} · {money_str(e.platform_amount)}"
+            else:
+                detail = money_str(e.platform_amount)
+            lines.append(f"  {label}  {short_id(e.statement_id)}  {detail}")
+            lines.append(f"  {e.statement_id}")
+        for o in held:
+            lines.append(f"  抽起  {short_id(o['order_id'])}  {money_str(expected_of(o))}（今次冇計）")
+            lines.append(f"  {o['order_id']}")
+    lines.append("")
+    if rec.checksum == "fail":
+        lines.append("讀圖唔一致（" + "；".join(rec.checksum_notes) + "）— 再 send 一次，或者用「Send as file」send 原檔")
+    elif rec.checksum == "unverified":
+        lines.append("讀唔到 求和 / 總數，冇得核對 — 再 send 一次，或者用「Send as file」send 原檔")
+    elif not rec.settle_ids:
+        # Nothing can enter a batch, so there is no 系統應收 to compare against:
+        # a 差額 measured against an empty batch reads as a shortfall to chase.
+        lines.append("冇單可以入 batch")
+    else:
+        lines.append(f"系統應收 {money_str(rec.expected)} · 差額 {_signed(rec.diff)}")
+    return "\n".join(lines)
+
+
+def _signed(v: float) -> str:
+    if abs(v) < 0.005:
+        return "$0"
+    return ("+" if v > 0 else "−") + money_str(abs(v))
+
+
+def confirm_label(rec: Reconciliation) -> str:
+    n = len(rec.settle_ids)
+    amount = money_str(rec.confirmed or 0.0)
+    if rec.clean:
+        return f"確認結算 · {n} 程 · {amount}"
+    return f"照平台數確認 · {n} 程 · {amount}（差額 {_signed(rec.diff)}）"
+
+
+def settled_reply(settlement_id: int, rec: Reconciliation, dates: list[str]) -> str:
+    return (f"已結算 批次 #{settlement_id} · {date_span_label(dates)} · {len(rec.settle_ids)} 程 · "
+            f"{money_str(rec.confirmed or 0.0)}\n\n{confirmation_line(rec, dates)}")
+
+
+def confirmation_line(rec: Reconciliation, dates: list[str]) -> str:
+    """One line to paste back to the platform.
+
+    The figure keeps its cents: this line is quoted back as the amount agreed,
+    so it must equal the statement's total to the cent, not a rounded version
+    of it."""
+    return (f"{date_span_label(dates)} 共{len(rec.settle_ids)}程 "
+            f"HKD {money_str(rec.confirmed or 0.0)[1:]} 確認無誤")
+
+
+def awaiting_label(batch: dict) -> str:
+    dates = sorted({o["scheduled_time"][:10] for o in batch["orders"]})
+    return f"#{batch['id']} · {date_span_label(dates)} · {len(batch['orders'])} 程 · {money_str(batch['confirmed_amount'])}"
+
+
+def fallback_report(orders: list[dict]) -> str:
+    """What the bot can offer without OCR: the unsettled legs, by day, to compare by eye."""
+    lines = ["OCR 未裝，讀唔到張圖。未結算嘅接送單："]
+    by_date: dict[str, list[dict]] = {}
+    for o in orders:
+        by_date.setdefault(o["scheduled_time"][:10], []).append(o)
+    for date in sorted(by_date):
+        rows = by_date[date]
+        lines.append("")
+        lines.append(f"{_md(date)} · {len(rows)} 程 · {money_str(sum(expected_of(o) for o in rows))}")
+        for o in rows:
+            t = o["scheduled_time"][11:16]
+            lines.append(f"  {t} {short_id(o['order_id'])} {money_str(expected_of(o))}")
+            lines.append(f"  {o['order_id']}")
+    if len(lines) == 1:
+        lines.append("（冇）")
+    return "\n".join(lines)
