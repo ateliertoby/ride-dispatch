@@ -30,6 +30,9 @@ class StatementRow:
     settle_date: str | None = None  # 應結算日期, informational only
 
 
+_ROW_KEYS = ("date", "order_id", "amount", "time", "settle_date")
+
+
 @dataclass
 class StatementDay:
     date: str
@@ -54,7 +57,8 @@ class Statement:
     @classmethod
     def from_json(cls, d: dict) -> "Statement":
         days = [StatementDay(date=x["date"], count=x.get("count"), sum=x.get("sum"),
-                             rows=[StatementRow(**r) for r in x.get("rows", [])])
+                             rows=[StatementRow(**{k: v for k, v in r.items() if k in _ROW_KEYS})
+                                   for r in x.get("rows", [])])
                 for x in d.get("days", [])]
         return cls(days=days, account=d.get("account"), total=d.get("total"), reader=d.get("reader", ""))
 
@@ -534,6 +538,24 @@ def _signed(v: float) -> str:
     if abs(v) < 0.005:
         return "$0"
     return ("+" if v > 0 else "−") + money_str(abs(v))
+
+
+def corrected_json(stmt: Statement, rec: Reconciliation) -> dict:
+    """Statement JSON for storage, with ids as the system knows them.
+
+    A line the matcher bound by near-miss keeps what was actually read under
+    `read_as`; everything downstream (batch detail) keys on `order_id`, so the
+    platform figure lands on the order it belongs to instead of appearing as
+    an unmatched extra.
+    """
+    fixes = {e.statement_id: e.order_id for e in rec.entries if e.statement_id != e.order_id}
+    d = stmt.to_json()
+    for day in d["days"]:
+        for row in day["rows"]:
+            if row["order_id"] in fixes:
+                row["read_as"] = row["order_id"]
+                row["order_id"] = fixes[row["order_id"]]
+    return d
 
 
 def confirm_label(rec: Reconciliation) -> str:

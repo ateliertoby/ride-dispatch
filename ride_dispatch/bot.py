@@ -691,7 +691,7 @@ async def handle_statement_image(update: Update, context):
         InlineKeyboardButton("唔確認", callback_data="stmt:skip"),
     ]])
     sent = await msg.reply_text(text, reply_markup=keyboard)
-    pending_statements[sent.message_id] = (msg.chat_id, rec, stmt.to_json(), data)
+    pending_statements[sent.message_id] = (msg.chat_id, rec, statement.corrected_json(stmt, rec), data)
 
 
 async def handle_paid(update: Update, context):

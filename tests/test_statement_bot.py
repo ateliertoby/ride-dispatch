@@ -143,6 +143,23 @@ def test_clean_statement_card_and_confirm(db_path, monkeypatch):
     assert 777 not in bot.pending_statements
 
 
+def test_confirm_stores_corrected_ids(db_path, monkeypatch):
+    """A near-miss id is stored as the order it was bound to, so batch detail
+    puts the platform figure on that order instead of listing it as an extra."""
+    seed(db_path, "A1", f"{YESTERDAY} 10:00:00", 210.0)
+    use_statement(monkeypatch, stmt_for({YESTERDAY: [("A2", 210.0)]}, 210.0))
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    cb, q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+
+    b = find_awaiting_settlements(db_path)[0]
+    stored = b["statement"]["days"][0]["rows"][0]
+    assert stored["order_id"] == "A1" and stored["read_as"] == "A2"
+    assert get_order_by_id(db_path, "A1")["settlement_id"] == b["id"]
+
+
 def test_confirmation_line_keeps_cents(db_path, monkeypatch):
     seed(db_path, "A1", f"{TWO_DAYS} 09:00:00", 280.0)
     seed(db_path, "B1", f"{YESTERDAY} 10:00:00", 210.0)
