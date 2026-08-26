@@ -22,14 +22,18 @@ This bot parses pasted order messages into structured records and stores them in
 8. Tap **$** to open 埋數: a month grid of what each day earned, coloured by whether the money is still to chase (amber), settled and waiting on the transfer (plain), or banked (green). Tap a day, tick its legs, type what the platform confirmed, and it becomes one settlement batch; 已到帳 marks the transfer in, 撤銷結算 unwinds the whole batch. An order in a batch is locked against price and cancellation edits until it is unwound
 9. On landing, pickup orders with 舉牌 service get a preview of the sign text plus a 生成舉牌相 button — tapping it generates the whiteboard sign photo (via GPT-Image-2). `/board` generates manually for any pickup
 10. Around a pickup's landing time the bot watches the airport car parks for your plate: 已降落 says whether the once-per-24h free half hour is still available, entry and exit are pushed and recorded, and a tap on the entry message (or 50 minutes inside unpaid) returns an Apple Pay link that pays the car park online, which is cheaper than paying at the gate. `/parking` shows the current visit and the last five
+11. Forward the platform's settlement screenshot (結算單) to the bot as a photo or file: it reads the table (RapidOCR, on-device), checks it against its own subtotals and against the orders it names, and replies with a per-day card — what matches, what the platform priced differently, what it left out, what is not in the system. One tap creates the settlement batch with the platform's figure; the card also carries a one-line confirmation to paste back. When the transfer lands, `/paid 2540` finds the batch by amount and marks it paid. Without the OCR package installed the bot lists the unsettled legs instead
 
 ## Run
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+pip install --no-deps -r requirements-ocr.txt   # statement OCR; skip to run without it
 cp .env.example .env
 ```
+
+`requirements-ocr.txt` is installed with `--no-deps` on purpose: RapidOCR's own metadata asks for the full `opencv-python`, which needs libGL and cannot import on a headless server; its real dependencies (with `opencv-python-headless`) are listed in `requirements.txt`, and it is pinned to `1.2.3` because later releases cap `Requires-Python` below the 3.14 this runs on.
 
 | Variable | Required | Description |
 |---|---|---|
@@ -53,6 +57,8 @@ python -m ride_dispatch.web   # Web dashboard (default port 3200)
 ## Deploy
 
 The dashboard is exposed via a named Cloudflare Tunnel (`~/.cloudflared/ride-dispatch.yml`) with **Cloudflare Access** (email OTP, 1-month session) as perimeter auth. All three processes (bot, web, tunnel) run as supervised services; `deploy/` carries example definitions for both launchd (macOS plists) and systemd (Linux units). The systemd tunnel unit runs the tunnel by UUID, so the credentials JSON alone is enough — no account `cert.pem` needed on the host.
+
+Statement OCR is a separate install on the server: `pip install -r requirements.txt`, then `pip install --no-deps -r requirements-ocr.txt`, in that order. It adds roughly 360 MB to the venv (onnxruntime plus the PP-OCR models), so it is worth checking disk before running it. Restart `ride-dispatch-bot` afterwards — a bot that started without the package keeps replying with the no-OCR fallback until it does.
 
 Two gotchas:
 
