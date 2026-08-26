@@ -124,6 +124,8 @@
     flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
     background: var(--banner-bg); color: var(--banner-fg);
   }
+  .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
+  .sum-row a { color: var(--amber); text-decoration: none; }
   /* In the day sheet the amount is never the answer on its own -- $500 already
      collected and $500 still owed are the same number -- so every leg carries
      its state under the amount, in the same colours the calendar uses. */
@@ -522,7 +524,7 @@ function sheetHead(title, sub) {
 // it, both ticking the settle-able legs; 'ro' freezes a batch. A leg that
 // cannot be settled is a plain div, not a disabled button, so its order number
 // stays tappable -- that is the row the operator most needs to quote.
-function orderRowHtml(o, mode, ticks) {
+function orderRowHtml(o, mode, ticks, plat) {
   const live = mode !== 'ro' && isSettleable(o);
   const on = live && settleTicked.has(o.order_id);
   const cls = 'orow' + (live ? (on ? ' on' : ' off') : (mode === 'add' ? ' dis' : ' ro'));
@@ -538,8 +540,12 @@ function orderRowHtml(o, mode, ticks) {
       '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span></span>';
   } else {
     const mark = !o.price ? '未入價' : (o.scheduled_time >= NOW ? '未完成' : '');
+    // In batch detail the platform's own figure is shown when it disagrees;
+    // an equal figure would only repeat the number.
+    const platNote = plat !== undefined && Math.abs(plat - expectedOf(o)) >= 0.005
+      ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
-                 : '<span class="oa">$' + $(expectedOf(o)) + '</span>';
+                 : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
   }
   const body = tick +
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
@@ -720,14 +726,20 @@ function batchViewHtml(v) {
   const b = batchById(v.id);
   if (!b) return '';
   const rows = b.orders.slice().sort((x, y) => x.scheduled_time.localeCompare(y.scheduled_time));
+  // Platform amount per order id, 舉牌 lines folded in (same fold as reconcile()).
+  const plat = new Map();
+  const stmtRows = b.statement ? b.statement.days.flatMap(d => d.rows) : [];
+  stmtRows.forEach(r => plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
+  const inBatch = new Set(b.orders.map(o => o.order_id));
+  const extras = [...plat.keys()].filter(id => !inBatch.has(id));
   const dates = batchDates(b);
   let body;
   // A one-day batch needs no day heading; the title above already names the day.
   if (dates.length > 1) {
     body = dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
-      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'ro')).join('')).join('');
+      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'ro', undefined, plat.has(o.order_id) ? plat.get(o.order_id) : undefined)).join('')).join('');
   } else {
-    body = rows.map(o => orderRowHtml(o, 'ro')).join('');
+    body = rows.map(o => orderRowHtml(o, 'ro', undefined, plat.has(o.order_id) ? plat.get(o.order_id) : undefined)).join('');
   }
   const diff = b.confirmed_amount - b.expected_amount;
   const sums = [
@@ -737,6 +749,10 @@ function batchViewHtml(v) {
   if (diff) sums.push(['差額', (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff))]);
   sums.push(['結算日', b.settled_on]);
   sums.push(['到帳', b.paid_on || '等緊過數']);
+  if (b.statement) {
+    extras.forEach(id => sums.push(['平台多出 ' + esc(groupId(id)), '$' + $(plat.get(id))]));
+    if (b.statement_image) sums.push(['結算單', '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>']);
+  }
   return sheetHead('結算 ' + esc(dateSpanLabel(dates)),
       esc(platLabel(b.platform)) + ' · ' + b.orders.length + ' 程') +
     body +

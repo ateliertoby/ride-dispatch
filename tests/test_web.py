@@ -679,3 +679,40 @@ def test_fingerprint_distinguishes_a_resettle(client):
     client.delete(f"/api/settlements/{first}")
     create_batch(client, ["R1"])
     assert web._fingerprint() != created
+
+
+# ---- statement on a batch ----
+
+STATEMENT_JSON = {
+    "account": "YY0000", "total": 500.0, "reader": "test",
+    "days": [{"date": "2026-07-01", "count": 2, "sum": 500.0,
+              "rows": [{"order_id": "Q1", "amount": 250.0, "time": "14:30", "settle_date": "2026-07-03",
+                        "read_as": "Q7"},
+                       {"order_id": "EXTRA", "amount": 250.0, "time": "15:00", "settle_date": "2026-07-03"}]}],
+}
+
+
+def test_settle_batch_carries_statement_and_image(client):
+    from ride_dispatch.db import create_settlement, save_quick_order
+    # A ride-platform order: quick orders are didi/uber/foodpanda, so paste one instead.
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                            now=datetime(2026, 7, 23, 9, 0), statement=STATEMENT_JSON, image=b"\xff\xd8x")
+    data = client.get("/api/settle?month=2026-07&platform=ride").get_json()
+    batch = next(b for b in data["settlements"] if b["id"] == sid)
+    assert batch["statement"]["total"] == 500.0
+    assert batch["statement_image"] is True
+    res = client.get(f"/api/settlements/{sid}/image")
+    assert res.status_code == 200 and res.mimetype == "image/jpeg" and res.data == b"\xff\xd8x"
+
+
+def test_settle_batch_without_statement(client):
+    from ride_dispatch.db import create_settlement
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                            now=datetime(2026, 7, 23, 9, 0))
+    data = client.get("/api/settle?month=2026-07&platform=ride").get_json()
+    batch = next(b for b in data["settlements"] if b["id"] == sid)
+    assert batch["statement"] is None and batch["statement_image"] is False
+    assert client.get(f"/api/settlements/{sid}/image").status_code == 404
+    assert client.get("/api/settlements/9999/image").status_code == 404

@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from ride_dispatch.statement import (
-    Statement, StatementDay, StatementRow, reconcile, levenshtein, dates_of,
+    Statement, StatementDay, StatementRow, reconcile, levenshtein, dates_of, corrected_json,
 )
 
 NOW = datetime(2026, 8, 26, 12, 0)
@@ -207,3 +207,23 @@ def test_result_independent_of_candidate_order():
     assert sorted(a.settle_ids) == sorted(b.settle_ids)
     assert a.expected == b.expected
     assert [o["order_id"] for o in a.missing] == [o["order_id"] for o in b.missing]
+
+
+def test_corrected_json_rewrites_fuzzy_ids():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "9012345678901238", 280.0),
+                                 row("2026-08-23", "A1", 210.0)], 2, 490.0)], total=490.0)
+    orders = [order("9012345678901234", "2026-08-23 09:00:00", 280.0),
+              order("A1", "2026-08-23 13:45:00", 210.0)]
+    r = reconcile(s, orders, NOW)
+    assert [(e.statement_id, e.order_id, e.fuzzy) for e in r.entries] == [
+        ("9012345678901238", "9012345678901234", True), ("A1", "A1", False)]
+
+    d = corrected_json(s, r)
+    fuzzy, exact = d["days"][0]["rows"]
+    assert fuzzy["order_id"] == "9012345678901234"
+    assert fuzzy["read_as"] == "9012345678901238"
+    assert exact["order_id"] == "A1" and "read_as" not in exact
+    # The stored JSON is read back by Statement.from_json, which must survive
+    # the extra key rather than reject the whole statement.
+    back = Statement.from_json(d)
+    assert [r.order_id for r in back.days[0].rows] == ["9012345678901234", "A1"]

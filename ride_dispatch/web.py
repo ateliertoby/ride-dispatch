@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict
 from datetime import date, datetime
 from dotenv import load_dotenv
-from flask import Flask, Response, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, send_file
 from .db import (
     init_db,
     resolve_db_path,
@@ -18,9 +18,11 @@ from .db import (
     get_orders_by_date,
     get_order_by_id,
     get_settle_month,
+    get_settlement,
     mark_settlement_paid,
     save_or_revive_order,
     save_quick_order,
+    statement_image_path,
     update_order_fields,
     update_order_from_message,
     update_price,
@@ -281,6 +283,10 @@ def api_settle():
     if platform not in PLATFORMS:
         return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
     data = get_settle_month(DB_PATH, month, platform)
+    for batch in data["settlements"]:
+        # The page only asks whether a screenshot exists; the file name it is
+        # stored under is not something the client can do anything with.
+        batch["statement_image"] = bool(batch.get("statement_image"))
     return jsonify({"month": month, "platform": platform, **data})
 
 
@@ -324,6 +330,19 @@ def api_delete_settlement(settlement_id):
     if not delete_settlement(DB_PATH, settlement_id):
         return jsonify({"error": "settlement not found"}), 404
     return jsonify({"ok": True})
+
+
+@app.get("/api/settlements/<int:settlement_id>/image")
+def api_settlement_image(settlement_id):
+    # The screenshot is always a JPEG written by the bot, so the type is stated
+    # rather than sniffed from the bytes on disk.
+    batch = get_settlement(DB_PATH, settlement_id)
+    if not batch or not batch.get("statement_image"):
+        return jsonify({"error": "no statement image"}), 404
+    path = statement_image_path(DB_PATH, settlement_id)
+    if not os.path.exists(path):
+        return jsonify({"error": "no statement image"}), 404
+    return send_file(path, mimetype="image/jpeg")
 
 
 def _fingerprint():
