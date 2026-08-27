@@ -293,16 +293,13 @@ def ticked_batch(rows, legs, outstanding):
                 {"order_id": oid, "amount": a} for oid, a in rows]}]}}
 
 
-def test_ticks_are_measured_in_the_platforms_figures():
+def test_leg_amount_uses_the_platforms_figures():
     """The bank sent the statement's total minus the platform's own amounts for
     the legs it failed to submit, so a leg it priced above the system still has
     to account for the gap."""
     legs = [leg("A1", "09", 2950.0), leg("A2", "10", 210.0), leg("A3", "11", 300.0)]
     b = ticked_batch([("A1", 2950.0), ("A2", 220.0), ("A3", 300.0)], legs, 520.0)
     assert credits.leg_amount(b, legs[1]) == 220.0        # platform's, not the system's 210
-    assert credits.tick_total(b, {"A2", "A3"}) == 520.0
-    assert credits.ticks_add_up(b, {"A2", "A3"})
-    assert credits.tick_footer(b, {"A2", "A3"}) == "確認 · 剔咗 $520"
     # Priced the system's way the same correct ticks would be refused.
     assert round(sum(expected_of(o) for o in legs[1:]), 2) == 510.0
 
@@ -313,7 +310,6 @@ def test_a_leg_is_worth_its_own_rows_including_the_banner_line():
     legs = [leg("A1", "09", 210.0, banner=40.0)]
     b = ticked_batch([("A1", 210.0), ("A1", 40.0)], legs, 250.0)
     assert credits.leg_amount(b, legs[0]) == 250.0
-    assert credits.ticks_add_up(b, {"A1"})
 
 
 def test_without_a_statement_a_leg_is_worth_what_the_system_says():
@@ -324,14 +320,81 @@ def test_without_a_statement_a_leg_is_worth_what_the_system_says():
     assert credits.leg_amount(ticked_batch([("Z9", 1.0)], legs, 250.0), legs[0]) == 250.0
 
 
-def test_the_tick_card_text_quotes_the_platform():
-    legs = [leg("1128150000001704", "10", 210.0), leg("1128150000003137", "11", 300.0)]
-    b = ticked_batch([("1128150000001704", 220.0), ("1128150000003137", 300.0)], legs, 520.0)
-    assert credits.tick_label(b, legs[0], False) == "☐ …1704 · 8/22 · $220"
-    assert credits.tick_footer(b, {"1128150000001704"}) == "剔咗 $220 ≠ 差額 $520"
-    for o in b["orders"]:
-        o["unpaid"] = 1
-    assert credits.unpaid_text(b) == "等到帳 $520：…1704 $220、…3137 $300"
+def test_tick_vocabulary_is_gone():
+    """Round 4: the tick card moved to the dashboard.  The functions that only
+    served the bot's tick card are removed so nothing can call them."""
+    for name in ("tick_head", "tick_label", "tick_total", "ticks_add_up",
+                 "tick_footer", "unpaid_text"):
+        assert not hasattr(credits, name), f"credits.{name} should not exist"
+
+
+# ---- guess_unpaid ----
+
+def partial_batch(rows, legs, outstanding, received=None):
+    """A partial batch for guess_unpaid: has state, received, and outstanding."""
+    total = sum(a for _, a in rows)
+    if received is None:
+        received = round(total - outstanding, 2)
+    return {"id": 5, "outstanding": outstanding, "received": received,
+            "confirmed_amount": total, "state": "partial", "orders": legs,
+            "statement": {"days": [{"date": "2026-08-22", "rows": [
+                {"order_id": oid, "amount": a} for oid, a in rows]}]}}
+
+
+def test_guess_unpaid_unique_subset():
+    """One subset of legs accounts for the shortfall — the common case."""
+    legs = [leg("A1", "09", 2950.0), leg("A2", "10", 210.0), leg("A3", "11", 300.0)]
+    b = partial_batch([("A1", 2950.0), ("A2", 210.0), ("A3", 300.0)], legs, 510.0)
+    assert credits.guess_unpaid(b) == [["A2", "A3"]]
+
+
+def test_guess_unpaid_several_subsets_ordered_smallest_first():
+    legs = [leg("A1", "09", 300.0), leg("A2", "10", 200.0),
+            leg("A3", "11", 100.0), leg("A4", "12", 300.0)]
+    b = partial_batch([("A1", 300.0), ("A2", 200.0), ("A3", 100.0), ("A4", 300.0)],
+                      legs, 300.0)
+    guesses = credits.guess_unpaid(b)
+    assert guesses[0] == ["A1"]      # size 1 before size 2
+    assert guesses[1] == ["A4"]      # same size, lexicographic
+    assert ["A2", "A3"] in guesses   # size 2 subset
+
+
+def test_guess_unpaid_none():
+    legs = [leg("A1", "09", 210.0), leg("A2", "10", 300.0)]
+    b = partial_batch([("A1", 210.0), ("A2", 300.0)], legs, 400.0)
+    assert credits.guess_unpaid(b) == []
+
+
+def test_guess_unpaid_cap():
+    """More than MAX_GUESSES subsets are truncated."""
+    # 10 legs of $100, outstanding $200: C(10,2) = 45 subsets
+    legs = [leg(f"Z{i:02d}", f"{9+i}", 100.0) for i in range(10)]
+    rows = [(f"Z{i:02d}", 100.0) for i in range(10)]
+    b = partial_batch(rows, legs, 200.0)
+    guesses = credits.guess_unpaid(b)
+    assert len(guesses) == credits.MAX_GUESSES
+
+
+def test_guess_unpaid_non_partial_returns_empty():
+    legs = [leg("A1", "09", 500.0)]
+    b = {"id": 5, "outstanding": 0, "received": 500.0,
+         "confirmed_amount": 500.0, "state": "paid", "orders": legs,
+         "statement": {"days": [{"date": "2026-08-22", "rows": [("A1", 500.0)]}]}}
+    assert credits.guess_unpaid(b) == []
+    b2 = {"id": 5, "outstanding": 500.0, "received": 0,
+          "confirmed_amount": 500.0, "state": "awaiting", "orders": legs,
+          "statement": None}
+    assert credits.guess_unpaid(b2) == []
+
+
+def test_guess_unpaid_uses_platform_amounts():
+    """The guess is measured in the platform's figures, not the system's,
+    because the transfer is the sum of what the platform printed."""
+    legs = [leg("A1", "09", 2950.0), leg("A2", "10", 210.0), leg("A3", "11", 300.0)]
+    # Platform prices A2 at $220, not system's $210.
+    b = partial_batch([("A1", 2950.0), ("A2", 220.0), ("A3", 300.0)], legs, 520.0)
+    guesses = credits.guess_unpaid(b)
+    assert guesses == [["A2", "A3"]]
 
 
 # ---- the wrappers that read the DB ----
