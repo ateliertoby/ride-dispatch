@@ -158,6 +158,39 @@ def test_match_credit_subset_unique_and_ambiguous_and_none():
     assert far.reason == "none"
 
 
+def test_match_credit_will_not_link_an_exact_amount_outside_the_window():
+    """A lone amount agreeing to the cent is not enough on its own. Amounts here
+    are round hundreds and the ledger holds months of them, so the dates have to
+    agree too; the stale batch still leads the card as the likeliest tap."""
+    stale = B(1, 1080.0, ["2026-08-21"])                 # anchor 20 days after the credit
+    m = match_credit(C(1, 1080.0, "2026-08-01"), [stale])
+    assert m.reason == "none" and m.linked == []
+    assert [b["id"] for b in m.candidates] == [1]
+    fresh = B(2, 1080.0, ["2026-08-21"])
+    assert match_credit(C(1, 1080.0, "2026-08-24"), [fresh]) == Match(linked=[2], reason="exact")
+
+
+def test_match_batch_will_not_link_an_exact_amount_outside_the_window():
+    stale = C(1, 1450.0, "2026-09-09")                   # value date 20 days after the batch
+    m = match_batch(B(3, 1450.0, ["2026-08-20"]), [stale])
+    assert m.reason == "none" and m.linked == []
+    assert [c["id"] for c in m.candidates] == [1]
+    fresh = C(2, 1450.0, "2026-08-24")
+    assert match_batch(B(3, 1450.0, ["2026-08-20"]), [fresh]) == Match(linked=[2], reason="exact")
+
+
+def test_a_round_amount_months_apart_is_a_coincidence_not_a_payment():
+    """The first backfill put 48 credits beside 4 batches and linked two of them
+    to payouts that predate the service: $1,080 paid 07-30 against legs of
+    08-21, $1,450 paid 08-11 against legs of 08-20. Neither direction may."""
+    credits_ = [C(1, 1080.0, "2026-07-30"), C(2, 1450.0, "2026-08-11")]
+    batches = [B(2, 1080.0, ["2026-08-21"]), B(3, 1450.0, ["2026-08-20"])]
+    for c in credits_:
+        assert match_credit(c, batches).linked == []
+    for b in batches:
+        assert match_batch(b, credits_).linked == []
+
+
 def test_match_credit_never_links_a_near_miss():
     """A thirty dollar gap is a question for the operator, not a rounding error."""
     bs = [B(1, 1450.0, ["2026-08-22"])]

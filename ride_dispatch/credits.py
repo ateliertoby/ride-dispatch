@@ -22,6 +22,12 @@ logger = logging.getLogger("credits")
 # The platform pays a statement two days after its settle date, and holds a
 # weekend's statements for the Monday transfer: a week covers every observed
 # gap without reaching back into the batches before it.
+#
+# The window is a precondition for every automatic link, not a tie-breaker.
+# Amounts here are round hundreds and the ledger holds months of them, so a
+# lone amount that agrees to the cent is a coincidence more often than a
+# payment unless the dates agree too; the window is what tells the two apart.
+# Nothing outside it is ever linked automatically — it is offered instead.
 WINDOW_DAYS = 7
 MAX_CANDIDATES = 8
 # One transfer has never covered more than a long weekend of statements, and
@@ -152,6 +158,16 @@ def _candidates(batches: list[dict], remaining: float) -> list[dict]:
     return fit[:MAX_CANDIDATES]
 
 
+def _lead_with(leading: list[dict], rest: list[dict]) -> list[dict]:
+    """`leading` first, then whatever `rest` adds, deduped and capped.
+
+    Used to float the right amount on the wrong date to the top of a card: it
+    is not evidence enough to link, but it is the likeliest tap.
+    """
+    seen = {x["id"] for x in leading}
+    return (leading + [x for x in rest if x["id"] not in seen])[:MAX_CANDIDATES]
+
+
 def match_credit(credit: dict, awaiting: list[dict]) -> Match:
     """What this credit pays for, or what to offer the operator.
 
@@ -160,12 +176,8 @@ def match_credit(credit: dict, awaiting: list[dict]) -> Match:
     """
     remaining = credit["remaining"]
     pool = [b for b in awaiting if b["platform"] == credit["platform"]]
-    exact = [b for b in pool if _same(b["confirmed_amount"], remaining)]
-    if len(exact) > 1:
-        # Same figure twice is common (a batch is often one day's work): the
-        # window is what tells this month's batch from the identical old one.
-        windowed = [b for b in exact if in_window(anchor(b), credit["value_date"])]
-        exact = windowed or exact
+    same_amount = [b for b in pool if _same(b["confirmed_amount"], remaining)]
+    exact = [b for b in same_amount if in_window(anchor(b), credit["value_date"])]
     if len(exact) == 1:
         return Match(linked=[exact[0]["id"]], reason="exact")
     if len(exact) > 1:
@@ -184,7 +196,11 @@ def match_credit(credit: dict, awaiting: list[dict]) -> Match:
     if hits:
         union = {b["id"]: b for combo in hits for b in combo}
         return Match(candidates=_candidates(list(union.values()), remaining), reason="ambiguous")
-    return Match(candidates=_candidates(pool, remaining), reason="none")
+    # Nothing was proven.  A batch of exactly this amount on the wrong date
+    # leads the card: it is the one the operator most likely wants, and letting
+    # them say so is the whole difference between offering and assuming.
+    stale = sorted(same_amount, key=lambda b: (anchor(b), b["id"]), reverse=True)
+    return Match(candidates=_lead_with(stale, _candidates(pool, remaining)), reason="none")
 
 
 def match_batch(batch: dict, unallocated: list[dict]) -> Match:
@@ -195,15 +211,14 @@ def match_batch(batch: dict, unallocated: list[dict]) -> Match:
     """
     amount = batch["confirmed_amount"]
     pool = [c for c in unallocated if c["platform"] == batch["platform"]]
-    exact = [c for c in pool if _same(c["remaining"], amount)]
-    if len(exact) > 1:
-        windowed = [c for c in exact if in_window(anchor(batch), c["value_date"])]
-        exact = windowed or exact
+    same_amount = [c for c in pool if _same(c["remaining"], amount)]
+    exact = [c for c in same_amount if in_window(anchor(batch), c["value_date"])]
     if len(exact) == 1:
         return Match(linked=[exact[0]["id"]], reason="exact")
     fit = [c for c in pool if c["remaining"] >= amount - 0.005]
     fit.sort(key=lambda c: (c["value_date"], c["id"]), reverse=True)
-    return Match(candidates=fit[:MAX_CANDIDATES], reason="ambiguous" if exact else "none")
+    stale = sorted(same_amount, key=lambda c: (c["value_date"], c["id"]), reverse=True)
+    return Match(candidates=_lead_with(stale, fit), reason="ambiguous" if exact else "none")
 
 
 def resolve_credit(db_path: str, credit_id: int) -> Match:
