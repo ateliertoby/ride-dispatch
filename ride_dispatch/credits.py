@@ -1,9 +1,13 @@
-"""Bank credits (入數): feed ingestion, the credit ↔ batch matcher, and the
-wrappers that perform links.
+"""Bank credits (入數): feed ingestion and the credit ↔ batch matcher.
 
-A batch is paid when, and only when, a bank credit is linked to it.  The
-matcher is pure so both directions — a credit arriving from the feed, a batch
-being created from a statement — share one set of rules and one set of tests.
+A batch is paid when, and only when, a bank credit is linked to it, and the
+only thing that links is a tap: everything here proposes.  Nothing in this
+module writes to settlements, so a matcher that grows a new rule cannot start
+moving money on its own.
+
+The matcher is pure so both directions — a credit arriving from the feed, a
+statement being read before its batch exists — share one set of rules and one
+set of tests.
 """
 import json
 import logging
@@ -13,9 +17,9 @@ from datetime import datetime, timedelta
 from itertools import combinations
 
 from .db import (awaiting_batches, get_credit, get_settlement, insert_credit,
-                 link_credit, unallocated_credits)
+                 unallocated_credits)
 from .service import PLATFORMS
-from .statement import awaiting_label, date_span_label, money_str
+from .statement import awaiting_label, money_str
 
 logger = logging.getLogger("credits")
 
@@ -23,11 +27,11 @@ logger = logging.getLogger("credits")
 # weekend's statements for the Monday transfer: a week covers every observed
 # gap without reaching back into the batches before it.
 #
-# The window is a precondition for every automatic link, not a tie-breaker.
+# The window is what separates a match from a coincidence, not a tie-breaker.
 # Amounts here are round hundreds and the ledger holds months of them, so a
 # lone amount that agrees to the cent is a coincidence more often than a
-# payment unless the dates agree too; the window is what tells the two apart.
-# Nothing outside it is ever linked automatically — it is offered instead.
+# payment unless the dates agree too.  A match inside the window is proposed
+# as the answer; one outside it is only offered among the alternatives.
 WINDOW_DAYS = 7
 MAX_CANDIDATES = 8
 # One transfer has never covered more than a long weekend of statements, and
@@ -123,22 +127,30 @@ def ingest_feed(db_path: str, path: str) -> list[dict]:
 
 # ---- the matcher ----
 
-def anchor(batch: dict) -> str:
-    """The date the platform paid a batch against.
+def anchor(batch: dict) -> str | None:
+    """The date the platform paid a batch against, or None when it has no date.
 
     Its statement's latest settle date when it has one, else its latest service
     date: a held-back order's service date is already stale by the time the
-    statement carrying it is paid.
+    statement carrying it is paid.  A statement read before its batch exists
+    carries no orders, which is why the statement is asked first.
     """
     stmt = batch.get("statement") or {}
     settle_dates = [r.get("settle_date") for day in stmt.get("days", [])
                     for r in day.get("rows", []) if r.get("settle_date")]
     if settle_dates:
         return max(settle_dates)
-    return max(o["scheduled_time"][:10] for o in batch["orders"])
+    orders = batch.get("orders") or []
+    if orders:
+        return max(o["scheduled_time"][:10] for o in orders)
+    return None
 
 
-def in_window(anchor_date: str, value_date: str) -> bool:
+def in_window(anchor_date: str | None, value_date: str) -> bool:
+    # No date at all is outside every window: the dates have to agree, and a
+    # batch that cannot say when it was earned never can.
+    if anchor_date is None:
+        return False
     v = datetime.strptime(value_date, "%Y-%m-%d")
     a = datetime.strptime(anchor_date, "%Y-%m-%d")
     return v - timedelta(days=WINDOW_DAYS) <= a <= v
@@ -146,16 +158,25 @@ def in_window(anchor_date: str, value_date: str) -> bool:
 
 @dataclass
 class Match:
-    linked: list[int] = field(default_factory=list)
+    """A proposal, never an instruction.
+
+    `exact` holds the ids that agree to the cent inside the window (batches
+    from match_credit, credits from match_batch); for reason 'subset' it is the
+    one combination that sums to the credit.  Nothing acts on it without a tap.
+    """
+    exact: list[int] = field(default_factory=list)
     candidates: list[dict] = field(default_factory=list)
     reason: str = "none"
 
 
+def _by_anchor(batches: list[dict]) -> list[dict]:
+    return sorted(batches, key=lambda b: (anchor(b) or "", b["id"]), reverse=True)
+
+
 def _candidates(batches: list[dict], remaining: float) -> list[dict]:
     """Batches worth offering: only those a link would not overshoot, newest first."""
-    fit = [b for b in batches if b["confirmed_amount"] <= remaining + 0.005]
-    fit.sort(key=lambda b: (anchor(b), b["id"]), reverse=True)
-    return fit[:MAX_CANDIDATES]
+    return _by_anchor([b for b in batches
+                       if b["confirmed_amount"] <= remaining + 0.005])[:MAX_CANDIDATES]
 
 
 def _lead_with(leading: list[dict], rest: list[dict]) -> list[dict]:
@@ -169,19 +190,20 @@ def _lead_with(leading: list[dict], rest: list[dict]) -> list[dict]:
 
 
 def match_credit(credit: dict, awaiting: list[dict]) -> Match:
-    """What this credit pays for, or what to offer the operator.
+    """What this credit could pay for, best proposal first.
 
-    A near miss is never a link: an amount that does not agree to the cent is a
-    question about a fee or a held-back order, and it gets a card.
+    A near miss is never proposed as the answer: an amount that does not agree
+    to the cent is a question about a fee or a held-back order, so it lands
+    among the alternatives instead.
     """
     remaining = credit["remaining"]
     pool = [b for b in awaiting if b["platform"] == credit["platform"]]
+    fits = _candidates(pool, remaining)
     same_amount = [b for b in pool if _same(b["confirmed_amount"], remaining)]
-    exact = [b for b in same_amount if in_window(anchor(b), credit["value_date"])]
-    if len(exact) == 1:
-        return Match(linked=[exact[0]["id"]], reason="exact")
-    if len(exact) > 1:
-        return Match(candidates=_candidates(exact, remaining), reason="ambiguous")
+    exact = _by_anchor([b for b in same_amount if in_window(anchor(b), credit["value_date"])])
+    if exact:
+        return Match(exact=[b["id"] for b in exact], candidates=fits,
+                     reason="exact" if len(exact) == 1 else "ambiguous")
     # A Monday transfer covers a weekend's statements, so a combination that
     # sums to the credit is a real payment rather than a coincidence — but only
     # when it is the sole combination that does.
@@ -192,69 +214,79 @@ def match_credit(credit: dict, awaiting: list[dict]) -> Match:
             if _same(sum(b["confirmed_amount"] for b in combo), remaining):
                 hits.append(combo)
     if len(hits) == 1:
-        return Match(linked=sorted(b["id"] for b in hits[0]), reason="subset")
+        return Match(exact=sorted(b["id"] for b in hits[0]), candidates=fits, reason="subset")
     if hits:
         union = {b["id"]: b for combo in hits for b in combo}
-        return Match(candidates=_candidates(list(union.values()), remaining), reason="ambiguous")
-    # Nothing was proven.  A batch of exactly this amount on the wrong date
-    # leads the card: it is the one the operator most likely wants, and letting
-    # them say so is the whole difference between offering and assuming.
-    stale = sorted(same_amount, key=lambda b: (anchor(b), b["id"]), reverse=True)
-    return Match(candidates=_lead_with(stale, _candidates(pool, remaining)), reason="none")
+        return Match(candidates=_lead_with(_candidates(list(union.values()), remaining), fits),
+                     reason="ambiguous")
+    # Nothing agrees.  A batch of exactly this amount on the wrong date leads
+    # the card: it is the one the operator most likely wants, and letting them
+    # say so is the whole difference between offering and assuming.
+    return Match(candidates=_lead_with(_by_anchor(same_amount), fits), reason="none")
+
+
+def _by_value_date(credits: list[dict]) -> list[dict]:
+    return sorted(credits, key=lambda c: (c["value_date"], c["id"]), reverse=True)
 
 
 def match_batch(batch: dict, unallocated: list[dict]) -> Match:
-    """Which credit paid this batch, or which credits to offer.
+    """Which credit could have paid this batch.
 
     The mirror of match_credit with one rule fewer: a batch is paid by one
     credit, so there is nothing to combine.
     """
     amount = batch["confirmed_amount"]
     pool = [c for c in unallocated if c["platform"] == batch["platform"]]
-    same_amount = [c for c in pool if _same(c["remaining"], amount)]
+    fits = _by_value_date([c for c in pool
+                           if c["remaining"] >= amount - 0.005])[:MAX_CANDIDATES]
+    same_amount = _by_value_date([c for c in pool if _same(c["remaining"], amount)])
     exact = [c for c in same_amount if in_window(anchor(batch), c["value_date"])]
-    if len(exact) == 1:
-        return Match(linked=[exact[0]["id"]], reason="exact")
-    fit = [c for c in pool if c["remaining"] >= amount - 0.005]
-    fit.sort(key=lambda c: (c["value_date"], c["id"]), reverse=True)
-    stale = sorted(same_amount, key=lambda c: (c["value_date"], c["id"]), reverse=True)
-    return Match(candidates=_lead_with(stale, fit), reason="ambiguous" if exact else "none")
+    if exact:
+        return Match(exact=[c["id"] for c in exact], candidates=fits,
+                     reason="exact" if len(exact) == 1 else "ambiguous")
+    return Match(candidates=_lead_with(same_amount, fits), reason="none")
 
 
-def resolve_credit(db_path: str, credit_id: int) -> Match:
-    """Match a credit against the batches waiting for money, linking if resolved."""
+def propose_credit(db_path: str, credit_id: int) -> Match:
+    """What the batches waiting for money say about this credit.  Never writes."""
     credit = get_credit(db_path, credit_id)
     if credit is None or credit["archived_reason"] or credit["remaining"] <= 0.005:
         return Match()
-    m = match_credit(credit, awaiting_batches(db_path, credit["platform"]))
-    for settlement_id in m.linked:
-        link_credit(db_path, credit_id, settlement_id)
-    return m
+    return match_credit(credit, awaiting_batches(db_path, credit["platform"]))
 
 
-def resolve_batch(db_path: str, settlement_id: int) -> Match:
-    """Match a new batch against the credits already in the ledger, linking if resolved."""
+def propose_batch(db_path: str, settlement_id: int) -> Match:
+    """What the ledger says about a batch that is waiting for money.  Never writes."""
     batch = get_settlement(db_path, settlement_id)
     if batch is None or batch["bank_credit_id"] is not None:
         return Match()
-    m = match_batch(batch, unallocated_credits(db_path, batch["platform"]))
-    for credit_id in m.linked:
-        link_credit(db_path, credit_id, settlement_id)
-    return m
+    return match_batch(batch, unallocated_credits(db_path, batch["platform"]))
 
 
-def offer(m: Match, awaiting: list[dict]) -> list[dict]:
-    """The batches a card should offer, given a match and the pool it came from.
+def propose_statement(db_path: str, platform: str, confirmed_amount: float,
+                      statement_json: dict) -> Match:
+    """What the ledger says about a statement whose batch does not exist yet.
 
-    A resolved match carries its batches in `linked` and leaves `candidates`
-    empty, so a card built from `candidates` alone would claim nothing fits
-    while a batch matches the credit to the cent — which is what a hand-made
-    partial link leaves behind.
+    The card has to name the credit before anything is written, so the
+    statement stands in for the batch it is about to become: its settle dates
+    are the anchor and its total is the amount.  A statement whose total could
+    not be read has nothing to match on and matches nothing.
     """
-    if m.linked:
-        by_id = {b["id"]: b for b in awaiting}
-        return [by_id[i] for i in m.linked if i in by_id]
-    return m.candidates
+    if confirmed_amount <= 0.005:
+        return Match()
+    batch = {"id": 0, "platform": platform, "confirmed_amount": confirmed_amount,
+             "statement": statement_json, "orders": []}
+    return match_batch(batch, unallocated_credits(db_path, platform))
+
+
+def offer(m: Match, pool: list[dict]) -> list[dict]:
+    """The proposals a card shows: what agrees to the cent first, then the rest.
+
+    Both halves are buttons the operator may tap; leading with `exact` says
+    which one the matcher believes without acting on the belief.
+    """
+    by_id = {x["id"]: x for x in pool}
+    return _lead_with([by_id[i] for i in m.exact if i in by_id], m.candidates)
 
 
 # ---- text for the bot ----
@@ -286,27 +318,51 @@ def credit_label(credit: dict) -> str:
     return label
 
 
-def credit_card_text(credit: dict, candidates: list[dict]) -> str:
+def credit_card_text(credit: dict, m: Match, offered: list[dict]) -> str:
+    """The card for one credit: what the matcher believes, and what it offers.
+
+    A believed match still needs the tap, so the head asks rather than states.
+    """
     if credit["remaining"] <= 0.005:
         return credit_head(credit)
-    second = "等緊過數：" if candidates else "冇 batch 啱銀碼"
-    return "\n".join([credit_head(credit), second, "send 結算圖入嚟都會自動對"])
+    if m.exact and m.reason in ("exact", "subset"):
+        head = f"入數 {money_str(credit['amount'])} · {md(credit['value_date'])}"
+        if credit["linked"] > 0.005:
+            head += f" · 剩 {money_str(credit['remaining'])}"
+        head += " · 對到 批次 " + "、".join(f"#{i}" for i in m.exact) + "？"
+        second = "撳確認："
+    else:
+        head = credit_head(credit)
+        second = "等緊過數：" if offered else "冇 batch 啱銀碼"
+    return "\n".join([head, second, "send 結算圖入嚟都會提議"])
+
+
+# What a statement card says about the credit its total agrees with, before
+# any batch exists: the operator reads this and the report above it together,
+# and one tap confirms both.
+def statement_match_text(credit: dict) -> str:
+    return f"對到入數 {md(credit['value_date'])} {money_str(credit['amount'])}"
+
+
+def statement_offer_text(offered: list[dict]) -> str:
+    return "\n".join(["入數可能係："] + [credit_label(c) for c in offered])
+
+
+def no_orders_text(credit: dict, rows: int) -> str:
+    """A statement whose money is in the ledger but whose legs are not in the
+    system: there is nothing to settle, so the credit is what has to be dealt
+    with."""
+    return f"{statement_match_text(credit)}，但圖入面 {rows} 張單唔喺系統"
+
+
+# The batch is about to be created against money that has not arrived, which
+# is the ordinary case: the platform pays days after the statement.
+NO_CREDIT_YET = "未收到呢筆數"
 
 
 def settled_link_line(credit: dict) -> str:
     """What a just-settled batch says about the credit it was born linked to."""
     return f"已對 {md(credit['value_date'])} 入數 {money_str(credit['amount'])}"
-
-
-def linked_line(credit: dict, linked_ids: list[int], db_path: str) -> str:
-    """What the heartbeat says when a credit found its batches on its own."""
-    batches = [b for b in (get_settlement(db_path, i) for i in linked_ids) if b]
-    head = f"入數 {money_str(credit['amount'])} · {md(credit['value_date'])}"
-    if len(batches) == 1:
-        b = batches[0]
-        dates = sorted({o["scheduled_time"][:10] for o in b["orders"]})
-        return f"{head} 已對 批次 #{b['id']} · {date_span_label(dates)} · {len(b['orders'])} 程"
-    return "\n".join([f"{head} 已對 {len(batches)} 個批次"] + [_batch_line(b) for b in batches])
 
 
 QUEUE_LIMIT = 20
@@ -341,10 +397,14 @@ def detail_text(credit: dict, db_path: str) -> str:
     return "\n".join(lines)
 
 
-def backfill_summary(total: int, auto_ids: list[int]) -> str:
+def backfill_summary(total: int, exact_ids: list[int]) -> str:
     """One line for a backfill: dozens of cards would bury the chat, and the
-    work queue is the place to deal with them."""
-    auto = f"自動對到 {len(auto_ids)} 筆"
-    if auto_ids:
-        auto += "（" + "、".join(f"#{i}" for i in auto_ids) + "）"
-    return f"入咗 {total} 筆入數紀錄 · {auto} · 未對 {total - len(auto_ids)} 筆 · /credits 睇"
+    work queue is the place to deal with them.
+
+    It reports what the matcher found, not what it did — a backfill links
+    nothing, so the count is an invitation to work the queue.
+    """
+    found = f"{len(exact_ids)} 筆有啱數嘅 batch"
+    if exact_ids:
+        found += "（" + "、".join(f"#{i}" for i in exact_ids) + "）"
+    return f"入咗 {total} 筆入數紀錄 · {found} · /credits 睇"
