@@ -39,6 +39,9 @@ MAX_SUBSET = 4
 # A card the operator has to scroll is a card he taps the wrong row of; the
 # part payments are a shortlist, the rest of the pool is behind them.
 MAX_SHORT = 4
+# guess_unpaid tests subsets up to this size and returns at most this many.
+MAX_GUESS_SIZE = 5
+MAX_GUESSES = 8
 
 # Money is compared to the cent everywhere: a difference above this is a
 # question for the operator, never a rounding artefact to absorb.
@@ -441,49 +444,41 @@ def leftover_text(credit: dict) -> str:
 
 # ---- the unpaid legs of a short-paid batch ----
 
-def tick_head(batch: dict) -> str:
-    return f"揀邊張單未過數 · 差 {money_str(batch['outstanding'])}"
+def short_allocation_line(batch: dict) -> str:
+    """What Telegram says after a short allocation: money is in, not all of it,
+    and the legs are named on the dashboard — not here."""
+    return (f"已收 {money_str(batch['received'])} · "
+            f"未收 {money_str(batch['outstanding'])} · "
+            "平台查完喺 dashboard 入返邊張單")
 
 
-def tick_label(batch: dict, order: dict, ticked: bool) -> str:
-    return (f"{'☑' if ticked else '☐'} {_tail(order['order_id'])} · "
-            f"{_slash(order['scheduled_time'][:10])} · {money_str(leg_amount(batch, order))}")
+def guess_unpaid(batch: dict) -> list[list[str]]:
+    """Subsets of legs whose platform amounts equal the outstanding to the cent.
 
-
-def tick_total(batch: dict, ticked: set) -> float:
-    """What the ticked legs are worth in the platform's own money.
-
-    The shortfall is what the platform did not send, so the ticks have to be
-    priced the way it prices them: a leg it paid differently from the system
-    still has to account for the gap in the transfer.
+    Only meaningful for a partial batch (some money received, some still owed);
+    returns [] for anything else.  Each result is a sorted list of order ids;
+    results are ordered smallest subset first, then lexicographically by ids,
+    capped at MAX_GUESSES.  A batch of 15 legs with subsets up to size 5 is
+    ~5,000 combinations — fine on request.
     """
-    return round(sum(leg_amount(batch, o) for o in batch["orders"]
-                     if o["order_id"] in ticked), 2)
-
-
-def ticks_add_up(batch: dict, ticked: set) -> bool:
-    return _same(tick_total(batch, ticked), batch["outstanding"])
-
-
-def tick_footer(batch: dict, ticked: set) -> str:
-    """The footer states the arithmetic rather than hiding the button.
-
-    The ticks have to account for the shortfall to the cent — the platform said
-    which legs it failed to submit and the money says what they were worth — so
-    a set that does not add up is shown as the sum it makes, not as a refusal.
-    """
-    total = tick_total(batch, ticked)
-    if ticks_add_up(batch, ticked):
-        return f"確認 · 剔咗 {money_str(total)}"
-    return f"剔咗 {money_str(total)} ≠ 差額 {money_str(batch['outstanding'])}"
-
-
-def unpaid_text(batch: dict) -> str:
-    """The legs now waiting for their own payment, as the card is left reading."""
-    owed = [o for o in batch["orders"] if o["unpaid"]]
-    return (f"等到帳 {money_str(batch['outstanding'])}："
-            + "、".join(f"{_tail(o['order_id'])} {money_str(leg_amount(batch, o))}"
-                        for o in owed))
+    if batch.get("outstanding", 0) <= CENT or batch.get("state") != "partial":
+        return []
+    target = batch["outstanding"]
+    orders = batch.get("orders") or []
+    if not orders:
+        return []
+    items = [(o["order_id"], leg_amount(batch, o)) for o in orders]
+    hits: list[list[str]] = []
+    for size in range(1, min(MAX_GUESS_SIZE, len(items)) + 1):
+        for combo in combinations(items, size):
+            if _same(sum(a for _, a in combo), target):
+                hits.append(sorted(oid for oid, _ in combo))
+                if len(hits) > MAX_GUESSES:
+                    break
+        if len(hits) > MAX_GUESSES:
+            break
+    hits.sort(key=lambda h: (len(h), h))
+    return hits[:MAX_GUESSES]
 
 
 QUEUE_LIMIT = 20
