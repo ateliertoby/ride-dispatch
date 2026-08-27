@@ -18,11 +18,13 @@
 
 **Car park visits are detected, never entered by hand.** The once-per-24h free allowance at the airport car parks is invisible to the driver and to the API; only a record of past visits can say whether it is available, and the driver cannot keep that record from the wheel. `parking.py` polls HKIA's online-payment status endpoint (same family as the flight endpoint: public, unauthenticated, undocumented) from 30 minutes before a pickup's predicted landing until two hours after, and keeps polling any open visit until two consecutive not-inside replies. Visits are keyed by HKIA's own `pvNr`, so a restart resumes rather than duplicates. Payment goes through the same endpoints HKIA's page uses, and the PayDollar gateway accepts its form as a GET, so the bot hands over a URL button rather than hosting a page; a visit still unpaid at 50 minutes gets a link unprompted. If `CAR_PLATE` is unset the feature is silently off.
 
-**Settlement is a batch, and an order's money state is derived from it.** The platform pays for a run of days at once, so the unit of reconciliation is a batch of orders, not an order: `settlements` holds what the operator confirmed against the platform's statement, and `orders.settlement_id` points at it. Everything else is derived rather than stored — an order is unsettled with no batch, 等過數 with an unpaid one, 已收 once the batch has a `paid_on` — so there is no second copy of the truth to fall out of step, and undoing a settlement is just unlinking. The amount a batch expects is summed inside the write transaction from the stored rows, never taken from the client, and the fields it was summed from (`price`, `tunnel_fee`, `banner_fee`) plus cancellation are locked while an order is batched: changing them afterwards would silently make the recorded total wrong. `parking_fee` and `scheduled_time` do not feed the total and stay editable. A discrepancy between expected and confirmed is recorded as 差額 and displayed; the operator takes it up with the platform.
+**Settlement is a batch, and an order's money state is derived from it.** The platform pays for a run of days at once, so the unit of reconciliation is a batch of orders, not an order: `settlements` holds what the operator confirmed against the platform's statement, and `orders.settlement_id` points at it. Everything else is derived rather than stored — an order is unsettled with no batch, 等過數 with one the bank still owes money on, 已收 once the batch has a `paid_on` — so there is no second copy of the truth to fall out of step, and undoing a settlement is just unlinking. The amount a batch expects is summed inside the write transaction from the stored rows, never taken from the client, and the fields it was summed from (`price`, `tunnel_fee`, `banner_fee`) plus cancellation are locked while an order is batched: changing them afterwards would silently make the recorded total wrong. `parking_fee` and `scheduled_time` do not feed the total and stay editable. A discrepancy between expected and confirmed is recorded as 差額 and displayed; the operator takes it up with the platform.
 
-**Statements are read on-device with RapidOCR, not with a vision model.** The platform's settlement statement arrives as a screenshot, re-encoded by Telegram to 1280 px, with order numbers seven pixels tall. Measured on that photo, PP-OCR read every order number and amount exactly in about two seconds on the server; a vision LLM mis-read two to four of twelve order numbers and took a minute per image. The reader trusts only the numbers — the printed labels (求和, 记录数) are garbled at that size — and classifies rows by shape: a date at the left edge opens a day, an order id makes a data row, the account code marks the total. The statement's own subtotals are checked first, so a mis-read digit is reported as a reading error rather than as a dispute with the platform; ids are then matched to orders exactly or by a unique near-miss on the same day. `reconcile()` is a pure function over the parsed statement and candidate orders, so the reader could be swapped without touching it. Tests replay recorded OCR output rather than the image, and the recording replaces every order number with a keyed hash whose salt is supplied from the environment and never committed, so the fixtures keep the reader's real input without carrying real order numbers. RapidOCR is installed with `--no-deps` and `opencv-python-headless` because its metadata asks for the full OpenCV, whose `cv2.so` links libGL — on this server that would mean Mesa and LLVM for nothing.
+**Statements are read on-device with RapidOCR, not with a vision model.** The platform's settlement statement arrives as a screenshot, re-encoded by Telegram to 1280 px, with order numbers seven pixels tall. Measured on that photo, PP-OCR read every order number and amount exactly in about two seconds on the server; a vision LLM mis-read two to four of twelve order numbers and took a minute per image. The reader trusts only the numbers — the printed labels (求和, 记录数) are garbled at that size — and classifies rows by shape: a date at the left edge opens a day, an order id makes a data row, the account code marks the total. The statement's own subtotals are checked first, so a mis-read digit is reported as a reading error rather than as a dispute with the platform; ids are then matched to orders in four passes, weakest evidence last: exactly; then by prefix for a code the platform's UI truncated with an ellipsis (or one long enough that a shared prefix would be a coincidence); then that same opening within two edits, because Telegram's photo compression rewrites letters inside a code (a K read as X, a B as 8) that the digit fixes must not touch, so the compressed copy of an image whose original binds would otherwise lose the line; then a unique near-miss over whole ids. The tolerant opening is offered only to codes — a digit run's mis-reads are already covered — and it refuses two candidates inside the bound rather than taking the nearer, because a prefix is partial evidence and money must not be batched against two codes that both nearly agree. Three id shapes reach the reader — SPACE plus a short digit run, a long digit run in which S O I l B may be mis-read digits, and 同程's alphanumeric code — and a pattern that knows only some of them fails the checksum of an otherwise readable image over a line it never saw. `reconcile()` is a pure function over the parsed statement and candidate orders, so the reader could be swapped without touching it. Tests replay recorded OCR output rather than the image, and the recording replaces every order number with a keyed hash whose salt is supplied from the environment and never committed, so the fixtures keep the reader's real input without carrying real order numbers. RapidOCR is installed with `--no-deps` and `opencv-python-headless` because its metadata asks for the full OpenCV, whose `cv2.so` links libGL — on this server that would mean Mesa and LLVM for nothing.
 
-**A statement is a batch.** The platform pays one statement with one transfer whatever number of days it spans, and a leg it held back appears on a later statement under its own date. The existing batch model already fits — a batch is not tied to a day and an order belongs to at most one — so the statement only adds two columns: the platform's lines as JSON (shown beside the system's figures in batch detail, keyed by the id the matcher settled on, with the text as read kept as `read_as` where a near-miss was corrected) and the screenshot file beside the database. Held-back legs stay unsettled with no extra state; the next statement that lists them picks them up. `/paid <amount>` identifies a transfer by the figure on the bank statement, which is always the confirmed amount.
+**Money is allocated in amounts, not linked.** The platform paid a $3,460 statement with $2,950 because its own system had failed to submit two legs, said so by hand, and left the $510 to arrive later — alone or bundled into a bigger transfer. One credit per batch, paid in full, cannot record that, so `credit_allocations` carries an amount per (credit, batch) pair: a credit can pay several batches and a batch can be paid by several credits. What a credit has left and what a batch is still owed are both derived from it, so taking money back off a batch, or undoing the batch entirely, needs no second write that could disagree. A short-paid batch names the legs the platform has not paid for (`orders.unpaid`) on the settle page, not in Telegram: when the money is short the operator does not yet know which legs, and the answer comes only after the platform investigates. The settle page shows a tick section for partial batches with a system guess (`credits.guess_unpaid`: subsets of legs whose platform amounts equal the shortfall, capped at size 5 and 8 results) pre-filled when exactly one combination adds up; `POST /api/settlements/<id>/unpaid` takes the set. The ticks are accepted only when they account for the shortfall to the cent — two independent statements of the same fact, one from the platform's message and one from its money, and a mismatch means one was misread. The ticks are priced in the platform's own figures (`statement.leg_amount`, the batch's statement rows folded per order id the way `reconcile` folds them), never in the system's: the transfer is the sum of what the platform printed, so a leg it priced differently would otherwise never account for the gap and the operator would be told his ticks are wrong over a discrepancy that is the platform's. `paid_on` is written at the moment the allocations cover the total and by nothing else, so the dashboard's 已收 keeps meaning what it meant.
+
+**A statement is a batch.** The platform pays one statement with one transfer whatever number of days it spans, and a leg it held back appears on a later statement under its own date. The existing batch model already fits — a batch is not tied to a day and an order belongs to at most one — so the statement only adds two columns: the platform's lines as JSON (shown beside the system's figures in batch detail, keyed by the id the matcher settled on, with the text as read kept as `read_as` where a near-miss was corrected) and the screenshot file beside the database. Held-back legs stay unsettled with no extra state; the next statement that lists them picks them up. Because the statement is the only thing that creates a batch, every batch has an image behind it and a chain from the bank credit through that image to the orders it lists.
 
 **A separate settle page rather than a mode in the dashboard.** The day view answers "what am I driving", the settle page answers "what am I owed" — different questions, different shapes (a timeline versus a month grid), and `dashboard.html` was already 1.4k lines. The two pages share their tokens and common components through `templates/_shared.css` and `templates/_shared.js`, pulled in with Jinja `{% include %}` inside each page's `<style>`/`<script>` — no build step and no extra request. Only genuinely common code moved: each page keeps its own view stack, because the dashboard's serves two hosts (bottom sheet and top drop panel) while the settle page's stacks day → batch → confirm views.
 
@@ -48,9 +50,15 @@ Dashboard edit / quick order (Didi, Uber, foodpanda)
 Settlement (埋數)
   → /settle month grid, one platform at a time
   → GET /api/settle?month=&platform= (orders + batches + counts + totals)
-  → tick the day's legs → POST /api/settlements (server sums expected_amount)
-  → 已到帳 → POST /api/settlements/<id>/paid
-  → 撤銷結算 → DELETE /api/settlements/<id> (unlinks its orders)
+    + GET /api/credits?platform= (the whole ledger, not the month)
+  → day sheet and batch detail are reads; a batch is created only by the bot's
+    statement flow, so every batch traces back to the image it was read from
+  → the header's 入數 count opens the ledger: unaccounted oldest first,
+    accounted newest first with a way into their batch, archived under a fold
+  → batch detail states what the bank has sent and what it still owes, one row
+    per allocation, and tags the legs the platform has not paid for (未過數)
+  → 撤銷結算 → DELETE /api/settlements/<id> (unlinks its orders, drops its
+    allocations so every credit gets its remainder back, clears the unpaid flags)
   → SSE fingerprint changes → the day view's 結算 row follows on other devices
 
 Settlement statement (結算單 screenshot)
@@ -58,9 +66,46 @@ Settlement statement (結算單 screenshot)
   → statement.read_image (RapidOCR in a worker thread) → Statement
   → db.settlement_candidates (orders on those dates + settleable tail)
   → statement.reconcile → checksum, per-line verdict, settle set
-  → card with 確認結算 / 照平台數確認 → db.create_settlement(statement JSON, screenshot)
-  → /paid <amount> → db.find_awaiting_settlements → mark_settlement_paid
+  → credits.propose_statement matches the statement against the ledger before
+    any batch exists: the statement's settle dates are the anchor and its total
+    the amount, so the card can name the credit it agrees with
+  → 對到入數 (one credit agrees to the cent) → 確認結算 + 對入數 creates the batch
+    and allocates that credit with the same tap; a credit in the window that is
+    smaller than the statement is the short-payment case (對到入數 … 差 $510),
+    and the reply ends with 平台查完喺 dashboard 入返邊張單 — naming the legs
+    is a dashboard operation because the operator does not know which legs yet;
+    入數可能係 lists what could contain it; 未收到呢筆數 when nothing does
+  → settle page batch detail of a partial batch: tick section (邊張單未過？) with
+    guess_unpaid pre-filled, POST /api/settlements/<id>/unpaid → db.mark_unpaid
+  → 確認結算 / 照平台數確認 → db.create_settlement(statement JSON, screenshot)
+  → no orders in the system but a credit agrees → no batch, one button that
+    archives the credit with reason no-orders
   → settle page batch detail shows platform figures and links the screenshot
+
+Bank credit (入數)
+  → first-reader publishes one JSON line per HSBC credit advice to a JSONL feed
+  → bot.py heartbeat (60s, ahead of the flight gate): credits.feed_changed stats
+    the file; a changed (mtime, size) → credits.ingest_feed reads it whole
+  → INSERT OR IGNORE by the bank's reference → bank_credits row, always kept,
+    whether or not any batch or order exists for it
+  → credits.propose_credit → credits.match_credit against the open batches.
+    Nothing in credits.py writes to settlements: it proposes, a tap decides
+  → inside a seven-day window only: an exact amount, or one unique combination
+    of 2-4 batches → Match.exact, which the card asks about (對到 批次 #4？).
+    The window is what separates a match from a coincidence: amounts are round
+    hundreds and the ledger holds months of them, so an amount agreeing to the
+    cent on the wrong date is offered among the alternatives, never proposed
+  → a card's buttons come from credits.offer: Match.exact first, then Match.short
+    (batches the credit could only pay part of, 對 $2,950（差 $510）), then the
+    other candidates — the belief leads without being acted on
+  → db.allocate is reached only from a callback the operator tapped
+    (credit:link, credit:pick, stmt:confirm); a test pins those call sites
+  → after any allocation the change left on the credit is offered against
+    whatever is still owed (剩 $510 · 可能係：), which is how a make-up payment
+    bundled into a bigger transfer reaches the batch that is short
+  → 1-3 new credits: one card each; more: one backfill summary, /credits
+  → /credits (queue, detail, archive, unarchive, unlink) is the correction
+    path; unlink takes all the money back off a batch
 
 HKIA endpoint
   → bot.py heartbeat (60s tick, tier-gated fetch)
@@ -94,8 +139,9 @@ HKIA parking endpoint (plate → inside? entry time, pvNr, paid)
 - `ride_dispatch/phone.py` — Display-time E.164 phone formatting (mirrored in dashboard JS — keep both in sync).
 - `ride_dispatch/parking.py` — HKIA car park client and the rules read off a visit: free-allowance verdict, payment plan, poll-arming window, PayDollar link assembly. Async httpx.
 - `ride_dispatch/whiteboard.py` — Whiteboard sign image generator. fal.ai queue API (GPT-Image-2 edit), async httpx, base image in `assets/`, VIP-marker name sanitization.
+- `ride_dispatch/credits.py` — Bank credit ledger: feed ingestion (whole-file re-read, deduped on the bank reference, so the consumer keeps no offset), the pure credit ↔ batch matcher shared by both directions, the `propose_*` wrappers that read the DB, and the card text. A batch is paid when, and only when, everything allocated to it covers its total: `paid_on` is written by `allocate` alone, from the bank's value date, at the moment the batch is whole, and cleared by `deallocate` or by the batch being undone. Nothing in this module calls `allocate` — it proposes and the operator's tap decides, so a matcher that grows a new rule cannot start moving money on its own. What a credit has left to give and what a batch is still owed are both derived from `credit_allocations`, never stored. Text only, no buttons: `web.py` imports this module, and the dashboard process must not pull in the Telegram library, so the two markup builders live in `bot.py` instead.
 - `ride_dispatch/statement.py` — Settlement statement reader (RapidOCR boxes → rows by shape) and the pure reconciliation of a statement against candidate orders; the bot's card text builders.
-- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement create/paid/delete).
+- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement delete). It cannot create a settlement: batches come from the bot's statement flow only.
 - `templates/_shared.css`, `templates/_shared.js` — Tokens and components shared by the two pages, Jinja-included into each. A rule one page overrides belongs in that page instead.
-- `templates/settle.html` — Settle page (埋數). Month grid coloured by settlement state, day sheet, settle sheet, batch detail. Pure derivations (`expectedOf`, `platform`) are JS twins of `service.py` — keep them in sync.
+- `templates/settle.html` — Settle page (埋數). Month grid coloured by settlement state (a part-paid batch draws as money still owed), day sheet, batch detail, credits sheet, undo. Every sheet is a read except 撤銷結算. Pure derivations (`expectedOf`, `platform`) are JS twins of `service.py` — keep them in sync.
 - `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step, dark-first auto theme. Shows flight phase, landing time, and computed 用車時間. Paste-order entry, bottom-sheet editing, numpad input, platform filter chips (接送/滴滴/Uber/foodpanda).
