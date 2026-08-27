@@ -85,25 +85,13 @@
     font-size: 12px; font-weight: 650; color: var(--text-3);
     padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
   }
+  /* Every leg row is a read: a batch is created from a statement image in the
+     bot, so there is nothing here to tick. The order number inside stays
+     tappable -- that is the one thing the page is read for. */
   .orow {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 11px 2px; text-align: left; cursor: pointer; font-family: inherit; color: inherit;
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line); padding: 11px 2px;
   }
-  .orow:active { background: var(--surface-press); }
-  .tick {
-    width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px;
-    border: 1.5px solid var(--text-3); color: transparent;
-    display: flex; align-items: center; justify-content: center; font-size: 13px;
-  }
-  .orow.on .tick { background: var(--text); border-color: var(--text); color: var(--bg); }
-  /* Excluded and un-settleable rows both recede, but only the excluded one is
-     still a live control. */
-  .orow.off { opacity: .5; }
-  .orow.dis { opacity: .42; cursor: default; }
-  .orow.ro { cursor: default; }
-  .orow.ro:active { background: none; }
-  .tick.blank { border-color: transparent; }
   .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .ol { flex: 1; min-width: 0; }
   /* Reconciling is done number by number against the platform's statement, so
@@ -153,38 +141,39 @@
   }
   .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
 
-  /* Row gap is wider than the visual gap: the chips' 44px tap targets overhang
-     8px past the pill, and two wrapped rows must not overlap. */
-  .addrow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 6px; padding: 2px 0 8px; }
-  .addlab { font-size: 12px; font-weight: 650; color: var(--text-3); }
-  .addrow .chip { flex: 0 0 auto; padding: 0 11px; }
+  /* ---- credits sheet ----
+     One credit per row: when the bank paid, how much, and whether a statement
+     accounts for it. The batch is a way out of the row, so it is the only
+     control on it. */
+  .crow {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+    border-bottom: 1px solid var(--line); padding: 11px 2px;
+    font-size: 14px; font-variant-numeric: tabular-nums;
+  }
+  .crow.gone { color: var(--text-3); }
+  /* The same three answers to "is this money accounted for" the calendar uses. */
+  .cstate.open { color: var(--amber); font-weight: 650; }
+  .cstate.done { color: var(--green); font-weight: 650; }
+  .cbatch {
+    flex-shrink: 0; background: var(--key-bg); border: none; border-radius: 8px;
+    padding: 6px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
+    cursor: pointer;
+  }
+  .cbatch:active { background: var(--key-press); }
+  .crow a { color: var(--amber); text-decoration: none; font-size: 12px; }
+  .cfold {
+    width: 100%; background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 13px 2px; text-align: left; font-family: inherit; font-size: 13px;
+    color: var(--text-3); cursor: pointer;
+  }
+  .cfold:active { background: var(--surface-press); }
+  /* The ledger count in the header is a way into the sheet, so it has to look
+     like one without turning the summary line into a row of controls. */
+  .sum-link {
+    background: none; border: none; padding: 0; font: inherit; color: inherit;
+    cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
 
-  .conf-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 2px; border-top: 1px solid var(--line);
-  }
-  .conf-row .k { flex: 1; color: var(--text-2); font-size: 16px; }
-  /* The currency sign lives in the box beside the field, not in its value, so
-     the amount parses as a plain number and still reads like 應收 above it. */
-  .conf-box {
-    display: flex; align-items: center; gap: 2px; flex-shrink: 0;
-    background: var(--key-bg); border-radius: 10px; padding: 9px 11px;
-  }
-  .conf-box .cur { font-size: 17px; font-weight: 700; color: var(--text-2); }
-  .conf-in {
-    width: 100px; text-align: right; background: none; border: none;
-    color: var(--text); font-family: inherit;
-    /* 16px floor: iOS Safari auto-zooms the page when focusing any input
-       whose font-size is below 16px */
-    font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums;
-    padding: 0;
-  }
-  .conf-in:focus { outline: none; }
-  .conf-in.date { width: 138px; font-weight: 600; font-size: 16px; }
-  .diff {
-    text-align: right; font-size: 13px; color: var(--text-3);
-    padding: 0 2px 6px; min-height: 19px; font-variant-numeric: tabular-nums;
-  }
   .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
 
   /* ---- desktop ----
@@ -228,22 +217,19 @@
 // ---- state ----
 // One month of one platform at a time, exactly what /api/settle returns.
 let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, credits: { unallocated: 0, unallocated_sum: 0 }, now: '' };
+// The bank ledger, exactly what /api/credits returns: every credit of the
+// platform, not the month on screen.
+let ledger = { counts: { open: 0, partial: 0, done: 0, archived: 0 }, sums: { open: 0, done: 0 }, credits: [] };
 let curPlat = 'ride';
 let curMonth = fmtDate(new Date()).slice(0, 7);
 // Settle-ability is decided against the server's clock, not the browser's, so
 // the page and the API agree on which legs are done.
 let NOW = '';
 let TODAY = '';
-let BY_ID = new Map();
 let BATCH_OF = new Map();
-// The batch being built lives outside the sheet's markup: adding a day and a
-// reload both re-render the whole sheet, and the typed fields have to survive
-// that.
-let settleDays = [];
-let settleTicked = new Set();
-let confirmedTouched = false;
-let confirmedText = '';
-let settleOn = '';
+// Archived credits are ones already dealt with, so they stay folded away until
+// asked for. The fold outlives a repaint.
+let archOpen = false;
 
 // The operator works one platform for a stretch, so reopening lands where he
 // left off. Storage can be unavailable (private mode), and the page must
@@ -267,20 +253,14 @@ function expectedOf(o) {
   return (o.price || 0) + (o.tunnel_fee || 0);   // didi, uber: the toll is reimbursed
 }
 function orderDate(o) { return (o.scheduled_time || '').split(' ')[0]; }
-function byId(id) { return BY_ID.get(id); }
 function batchById(id) { return data.settlements.find(b => b.id === +id) || null; }
 function batchOf(orderId) { return BATCH_OF.get(orderId) || null; }
 function reindex() {
-  BY_ID = new Map();
+  // A batch can straddle months, so its own member list is the only place legs
+  // outside the month on screen appear.
   BATCH_OF = new Map();
-  for (const o of data.orders) BY_ID.set(o.order_id, o);
   for (const b of data.settlements) {
-    for (const o of b.orders) {
-      // A batch can straddle months, so its own member list is the only place
-      // legs outside the month on screen appear.
-      if (!BY_ID.has(o.order_id)) BY_ID.set(o.order_id, o);
-      BATCH_OF.set(o.order_id, b);
-    }
+    for (const o of b.orders) BATCH_OF.set(o.order_id, b);
   }
 }
 // An order carries no settlement state of its own; its state is whatever its
@@ -387,19 +367,23 @@ function batchDates(b) {
 
 // ---- load ----
 async function load() {
+  // The ledger comes with the month: the header counts it and the sheet lists
+  // it, and a credit landing has to reach both at once.
   try {
-    const res = await fetch('/api/settle?month=' + curMonth + '&platform=' + curPlat);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    data = await res.json();
+    const [month, credits] = await Promise.all([
+      fetch('/api/settle?month=' + curMonth + '&platform=' + curPlat),
+      fetch('/api/credits?platform=' + curPlat),
+    ]);
+    if (!month.ok || !credits.ok) throw new Error('HTTP ' + month.status + '/' + credits.status);
+    data = await month.json();
+    ledger = await credits.json();
   } catch (e) {
     toast('載入失敗');
     return;
   }
   NOW = data.now;
   TODAY = NOW.slice(0, 10);
-  if (!settleOn) settleOn = TODAY;
   reindex();
-  pruneTicks();
   render();
   repaintOpenView();
 }
@@ -427,10 +411,12 @@ function renderHeader() {
   // Totals span the whole book, not the month on screen: old unsettled days
   // are exactly the ones the operator is here to clear. The server computes
   // them, so the chips and the calendar cannot disagree about the same money.
-  const c = data.credits || { unallocated: 0, unallocated_sum: 0 };
+  const n = ledger.counts;
+  const total = n.open + n.partial + n.done + n.archived;
   document.getElementById('summary').innerHTML =
     '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
-    (c.unallocated ? ' · 入數未對 ' + c.unallocated + ' 筆 $' + $(c.unallocated_sum) : '');
+    (total ? ' · <button class="sum-link" data-credits="1">入數 ' + total + ' 筆（已對 ' + n.done +
+      ' · 未對 ' + (n.open + n.partial) + (n.archived ? ' · 收埋 ' + n.archived : '') + '）</button>' : '');
 }
 
 function renderChips() {
@@ -490,6 +476,7 @@ function curView() { return views[views.length - 1] || null; }
 function viewHtml(v) {
   if (v.kind === 'day') return dayViewHtml(v);
   if (v.kind === 'undo') return undoViewHtml(v);
+  if (v.kind === 'credits') return creditsViewHtml();
   return batchViewHtml(v);
 }
 function paintView() {
@@ -500,7 +487,6 @@ function paintView() {
   el.scrollTop = 0;
   el.classList.add('show');
   document.getElementById('scrim').classList.add('show');
-  if (v.kind === 'day') syncDay();
 }
 function openView(v) { views = [v]; paintView(); }
 function pushView(v) { views.push(v); paintView(); }
@@ -521,19 +507,11 @@ function sheetHead(title, sub) {
     (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
 }
 
-// One row shape for every sheet. The mode decides what the row can do: 'day'
-// is a leg of the day being settled and 'add' a leg of a day pulled in beside
-// it, both ticking the settle-able legs; 'ro' freezes a batch. A leg that
-// cannot be settled is a plain div, not a disabled button, so its order number
-// stays tappable -- that is the row the operator most needs to quote.
-function orderRowHtml(o, mode, ticks, plat) {
-  const live = mode !== 'ro' && isSettleable(o);
-  const on = live && settleTicked.has(o.order_id);
-  const cls = 'orow' + (live ? (on ? ' on' : ' off') : (mode === 'add' ? ' dis' : ' ro'));
-  // The blank keeps the time column aligned on rows that carry no checkbox.
-  // A day with nothing to tick drops the column instead of indenting past it.
-  const tick = mode === 'ro' || ticks === false ? ''
-    : live ? '<span class="tick">&#10003;</span>' : '<span class="tick blank"></span>';
+// One row shape for both sheets. The mode decides what the right-hand end
+// says: 'day' states where the leg's money has got to, 'batch' shows the
+// platform's own figure beside the system's. Neither is a control -- a batch
+// is created from a statement image in the bot, never from here.
+function orderRowHtml(o, mode, plat) {
   let right;
   if (mode === 'day') {
     const tag = dayTag(o);
@@ -549,41 +527,23 @@ function orderRowHtml(o, mode, ticks, plat) {
     right = mark ? '<span class="omark">' + mark + '</span>'
                  : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
   }
-  const body = tick +
+  const body =
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
     '<span class="ol">' +
       '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(groupId(o.order_id)) + '</span>' +
       '<span class="oll">' + esc(orderLabel(o)) + '</span></span>' +
     right;
-  return live ? '<button class="' + cls + '" data-o="' + esc(o.order_id) + '">' + body + '</button>'
-              : '<div class="' + cls + '">' + body + '</div>';
+  return '<div class="orow">' + body + '</div>';
 }
 
 // ---- day sheet ----
-// One sheet does the whole job: what the day earned, where each leg's money
-// has got to, the batches it belongs to, and the two writes still open --
-// bank a transfer that has landed, settle what is still loose. The settle
-// write is confirmed here rather than in a pushed sheet, because a second
-// sheet would only ask the same question a second time.
+// A read of the day: what it earned, where each leg's money has got to, and
+// the batches it belongs to. Nothing is written from here.
 function dayTag(o) {
-  if (!o.price) return ['未入價', 'mute'];
-  if (o.scheduled_time >= NOW) return ['未完成', 'mute'];
-  const st = orderState(o);
-  if (st === 'unsettled') return ['未結算', 'unsettled'];
-  if (st === 'awaiting') return ['等過數', 'awaiting'];
-  return [paidLabel(batchOf(o.order_id)), 'paid'];
-}
-function dayTicksOf(dateStr) {
-  return new Set(ordersOn(dateStr).filter(isSettleable).map(o => o.order_id));
-}
-// Another device can batch or cancel a leg while the sheet sits open. A tick
-// left on a leg that is no longer settle-able would count money into 應收 that
-// the write is bound to reject, so the ticks are re-checked against every load.
-function pruneTicks() {
-  settleTicked.forEach(id => {
-    const o = byId(id);
-    if (!o || !isSettleable(o)) settleTicked.delete(id);
-  });
+  const b = batchOf(o.order_id);
+  if (b) return b.paid_on ? [paidLabel(b), 'paid'] : ['等過數', 'awaiting'];
+  if (isSettleable(o)) return ['未結算', 'unsettled'];
+  return [o.price ? '未完成' : '未入價', 'mute'];
 }
 function batchesOn(dateStr) {
   const seen = new Set();
@@ -594,128 +554,19 @@ function batchesOn(dateStr) {
   }
   return out;
 }
-// Every settle-able leg starts ticked: the common case is settling the day
-// whole, and the checkbox is there for the exception. The sheet always opens
-// on this day alone, dropping any day and any typed amount a previous pass
-// left behind.
-function resetSettleState(dateStr) {
-  settleDays = [dateStr];
-  settleTicked = dayTicksOf(dateStr);
-  confirmedTouched = false;
-  confirmedText = '';
-  settleOn = TODAY;
-}
 function openDay(dateStr) {
-  resetSettleState(dateStr);
   openView({ kind: 'day', date: dateStr });
 }
 
-function dayGap(a, b) {
-  return Math.abs(new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000;
-}
-// Platforms are settled in runs of days, so the sheet offers the neighbours of
-// the day it was opened on. Nearest first, because the run the operator is
-// closing almost always touches that day; the cap keeps the row from turning
-// into a second calendar. The page holds one month, so a run crossing a month
-// boundary is settled as one batch per month.
-function addCandidates(origin) {
-  const days = new Set();
-  for (const o of data.orders) if (isSettleable(o)) days.add(orderDate(o));
-  days.delete(origin);
-  return [...days]
-    .sort((a, b) => dayGap(a, origin) - dayGap(b, origin) || a.localeCompare(b))
-    .slice(0, 8);
-}
-function addChipLabel(d, origin) {
-  return '+ ' + (d.slice(0, 7) === origin.slice(0, 7) ? (+d.slice(8)) + '日' : mdLabel(d));
-}
-function toggleAddDay(d) {
-  const i = settleDays.indexOf(d);
-  if (i >= 0) {
-    settleDays.splice(i, 1);
-    for (const o of ordersOn(d)) settleTicked.delete(o.order_id);
-  } else {
-    settleDays.push(d);
-    settleDays.sort();
-    for (const o of ordersOn(d)) if (isSettleable(o)) settleTicked.add(o.order_id);
-  }
-  paintView();
-}
-function settleExpected() {
-  let s = 0;
-  settleTicked.forEach(id => { s += expectedOf(byId(id)); });
-  return s;
-}
-// The button is the write, so it states the scale of what it is about to
-// write; the operator commits with the count and the amount still in view.
-function settleGoLabel(total) {
-  return '確認結算 · ' + settleTicked.size + ' 程 · $' + $(total);
-}
-function confirmHtml() {
-  return '<div class="sum-rows"><div class="sum-row"><span class="k">應收</span>' +
-      '<span class="v" id="expV"></span></div></div>' +
-    '<div class="conf-row"><span class="k">平台確認</span>' +
-      '<span class="conf-box"><span class="cur">$</span>' +
-      '<input class="conf-in" id="confIn" type="text" inputmode="decimal" aria-label="平台確認金額"></span></div>' +
-    '<div class="diff" id="diffLine"></div>' +
-    '<div class="conf-row"><span class="k">結算日</span>' +
-      '<span class="conf-box">' +
-      '<input class="conf-in date" id="settleDate" type="date" value="' + settleOn + '" aria-label="結算日"></span></div>' +
-    '<button class="primary-btn" id="settleGo"></button>';
-}
 function dayViewHtml(v) {
-  const list = ordersOn(v.date);
   const batches = batchesOn(v.date);
-  // Nothing to settle here -- fully batched, still to come, or unpriced -- and
-  // the sheet is a read of the day: no ticks, no neighbours to add, no write.
-  const settleable = list.some(isSettleable);
-  const cands = settleable ? addCandidates(v.date) : [];
-  // A day pulled in beside this one contributes everything still outstanding
-  // on it, the rows that cannot be ticked included: an operator looking at a
-  // total he cannot match needs to see which leg is holding it back.
-  let added = '';
-  for (const d of settleDays.slice().sort()) {
-    if (d === v.date) continue;
-    const rows = ordersOn(d).filter(o => !batchOf(o.order_id));
-    if (!rows.length) continue;
-    added += '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
-      rows.map(o => orderRowHtml(o, 'add')).join('');
-  }
   return sheetHead(esc(mdLabel(v.date)) + ' 星期' + weekday(v.date), esc(platLabel(curPlat))) +
-    list.map(o => orderRowHtml(o, 'day', settleable)).join('') +
-    (cands.length ? '<div class="addrow"><span class="addlab">加埋</span>' + cands.map(d =>
-      '<button class="chip' + (settleDays.indexOf(d) >= 0 ? ' on' : '') + '" data-add="' + d + '">' +
-      esc(addChipLabel(d, v.date)) + '</button>').join('') + '</div>' : '') +
-    added +
+    ordersOn(v.date).map(o => orderRowHtml(o, 'day')).join('') +
     (batches.length ? '<div class="blinks">' + batches.map(b =>
       '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
       esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
       ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
-      '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '') +
-    (settleable ? confirmHtml() : '');
-}
-function paintDiff() {
-  const el = document.getElementById('diffLine');
-  const conf = parseFloat(document.getElementById('confIn').value);
-  const d = isNaN(conf) ? 0 : conf - settleExpected();
-  el.innerHTML = d ? '差額 ' + (d < 0 ? '&minus;' : '+') + '$' + $(Math.abs(d)) : '';
-}
-// Ticking a row moves money without repainting the sheet: the typed 平台確認
-// and 結算日 sit in the markup, and a repaint would throw a half-typed value
-// away. A repaint that does happen (an added day, a reload) reads the typed
-// amount back out of confirmedText.
-function syncDay() {
-  const v = curView();
-  if (!v || v.kind !== 'day') return;
-  const expEl = document.getElementById('expV');
-  if (!expEl) return;
-  const total = settleExpected();
-  expEl.textContent = '$' + $(total);
-  document.getElementById('confIn').value = confirmedTouched ? confirmedText : String(total);
-  const btn = document.getElementById('settleGo');
-  btn.textContent = settleGoLabel(total);
-  btn.disabled = settleTicked.size === 0;
-  paintDiff();
+      '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '');
 }
 
 // ---- batch sheet ----
@@ -734,9 +585,9 @@ function batchViewHtml(v) {
   // A one-day batch needs no day heading; the title above already names the day.
   if (dates.length > 1) {
     body = dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
-      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'ro', undefined, plat.has(o.order_id) ? plat.get(o.order_id) : undefined)).join('')).join('');
+      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'batch', plat.get(o.order_id))).join('')).join('');
   } else {
-    body = rows.map(o => orderRowHtml(o, 'ro', undefined, plat.has(o.order_id) ? plat.get(o.order_id) : undefined)).join('');
+    body = rows.map(o => orderRowHtml(o, 'batch', plat.get(o.order_id))).join('');
   }
   const diff = b.confirmed_amount - b.expected_amount;
   const sums = [
@@ -757,6 +608,47 @@ function batchViewHtml(v) {
       '<div class="sum-row"><span class="k">' + r[0] +
       '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
     '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
+    '<button class="ghost-btn" data-back="1">收埋</button>';
+}
+
+// ---- credits sheet ----
+// The ledger as a list: how much came in, how much of it a statement accounts
+// for, and which credits are still waiting for one. Oldest first among the
+// unaccounted ones -- those are the ones the operator is here to clear -- and
+// newest first among the settled, which are read as a record.
+function creditRowHtml(c) {
+  const state = c.state === 'done' ? ['已對', 'done'] : ['未對', 'open'];
+  let text = c.value_date.slice(5) + ' · $' + $(c.amount) + ' · ';
+  let cls = 'crow';
+  let head;
+  if (c.state === 'archived') {
+    cls += ' gone';
+    head = esc(text + '收埋' + (c.archived_reason ? '（' + c.archived_reason + '）' : ''));
+  } else {
+    head = esc(text) + '<span class="cstate ' + state[1] + '">' + state[0] + '</span>' +
+      (c.state === 'partial' ? esc(' · 剩 $' + $(c.remaining)) : '');
+  }
+  const batches = c.batches.map(b =>
+    '<button class="cbatch" data-bl="' + b.id + '">批次 ' + esc(dateSpanLabel(b.dates)) +
+    ' · ' + b.orders + ' 程</button>' +
+    (b.has_image ? '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>' : '')
+  ).join('');
+  return '<div class="' + cls + '"><span>' + head + '</span>' + batches + '</div>';
+}
+function creditsViewHtml() {
+  const all = ledger.credits;
+  const open = all.filter(c => c.state === 'open' || c.state === 'partial');
+  const done = all.filter(c => c.state === 'done').reverse();
+  const gone = all.filter(c => c.state === 'archived');
+  const sub = '未對 ' + open.length + ' 筆 $' + $(ledger.sums.open) +
+    ' · 已對 ' + done.length + ' 筆 $' + $(ledger.sums.done);
+  return sheetHead('入數', esc(platLabel(curPlat)) + ' · ' + sub) +
+    (all.length ? '' : '<div class="empty">未有入數紀錄</div>') +
+    open.map(creditRowHtml).join('') +
+    done.map(creditRowHtml).join('') +
+    (gone.length ? '<button class="cfold" data-arch="1">收埋 ' + gone.length + ' 筆 ' +
+      (archOpen ? '&#9652;' : '&#9662;') + '</button>' : '') +
+    (archOpen ? gone.map(creditRowHtml).join('') : '') +
     '<button class="ghost-btn" data-back="1">收埋</button>';
 }
 
@@ -786,42 +678,25 @@ async function undoBatch(id) {
     return;
   }
   // The batch the sheet was showing no longer exists, so it closes back to the
-  // day, where its legs are loose and offered again. Anything the sheet was
-  // building against the old batch is void, so the day starts over.
+  // day, where its legs are loose again.
   while (views.length && (curView().kind === 'undo' || curView().kind === 'batch')) views.pop();
-  const under = curView();
   await load();
-  if (under && under.kind === 'day') {
-    resetSettleState(under.date);
-    paintView();
-  }
   toast('已撤銷結算');
 }
 
-async function confirmSettle() {
-  if (!settleTicked.size) return;
-  const typed = parseFloat(document.getElementById('confIn').value);
-  const exp = settleExpected();
-  const btn = document.getElementById('settleGo');
-  btn.disabled = true;
-  btn.textContent = '結算緊…';
-  try {
-    await apiWrite('POST', '/api/settlements', {
-      platform: curPlat,
-      order_ids: [...settleTicked],
-      confirmed_amount: isNaN(typed) ? exp : typed,
-      settled_on: document.getElementById('settleDate').value || TODAY,
-    });
-  } catch (e) {
-    toast(e.message);
-    syncDay();
-    return;
+// A credit's batch can sit outside the month on screen, and the batch sheet
+// reads from the month. Move the calendar to it first, or the sheet opens on
+// nothing.
+async function openBatch(id) {
+  if (!batchById(id)) {
+    const b = ledger.credits.flatMap(c => c.batches).find(x => x.id === id);
+    const month = b && b.dates.length ? b.dates[0].slice(0, 7) : '';
+    if (!month || month === curMonth) return;
+    curMonth = month;
+    await load();
+    if (!batchById(id)) return;
   }
-  settleDays = [];
-  settleTicked = new Set();
-  closeSheet();
-  await load();
-  toast('已結算');
+  pushView({ kind: 'batch', id: id });
 }
 
 function copyId(id) {
@@ -851,6 +726,9 @@ document.getElementById('chips').addEventListener('click', e => {
   savePlat();
   load();
 });
+document.getElementById('summary').addEventListener('click', e => {
+  if (e.target.closest('[data-credits]')) openView({ kind: 'credits' });
+});
 document.getElementById('grid').addEventListener('click', e => {
   const cell = e.target.closest('.cell');
   if (!cell || !cell.dataset.d) return;
@@ -869,24 +747,8 @@ document.getElementById('sheet').addEventListener('click', e => {
   const undoGo = e.target.closest('[data-undogo]');
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
   const link = e.target.closest('[data-bl]');
-  if (link) { pushView({ kind: 'batch', id: +link.dataset.bl }); return; }
-  const add = e.target.closest('[data-add]');
-  if (add) { toggleAddDay(add.dataset.add); return; }
-  if (e.target.closest('#settleGo')) { confirmSettle(); return; }
-  const row = e.target.closest('.orow');
-  if (row && row.dataset.o) {
-    const id = row.dataset.o;
-    if (settleTicked.has(id)) { settleTicked.delete(id); row.classList.replace('on', 'off'); }
-    else { settleTicked.add(id); row.classList.replace('off', 'on'); }
-    syncDay();
-  }
-});
-document.getElementById('sheet').addEventListener('input', e => {
-  if (e.target.id === 'settleDate') { settleOn = e.target.value || TODAY; return; }
-  if (e.target.id !== 'confIn') return;
-  confirmedTouched = true;
-  confirmedText = e.target.value;
-  paintDiff();
+  if (link) { openBatch(+link.dataset.bl); return; }
+  if (e.target.closest('[data-arch]')) { archOpen = !archOpen; paintView(); }
 });
 
 // ---- init ----

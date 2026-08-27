@@ -111,6 +111,35 @@ def test_awaiting_batches_drops_a_batch_once_a_credit_is_linked(db_path):
     assert awaiting[0]["orders"][0]["order_id"] == "A1"
 
 
+def test_create_refuses_anything_that_cannot_enter_a_batch(db_path):
+    """All-or-nothing, and the refusal names the leg.  The bot's statement flow
+    is the only caller left, so this is where the guard is proved."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "NOPRICE", "2026-08-23 10:00:00", 0.0)
+    seed(db_path, "FUTURE", "2026-08-27 09:00:00", 210.0)
+    save_order(db_path, make_order("GONE", "2026-08-23 11:00:00"), telegram_msg_id=2,
+               parking=0.0, source="携程")
+    update_price(db_path, "GONE", 210.0)
+    cancel_order(db_path, "GONE")
+    for order_ids, says in (
+        (["A1", "MISSING"], "搵唔到單"),
+        (["A1", "NOPRICE"], "未入價"),
+        (["A1", "FUTURE"], "未完成"),
+        (["A1", "GONE"], "已取消"),
+        (["A1", "A1"], "重複"),
+    ):
+        with pytest.raises(ValueError, match=says):
+            create_settlement(db_path, "ride", order_ids, 490.0, "2026-08-26", now=NOW)
+    with pytest.raises(ValueError, match="unknown platform"):
+        create_settlement(db_path, "taxi", ["A1"], 280.0, "2026-08-26", now=NOW)
+    with pytest.raises(ValueError, match="order_ids required"):
+        create_settlement(db_path, "ride", [], 0.0, "2026-08-26", now=NOW)
+    sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
+    with pytest.raises(ValueError, match="已經結算咗"):
+        create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
+    assert [b["id"] for b in awaiting_batches(db_path, "ride")] == [sid]
+
+
 def test_no_db_function_marks_a_batch_paid_by_hand():
     """paid_on is the bank's value date and link_credit is the only writer.
 
