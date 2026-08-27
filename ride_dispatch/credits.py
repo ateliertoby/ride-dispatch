@@ -155,6 +155,33 @@ def anchor(batch: dict) -> str | None:
     return None
 
 
+def service_end(batch: dict) -> str | None:
+    """The last day a batch worked for, or None when it cannot say.
+
+    Its own orders answer first; a statement standing in for a batch that does
+    not exist yet has none, so its day headers answer instead.  The statement's
+    settle date is deliberately not consulted: a misread one would exclude the
+    real payment.
+    """
+    orders = batch.get("orders") or []
+    if orders:
+        return max(o["scheduled_time"][:10] for o in orders)
+    days = [d["date"] for d in (batch.get("statement") or {}).get("days", []) if d.get("date")]
+    return max(days) if days else None
+
+
+def paid_after_the_work(batch: dict, value_date: str) -> bool:
+    """Whether money dated `value_date` could be for this batch at all.
+
+    Money cannot arrive before the work it pays for, so a credit dated before a
+    batch's last service day is not a candidate for it, whatever the window
+    says.  A batch that cannot say when it was worked excludes nothing: an
+    unknown date must not silently hide candidates.
+    """
+    end = service_end(batch)
+    return end is None or end <= value_date
+
+
 def in_window(anchor_date: str | None, value_date: str) -> bool:
     # No date at all is outside every window: the dates have to agree, and a
     # batch that cannot say when it was earned never can.
@@ -213,7 +240,8 @@ def match_credit(credit: dict, batches: list[dict]) -> Match:
     """
     remaining = credit["remaining"]
     pool = [b for b in batches
-            if b["platform"] == credit["platform"] and b["outstanding"] > CENT]
+            if b["platform"] == credit["platform"] and b["outstanding"] > CENT
+            and paid_after_the_work(b, credit["value_date"])]
     windowed = [b for b in pool if in_window(anchor(b), credit["value_date"])]
     exact = _by_anchor([b for b in windowed if _same(b["outstanding"], remaining)])
     # A batch this credit cannot cover is the short-payment case: the tap puts
@@ -259,7 +287,8 @@ def match_batch(batch: dict, unallocated: list[dict]) -> Match:
     """
     outstanding = batch["outstanding"]
     pool = [c for c in unallocated
-            if c["platform"] == batch["platform"] and c["remaining"] > CENT]
+            if c["platform"] == batch["platform"] and c["remaining"] > CENT
+            and paid_after_the_work(batch, c["value_date"])]
     windowed = [c for c in pool if in_window(anchor(batch), c["value_date"])]
     exact = _by_value_date([c for c in windowed if _same(c["remaining"], outstanding)])
     short = _by_value_date([c for c in windowed
