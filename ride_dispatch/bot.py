@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, mark_unpaid, archive_credit, archive_credits_before, unarchive_credit
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -60,13 +60,6 @@ uber_state: dict[int, dict] = {}
 # confirms so it can be stored beside the batch; a skipped or expired card
 # drops it.
 pending_statements: dict[int, tuple] = {}
-
-# Tick-card message id → (settlement id, set of ticked order ids).  Which legs
-# the platform says it has not paid is a question with one answer, so the marks
-# live only until the card is confirmed; a bot restart reopens the card with
-# /credits short and nothing is lost but the taps.
-pending_unpaid: dict[int, tuple[int, set]] = {}
-
 
 def format_card(order) -> str:
     type_label = service_label(order.service_type)
@@ -450,9 +443,9 @@ async def handle_callback(update: Update, context):
             if leftover:
                 text += "\n" + leftover[0]
                 markup = leftover[1]
-        await query.message.reply_text(text, reply_markup=markup)
         if batch is not None and batch["state"] == "partial":
-            await _send_tick_card(query.message, batch)
+            text += "\n" + credits.short_allocation_line(batch)
+        await query.message.reply_text(text, reply_markup=markup)
 
     elif query.data.startswith("credit:link:"):
         _, _, credit_id, settlement_id = query.data.split(":")
@@ -507,52 +500,9 @@ async def handle_callback(update: Update, context):
         if leftover:
             text += "\n" + leftover[0]
             markup = leftover[1]
-        await query.message.edit_text(text, reply_markup=markup)
         if batch["state"] == "partial":
-            await _send_tick_card(query.message, batch)
-
-    elif query.data.startswith("unpaid:t:"):
-        # Ticking is arithmetic in the operator's hands: the footer states what
-        # the marks add up to against what the platform still owes, and nothing
-        # is written until the two agree.
-        order_id = query.data.split(":", 3)[3]
-        entry = pending_unpaid.get(msg_id)
-        if entry is None:
-            await query.answer("已過期，用 /credits short 再開")
-            return
-        settlement_id, ticked = entry
-        batch = get_settlement(DB_PATH, settlement_id)
-        if batch is None:
-            await query.answer("搵唔到批次")
-            return
-        ticked.symmetric_difference_update({order_id})
-        await query.answer()
-        await query.message.edit_reply_markup(reply_markup=unpaid_markup(batch, ticked))
-
-    elif query.data.startswith("unpaid:ok:"):
-        entry = pending_unpaid.get(msg_id)
-        if entry is None:
-            await query.answer("已過期，用 /credits short 再開")
-            return
-        settlement_id, ticked = entry
-        batch = get_settlement(DB_PATH, settlement_id)
-        if batch is None:
-            await query.answer("搵唔到批次")
-            return
-        # The footer already states the arithmetic, so a tap on a set that does
-        # not add up answers with what the operator is looking at rather than
-        # with a second phrasing of it.
-        if not credits.ticks_add_up(batch, ticked):
-            await query.answer(credits.tick_footer(batch, ticked))
-            return
-        try:
-            batch = mark_unpaid(DB_PATH, settlement_id, sorted(ticked))
-        except ValueError as e:
-            await query.answer(str(e))
-            return
-        pending_unpaid.pop(msg_id, None)
-        await query.answer("已記低")
-        await query.message.edit_text(credits.unpaid_text(batch), reply_markup=None)
+            text += "\n" + credits.short_allocation_line(batch)
+        await query.message.edit_text(text, reply_markup=markup)
 
     elif query.data.startswith("credit:archive:"):
         # The statement proved this money is for legs the system never had, so
@@ -909,7 +859,7 @@ async def handle_statement_image(update: Update, context):
         await msg.reply_text(f"讀圖出錯（{type(e).__name__}）— 再 send 一次，或者用「Send as file」send 原檔")
 
 
-CREDITS_USAGE = ("用法：/credits · /credits <id> · /credits short <批次> · "
+CREDITS_USAGE = ("用法：/credits · /credits <id> · "
                  "/credits archive before YYYY-MM-DD · /credits archive <id> [note] · "
                  "/credits unarchive <id> · /credits unlink <批次>")
 
@@ -936,21 +886,6 @@ async def handle_credits(update: Update, context):
         offered = credits.offer(m, open_batches(DB_PATH, credit["platform"]))
         await msg.reply_text(credits.detail_text(credit, DB_PATH),
                              reply_markup=credit_card_markup(credit, offered))
-        return
-
-    if args[0] == "short" and len(args) == 2 and args[1].isdigit():
-        # The tick card lives on one message; reopening it is how the operator
-        # gets back to a batch whose card has scrolled away or whose bot has
-        # restarted since.
-        batch = get_settlement(DB_PATH, int(args[1]))
-        if batch is None:
-            await msg.reply_text(f"搵唔到批次 #{args[1]}")
-            return
-        if batch["state"] != "partial":
-            await msg.reply_text(f"批次 #{args[1]} " +
-                                 ("已收齊" if batch["state"] == "paid" else "未收過錢"))
-            return
-        await _send_tick_card(msg, batch)
         return
 
     if args[0] == "archive" and len(args) >= 3 and args[1] == "before" and _DATE_RE.match(args[2]):
@@ -1124,20 +1059,6 @@ def credit_choice_markup(candidates: list[dict], settlement_id: int,
     ])
 
 
-def unpaid_markup(batch: dict, ticked: set) -> InlineKeyboardMarkup:
-    """The tick card: one toggle per leg, and a footer that does the sum.
-
-    The footer is always tappable and always states the arithmetic; refusing
-    the tap silently would leave the operator guessing which leg he missed.
-    """
-    rows = [[InlineKeyboardButton(credits.tick_label(batch, o, o["order_id"] in ticked),
-                                  callback_data=f"unpaid:t:{batch['id']}:{o['order_id']}")]
-            for o in batch["orders"]]
-    rows.append([InlineKeyboardButton(credits.tick_footer(batch, ticked),
-                                      callback_data=f"unpaid:ok:{batch['id']}")])
-    return InlineKeyboardMarkup(rows)
-
-
 def _owed_legs(settlement_id: int) -> list[str]:
     """The legs the platform has said it has not paid for, as things stand."""
     batch = get_settlement(DB_PATH, settlement_id)
@@ -1168,19 +1089,12 @@ def _leftover_offer(credit_id: int):
     return credits.leftover_text(credit), credit_card_markup(credit, offered)
 
 
-async def _send_tick_card(message, batch: dict):
-    """Ask which legs the platform failed to submit, pre-ticked as recorded."""
-    ticked = {o["order_id"] for o in batch["orders"] if o["unpaid"]}
-    sent = await message.reply_text(credits.tick_head(batch),
-                                    reply_markup=unpaid_markup(batch, ticked))
-    pending_unpaid[sent.message_id] = (batch["id"], ticked)
-
-
 async def _report_allocation(message, batch: dict, cleared: list[str]):
     """Say what an allocation did to the batch, and ask about what it left owing."""
-    await message.reply_text(_allocation_line(batch, cleared))
+    line = _allocation_line(batch, cleared)
     if batch["state"] == "partial":
-        await _send_tick_card(message, batch)
+        line += "\n" + credits.short_allocation_line(batch)
+    await message.reply_text(line)
 
 
 async def _check_credits(bot, chat_id: int):
