@@ -746,7 +746,21 @@ function orderListHtml(b, rows, tickSet) {
 // the batches it belongs to. Nothing is written from here.
 function dayTag(o) {
   const b = batchOf(o.order_id);
-  if (b) return b.state === 'paid' ? [paidLabel(b), 'paid'] : [batchTag(b), 'awaiting'];
+  if (b) {
+    if (b.state === 'paid') return [paidLabel(b), 'paid'];
+    // The tag states where this leg's money has got to, not the batch's: a
+    // short-paid batch is short one leg, and the outstanding figure on every
+    // leg of it would read as each leg being short that much. Once the ticks
+    // name the short leg, every other leg has been paid.
+    if (b.state === 'partial') {
+      if (o.unpaid) return ['未過數', 'unsettled'];
+      if (b.orders.some(x => x.unpaid)) {
+        return ['已收 ' + mdSlash(b.allocations[b.allocations.length - 1].value_date), 'paid'];
+      }
+      return ['批次差 $' + $(b.outstanding), 'awaiting'];
+    }
+    return [batchTag(b), 'awaiting'];
+  }
   if (isSettleable(o)) return ['未結算', 'unsettled'];
   return [o.price ? '未完成' : '未入價', 'mute'];
 }
