@@ -595,6 +595,67 @@ def test_settle_carries_what_a_batch_has_received_and_still_owes(client):
     assert data["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
 
 
+def test_unpaid_endpoint_200_marks_legs_and_returns_batch(client):
+    from ride_dispatch.db import allocate
+    seed_ride("R1", price=300.0, banner=0.0)
+    seed_ride("R2", scheduled="2026-07-01 10:00:00", price=200.0, banner=0.0)
+    sid = create_batch(["R1", "R2"], confirmed=500)
+    cid = seed_credit(amount=300.0)
+    allocate(web.DB_PATH, cid, sid)
+    res = client.post(f"/api/settlements/{sid}/unpaid",
+                      json={"order_ids": ["R2"]})
+    assert res.status_code == 200
+    batch = res.get_json()
+    assert {o["order_id"]: o["unpaid"] for o in batch["orders"]} == {"R1": 0, "R2": 1}
+    # The response carries the derived fields the page needs.
+    assert all("platform_amount" in o for o in batch["orders"])
+    assert "unpaid_guesses" in batch
+
+
+def test_unpaid_endpoint_400_on_sum_mismatch(client):
+    from ride_dispatch.db import allocate
+    seed_ride("R1", price=300.0, banner=0.0)
+    seed_ride("R2", scheduled="2026-07-01 10:00:00", price=200.0, banner=0.0)
+    sid = create_batch(["R1", "R2"], confirmed=500)
+    cid = seed_credit(amount=300.0)
+    allocate(web.DB_PATH, cid, sid)
+    res = client.post(f"/api/settlements/{sid}/unpaid",
+                      json={"order_ids": ["R1"]})
+    assert res.status_code == 400
+    assert "剔咗" in res.get_json()["error"]
+
+
+def test_unpaid_endpoint_404_unknown_batch(client):
+    res = client.post("/api/settlements/999/unpaid", json={"order_ids": []})
+    assert res.status_code == 404
+
+
+def test_settle_carries_unpaid_guesses_and_platform_amount(client):
+    from ride_dispatch.db import allocate
+    seed_ride("R1", price=300.0, banner=0.0)
+    seed_ride("R2", scheduled="2026-07-01 10:00:00", price=200.0, banner=0.0)
+    sid = create_batch(["R1", "R2"], confirmed=500)
+    cid = seed_credit(amount=300.0)
+    allocate(web.DB_PATH, cid, sid)
+    data = settle(client)
+    batch = data["settlements"][0]
+    assert batch["state"] == "partial"
+    # The guess should find R2 ($200 == outstanding $200).
+    assert batch["unpaid_guesses"] == [["R2"]]
+    # Every order carries its platform_amount.
+    amounts = {o["order_id"]: o["platform_amount"] for o in batch["orders"]}
+    assert amounts == {"R1": 300.0, "R2": 200.0}
+
+
+def test_settle_non_partial_batch_has_empty_guesses(client):
+    seed_ride("R1")
+    sid = create_batch(["R1"], confirmed=540)
+    data = settle(client)
+    batch = data["settlements"][0]
+    assert batch["state"] == "awaiting"
+    assert batch["unpaid_guesses"] == []
+
+
 def test_fingerprint_tracks_the_credit_ledger(client):
     """An open settle page has to repaint when a credit lands, is archived, is
     put against a batch, or a leg is marked unpaid — none of which changes an
@@ -688,22 +749,25 @@ def test_credits_endpoint_is_empty_and_platform_scoped(client):
     assert client.get("/api/credits?platform=taxi").status_code == 400
 
 
-def test_the_only_write_a_batch_accepts_is_being_undone(client):
+def test_the_writes_a_batch_accepts_are_undo_and_unpaid(client):
     """Batches come from statements and paid means linked to a bank credit, so
-    neither creating one nor marking one paid is something the page can do."""
+    neither creating one nor marking one paid is something the page can do.
+    Naming the unpaid legs of a short-paid batch is the only other write."""
     writes = {(r.rule, m) for r in web.app.url_map.iter_rules()
               for m in r.methods - {"GET", "HEAD", "OPTIONS"}}
     assert {r for r, _ in writes if r.startswith("/api/settlements")} == {
-        "/api/settlements/<int:settlement_id>"}
+        "/api/settlements/<int:settlement_id>",
+        "/api/settlements/<int:settlement_id>/unpaid"}
 
 
 def test_settle_page_exposes_only_the_actions_that_remain(client):
-    """Ticking legs into a batch left nothing behind: these attribute names are
-    the whole of what the page can still do, so a resurrected action has to be
-    added here deliberately."""
+    """These attribute names are the full set of what the page can do, so a
+    new action has to be added here deliberately."""
     page = client.get("/settle").get_data(as_text=True)
     assert set(re.findall(r"data-([a-z]+)=", page)) == {
-        "arch", "back", "bl", "close", "copy", "credits", "d", "f", "undo", "undogo"}
+        "arch", "back", "bl", "close", "copy", "credits", "d", "f",
+        "upbatch", "upguess", "uptick", "upsave",
+        "undo", "undogo"}
 
 
 def test_allocating_the_whole_batch_pays_it(client):

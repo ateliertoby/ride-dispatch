@@ -19,6 +19,7 @@ from .db import (
     get_settle_month,
     get_settlement,
     list_credits,
+    mark_unpaid,
     save_or_revive_order,
     save_quick_order,
     statements_dir,
@@ -27,10 +28,12 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
+from .credits import guess_unpaid
 from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
+from .statement import leg_amount
 
 load_dotenv()
 
@@ -272,6 +275,10 @@ def api_settle():
         # The page only asks whether a screenshot exists; the file name it is
         # stored under is not something the client can do anything with.
         batch["statement_image"] = bool(batch.get("statement_image"))
+        # The platform's own figure per order, so the page never re-derives it.
+        for o in batch["orders"]:
+            o["platform_amount"] = leg_amount(batch, o)
+        batch["unpaid_guesses"] = guess_unpaid(batch)
     return jsonify({"month": month, "platform": platform, **data})
 
 
@@ -309,6 +316,29 @@ def api_delete_settlement(settlement_id):
     if not delete_settlement(DB_PATH, settlement_id):
         return jsonify({"error": "settlement not found"}), 404
     return jsonify({"ok": True})
+
+
+@app.post("/api/settlements/<int:settlement_id>/unpaid")
+def api_mark_unpaid(settlement_id):
+    """Name the legs a short-paid batch is missing.
+
+    An empty list would add up to $0, which differs from the outstanding by
+    definition (the batch is partial), so mark_unpaid already refuses it —
+    the marks can be replaced but not cleared while money is owed.
+    """
+    batch = get_settlement(DB_PATH, settlement_id)
+    if batch is None:
+        return jsonify({"error": "settlement not found"}), 404
+    body = request.get_json(silent=True) or {}
+    order_ids = body.get("order_ids", [])
+    try:
+        batch = mark_unpaid(DB_PATH, settlement_id, order_ids)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    for o in batch["orders"]:
+        o["platform_amount"] = leg_amount(batch, o)
+    batch["unpaid_guesses"] = guess_unpaid(batch)
+    return jsonify(batch)
 
 
 _IMAGE_MIMETYPES = {"jpg": "image/jpeg", "png": "image/png", "heic": "image/heic"}

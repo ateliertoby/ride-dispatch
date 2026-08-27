@@ -177,6 +177,40 @@
     cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
   }
 
+  /* ---- unpaid tick section ---- */
+  .up-sec { padding: 12px 2px 0; }
+  .up-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
+  .up-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; }
+  .up-chip {
+    background: var(--key-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
+    cursor: pointer;
+  }
+  .up-chip:active { background: var(--key-press); }
+  .up-row {
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line); padding: 10px 2px;
+    cursor: pointer;
+  }
+  .up-row:active { background: var(--surface-press); }
+  .up-chk { flex-shrink: 0; font-size: 16px; line-height: 1; width: 18px; color: var(--text-2); }
+  .up-chk.on { color: var(--text); }
+  .up-id { flex: 1; min-width: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .up-amt { flex-shrink: 0; font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .up-foot {
+    display: flex; align-items: center; gap: 10px; padding: 10px 2px 0;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .up-foot .up-sum { flex: 1; color: var(--text-2); }
+  .up-foot .up-sum.warn { color: var(--amber); }
+  .up-btn {
+    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; font-family: inherit; font-size: 13px;
+    font-weight: 650; color: var(--text); cursor: pointer;
+  }
+  .up-btn:disabled { opacity: .35; cursor: default; }
+  .up-btn:not(:disabled):active { background: var(--key-press); }
+
   .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
 
   /* ---- desktop ----
@@ -629,8 +663,59 @@ function batchViewHtml(v) {
     '<div class="sum-rows">' + sums.map(r =>
       '<div class="sum-row"><span class="k">' + r[0] +
       '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
+    unpaidSectionHtml(b) +
     '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
     '<button class="ghost-btn" data-back="1">收埋</button>';
+}
+
+// ---- unpaid legs section ----
+// The section only appears for a partial batch: the operator names which legs
+// the platform has not paid, with the system's guess pre-filled when one
+// exists.  Legs already marked unpaid override the guess and are pre-ticked.
+function unpaidSectionHtml(b) {
+  if (b.state !== 'partial') return '';
+  const ticked = new Set(b.orders.filter(o => o.unpaid).map(o => o.order_id));
+  const guesses = b.unpaid_guesses || [];
+  // Pre-tick: existing marks win; else if exactly one guess, pre-tick that.
+  if (!ticked.size && guesses.length === 1) {
+    guesses[0].forEach(id => ticked.add(id));
+  }
+  let chips = '';
+  if (guesses.length === 1) {
+    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">系統估：' +
+      esc(guesses[0].map(id => '…' + id.slice(-4)).join(' + ')) +
+      '（啱 $' + $(b.outstanding) + '）</span></div>';
+  } else if (guesses.length > 1) {
+    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">系統估：</span>' +
+      guesses.map((g, i) =>
+        '<button class="up-chip" data-upguess="' + i + '">' +
+        esc(g.map(id => '…' + id.slice(-4)).join(' + ')) + '</button>'
+      ).join('') + '</div>';
+  } else {
+    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">冇組合啱 $' +
+      $(b.outstanding) + '，自己剔</span></div>';
+  }
+  const sorted = b.orders.slice().sort((x, y) => x.scheduled_time.localeCompare(y.scheduled_time));
+  const rows = sorted.map(o => {
+    const on = ticked.has(o.order_id);
+    return '<div class="up-row" data-uptick="' + esc(o.order_id) + '">' +
+      '<span class="up-chk' + (on ? ' on' : '') + '">' + (on ? '☑' : '☐') + '</span>' +
+      '<span class="up-id">…' + esc(o.order_id.slice(-4)) + ' · ' +
+      esc(mdSlash(orderDate(o))) + '</span>' +
+      '<span class="up-amt">$' + $(o.platform_amount) + '</span></div>';
+  }).join('');
+  const tickedAmt = sorted.reduce((s, o) => ticked.has(o.order_id) ? s + o.platform_amount : s, 0);
+  const match = Math.abs(tickedAmt - b.outstanding) < 0.005;
+  const sumCls = match ? 'up-sum' : 'up-sum warn';
+  const sumText = match
+    ? '剔咗 $' + $(tickedAmt)
+    : '剔咗 $' + $(tickedAmt) + ' ≠ 差 $' + $(b.outstanding);
+  return '<div class="up-sec" data-upbatch="' + b.id + '">' +
+    '<div class="up-head">邊張單未過？ · 差 $' + $(b.outstanding) + '</div>' +
+    chips + rows +
+    '<div class="up-foot"><span class="' + sumCls + '">' + sumText + '</span>' +
+    '<button class="up-btn" data-upsave="' + b.id + '"' + (match ? '' : ' disabled') +
+    '>記低</button></div></div>';
 }
 
 // ---- credits sheet ----
@@ -771,10 +856,81 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
   const undoGo = e.target.closest('[data-undogo]');
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
+  const tick = e.target.closest('[data-uptick]');
+  if (tick) { toggleUnpaid(tick.dataset.uptick); return; }
+  const guess = e.target.closest('[data-upguess]');
+  if (guess) { applyGuess(+guess.dataset.upguess); return; }
+  const save = e.target.closest('[data-upsave]');
+  if (save && !save.disabled) { saveUnpaid(+save.dataset.upsave); return; }
   const link = e.target.closest('[data-bl]');
   if (link) { openBatch(+link.dataset.bl); return; }
   if (e.target.closest('[data-arch]')) { archOpen = !archOpen; paintView(); }
 });
+
+// ---- unpaid tick interaction ----
+// The tick state lives in the DOM: toggling repaints only the section rather
+// than the whole sheet, so scroll position and the rest of the view survive.
+function getTickedIds() {
+  const sec = document.querySelector('[data-upbatch]');
+  if (!sec) return new Set();
+  return new Set([...sec.querySelectorAll('.up-chk.on')].map(
+    el => el.closest('[data-uptick]').dataset.uptick));
+}
+function toggleUnpaid(orderId) {
+  const sec = document.querySelector('[data-upbatch]');
+  if (!sec) return;
+  const bid = +sec.dataset.upbatch;
+  const b = batchById(bid);
+  if (!b) return;
+  const row = sec.querySelector('[data-uptick="' + orderId + '"]');
+  if (!row) return;
+  const chk = row.querySelector('.up-chk');
+  const on = chk.classList.toggle('on');
+  chk.textContent = on ? '☑' : '☐';
+  refreshUnpaidFoot(sec, b);
+}
+function applyGuess(idx) {
+  const sec = document.querySelector('[data-upbatch]');
+  if (!sec) return;
+  const bid = +sec.dataset.upbatch;
+  const b = batchById(bid);
+  if (!b) return;
+  const guessIds = new Set((b.unpaid_guesses || [])[idx] || []);
+  sec.querySelectorAll('[data-uptick]').forEach(row => {
+    const chk = row.querySelector('.up-chk');
+    const want = guessIds.has(row.dataset.uptick);
+    if (want !== chk.classList.contains('on')) {
+      chk.classList.toggle('on', want);
+      chk.textContent = want ? '☑' : '☐';
+    }
+  });
+  refreshUnpaidFoot(sec, b);
+}
+function refreshUnpaidFoot(sec, b) {
+  const ticked = getTickedIds();
+  let amt = 0;
+  b.orders.forEach(o => { if (ticked.has(o.order_id)) amt += o.platform_amount; });
+  amt = Math.round(amt * 100) / 100;
+  const match = Math.abs(amt - b.outstanding) < 0.005;
+  const foot = sec.querySelector('.up-foot');
+  const sumEl = foot.querySelector('.up-sum');
+  sumEl.className = match ? 'up-sum' : 'up-sum warn';
+  sumEl.textContent = match
+    ? '剔咗 $' + $(amt)
+    : '剔咗 $' + $(amt) + ' ≠ 差 $' + $(b.outstanding);
+  foot.querySelector('.up-btn').disabled = !match;
+}
+async function saveUnpaid(bid) {
+  const ticked = [...getTickedIds()];
+  try {
+    await apiWrite('POST', '/api/settlements/' + bid + '/unpaid', { order_ids: ticked });
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  await load();
+  toast('已記低');
+}
 
 // ---- init ----
 loadPlat();
