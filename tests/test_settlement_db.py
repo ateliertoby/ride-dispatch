@@ -7,7 +7,7 @@ import pytest
 from ride_dispatch import db as db_module
 from ride_dispatch.db import (
     init_db, save_order, update_price, cancel_order, create_settlement, delete_settlement,
-    get_settlement, get_settle_month, awaiting_batches, insert_credit, link_credit,
+    get_settlement, get_settle_month, open_batches, insert_credit, allocate,
     settlement_candidates, statement_image_path, image_extension,
 )
 from ride_dispatch.parser import Order
@@ -94,7 +94,7 @@ def test_delete_removes_image_file(db_path):
     assert not os.path.exists(path)
 
 
-def test_awaiting_batches_drops_a_batch_once_a_credit_is_linked(db_path):
+def test_open_batches_drops_a_batch_once_a_credit_is_linked(db_path):
     seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
     seed(db_path, "A2", "2026-08-24 09:00:00", 210.0)
     seed(db_path, "A3", "2026-08-25 09:00:00", 280.0)
@@ -105,8 +105,8 @@ def test_awaiting_batches_drops_a_batch_once_a_credit_is_linked(db_path):
                                   "currency": "HKD", "value_date": "2026-08-26",
                                   "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
                                   "email_id": None, "received_at": None, "recorded_at": None})
-    link_credit(db_path, cid, s3)
-    awaiting = awaiting_batches(db_path, "ride")
+    allocate(db_path, cid, s3)
+    awaiting = open_batches(db_path, "ride")
     assert [b["id"] for b in awaiting] == [s1, s2]
     assert awaiting[0]["orders"][0]["order_id"] == "A1"
 
@@ -137,17 +137,24 @@ def test_create_refuses_anything_that_cannot_enter_a_batch(db_path):
     sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
     with pytest.raises(ValueError, match="已經結算咗"):
         create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
-    assert [b["id"] for b in awaiting_batches(db_path, "ride")] == [sid]
+    assert [b["id"] for b in open_batches(db_path, "ride")] == [sid]
 
 
 def test_no_db_function_marks_a_batch_paid_by_hand():
-    """paid_on is the bank's value date and link_credit is the only writer.
+    """paid_on is the bank's value date and allocate is the only writer.
 
     Asserted over the module surface rather than over the names that used to
     exist, so a second hand-written mark under any name fails here too.
+    mark_unpaid is the opposite function: it records which legs the platform
+    has NOT paid for, and never touches paid_on.
     """
-    assert [n for n in dir(db_module) if "paid" in n] == []
-    assert [n for n in dir(db_module) if "awaiting" in n] == ["awaiting_batches"]
+    assert [n for n in dir(db_module) if "paid" in n] == ["mark_unpaid"]
+    assert [n for n in dir(db_module) if "awaiting" in n] == []
+    # Round 2's one-credit-pays-one-batch functions are gone, not deprecated:
+    # money is allocated in amounts now, and a caller of either would be
+    # writing a model the ledger no longer has.
+    assert not hasattr(db_module, "link_credit")
+    assert not hasattr(db_module, "unlink_credit")
 
 
 def test_candidates_window_and_settleable_tail(db_path):

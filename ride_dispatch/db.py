@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from .parser import Order
 from .ingest import banner_fee
 from .service import PLATFORMS, expected_of, needs_departure_reminder, platform_of
+from .statement import leg_amount
 
 COARSE_WINDOW_HOURS = 24
 
@@ -72,6 +73,7 @@ def init_db(db_path: str):
             "source TEXT DEFAULT ''",
             "reminders_sent TEXT DEFAULT ''",
             "settlement_id INTEGER",
+            "unpaid INTEGER DEFAULT 0",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -100,10 +102,10 @@ def init_db(db_path: str):
         # One row per bank credit from the feed, whether or not any batch or
         # order exists for it: the ledger must be complete for the backfill to
         # be workable.  ref is the bank's own reference and the identity, so a
-        # re-read of the feed collapses onto one row.  What is linked and what
-        # is left are derived from settlements.bank_credit_id, never stored.
+        # re-read of the feed collapses onto one row.  What is allocated and
+        # what is left are derived from credit_allocations, never stored.
         # archived_reason takes a credit out of the work queue without touching
-        # its links.
+        # its allocations.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS bank_credits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +124,33 @@ def init_db(db_path: str):
                 archived_on TEXT
             )
         """)
+        # Money is allocated in amounts, not linked: one payout can pay several
+        # batches and one batch can be paid by several payouts, because the
+        # platform pays a statement short when it failed to submit some of its
+        # own legs and makes up the difference later, alone or inside a bigger
+        # transfer.  The pair is unique so a second tap on the same button is
+        # refused rather than doubling the money.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS credit_allocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                credit_id INTEGER NOT NULL,
+                settlement_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(credit_id, settlement_id)
+            )
+        """)
+        # settlements.bank_credit_id recorded one credit paying one batch in
+        # full, which is an allocation of the batch's own total.  The column
+        # stays (SQLite has no cheap drop and this ALTER list is the only
+        # migration mechanism) but nothing reads it after this, so the move has
+        # to survive being repeated on every start.
+        conn.execute(
+            "INSERT OR IGNORE INTO credit_allocations (credit_id, settlement_id, amount) "
+            "SELECT bank_credit_id, id, coalesce(confirmed_amount, 0) FROM settlements "
+            "WHERE bank_credit_id IS NOT NULL"
+        )
+        conn.execute("UPDATE settlements SET bank_credit_id = NULL WHERE bank_credit_id IS NOT NULL")
         # One row per car park visit. pv_nr is HKIA's own visit number, so a
         # bot restart mid-visit finds the open row again instead of opening
         # a second one. `free` is derived exactly once, at close, from paid
@@ -597,7 +626,8 @@ def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | N
 # price/banner_fee/tunnel_fee, so all three travel with every row.
 _SETTLE_ORDER_COLS = (
     "order_id, scheduled_time, service_type, flight_number, "
-    "pickup, dropoff, price, banner_fee, tunnel_fee, settlement_id"
+    "pickup, dropoff, price, banner_fee, tunnel_fee, settlement_id, "
+    "coalesce(unpaid, 0) AS unpaid"
 )
 
 # Only a finished, priced, not-yet-batched leg can enter a batch.  The clock is
@@ -713,7 +743,12 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
 
 
 def delete_settlement(db_path: str, settlement_id: int) -> bool:
-    """Undo a settlement: unlink its orders and drop the batch, or False if unknown."""
+    """Undo a settlement: unlink its orders and drop the batch, or False if unknown.
+
+    The money follows the batch out: its allocations go, so every credit that
+    paid it gets its remainder back, and the legs the platform said it had not
+    paid stop being owed by a batch that no longer exists.
+    """
     with _conn(db_path) as conn:
         # The file name has to be read before the row goes: it is the only
         # record of which extension the screenshot was stored under.
@@ -724,8 +759,10 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
             return False
         image_name = row["statement_image"]
         conn.execute(
-            "UPDATE orders SET settlement_id = NULL WHERE settlement_id = ?", (settlement_id,)
+            "UPDATE orders SET settlement_id = NULL, unpaid = 0 WHERE settlement_id = ?",
+            (settlement_id,),
         )
+        conn.execute("DELETE FROM credit_allocations WHERE settlement_id = ?", (settlement_id,))
         conn.execute("DELETE FROM settlements WHERE id = ?", (settlement_id,))
         conn.commit()
         # The batch rows are already gone, so a file that will not go away must
@@ -763,6 +800,44 @@ def _settlement_dict(row) -> dict:
     return out
 
 
+def _batch_allocations(conn, settlement_ids: list[int]) -> dict[int, list[dict]]:
+    """Each batch's allocations, oldest first, carrying the bank's value date."""
+    if not settlement_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT a.settlement_id, a.credit_id, a.amount, c.value_date "
+        "FROM credit_allocations a JOIN bank_credits c ON c.id = a.credit_id "
+        f"WHERE a.settlement_id IN ({', '.join('?' * len(settlement_ids))}) ORDER BY a.id",
+        settlement_ids,
+    ).fetchall()
+    grouped: dict[int, list[dict]] = {sid: [] for sid in settlement_ids}
+    for row in rows:
+        grouped[row["settlement_id"]].append(
+            {"credit_id": row["credit_id"], "amount": row["amount"], "value_date": row["value_date"]})
+    return grouped
+
+
+def _derive_batch(batch: dict, allocations: list[dict]) -> dict:
+    """Add what the bank has paid this batch and what it still owes.
+
+    Never stored: the allocations are the record, so undoing one gives both
+    sides their money back without a second write that could disagree.  A batch
+    is 部分 while some of its money has arrived and some has not — the platform
+    pays a statement short when it failed to submit legs of its own.
+    """
+    batch["allocations"] = allocations
+    received = round(sum(a["amount"] for a in allocations), 2)
+    batch["received"] = received
+    batch["outstanding"] = round((batch["confirmed_amount"] or 0.0) - received, 2)
+    if batch["outstanding"] <= CENT:
+        batch["state"] = "paid"
+    elif received > CENT:
+        batch["state"] = "partial"
+    else:
+        batch["state"] = "awaiting"
+    return batch
+
+
 def get_settlement(db_path: str, settlement_id: int) -> dict | None:
     with _conn(db_path) as conn:
         row = conn.execute(
@@ -772,17 +847,17 @@ def get_settlement(db_path: str, settlement_id: int) -> dict | None:
             return None
         out = _settlement_dict(row)
         out["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
-        return out
+        return _derive_batch(out, _batch_allocations(conn, [settlement_id])[settlement_id])
 
 
 # ---- bank credits (入數) ----
 
-# A credit's allocation is derived, never stored: the links live on
-# settlements.bank_credit_id, so unlinking a batch or undoing it entirely gives
-# the credit its money back without a second write that could disagree.
+# What a credit has paid out is derived, never stored: the allocations are the
+# record, so taking one back or undoing a batch entirely gives the credit its
+# money back without a second write that could disagree.
 _CREDIT_SQL = (
-    "SELECT c.*, coalesce((SELECT sum(s.confirmed_amount) FROM settlements s "
-    "WHERE s.bank_credit_id = c.id), 0) AS linked FROM bank_credits c"
+    "SELECT c.*, coalesce((SELECT sum(a.amount) FROM credit_allocations a "
+    "WHERE a.credit_id = c.id), 0) AS allocated FROM bank_credits c"
 )
 
 _CREDIT_COLS = (
@@ -797,10 +872,12 @@ CENT = 0.005
 
 def _credit_dict(conn, row) -> dict:
     out = dict(row)
-    out["linked"] = round(out["linked"], 2)
-    out["remaining"] = round(out["amount"] - out["linked"], 2)
-    out["settlement_ids"] = [r["id"] for r in conn.execute(
-        "SELECT id FROM settlements WHERE bank_credit_id = ? ORDER BY id", (out["id"],))]
+    out["allocated"] = round(out["allocated"], 2)
+    out["remaining"] = round(out["amount"] - out["allocated"], 2)
+    out["allocations"] = [{"settlement_id": r["settlement_id"], "amount": r["amount"]}
+                          for r in conn.execute(
+        "SELECT settlement_id, amount FROM credit_allocations WHERE credit_id = ? ORDER BY id",
+        (out["id"],))]
     return out
 
 
@@ -842,28 +919,51 @@ def unallocated_credits(db_path: str, platform: str | None = None) -> list[dict]
         return [c for c in credits if c["remaining"] > CENT]
 
 
-def awaiting_batches(db_path: str, platform: str) -> list[dict]:
-    """Batches with no bank credit against them, oldest first, each with its orders."""
+def open_batches(db_path: str, platform: str) -> list[dict]:
+    """Batches the bank still owes money on, oldest first, each with its orders.
+
+    A part-paid batch stays here: the rest of its money is exactly what the
+    ledger is for, and the platform pays it later, alone or inside a bigger
+    transfer.
+    """
     with _conn(db_path) as conn:
         rows = conn.execute(
-            "SELECT * FROM settlements WHERE platform = ? AND bank_credit_id IS NULL ORDER BY id",
-            (platform,),
+            "SELECT * FROM settlements WHERE platform = ? ORDER BY id", (platform,)
         ).fetchall()
         batches = [_settlement_dict(r) for r in rows]
-        members = _settlement_orders(conn, [b["id"] for b in batches])
+        ids = [b["id"] for b in batches]
+        members = _settlement_orders(conn, ids)
+        allocations = _batch_allocations(conn, ids)
         for b in batches:
             b["orders"] = members[b["id"]]
-        return batches
+            _derive_batch(b, allocations[b["id"]])
+        return [b for b in batches if b["outstanding"] > CENT]
 
 
-def link_credit(db_path: str, credit_id: int, settlement_id: int) -> dict:
-    """Declare that this credit paid this batch; returns the credit afterwards.
+def _load_batch(conn, settlement_id: int) -> dict:
+    """The batch with its orders and its derived figures, inside a transaction."""
+    row = conn.execute("SELECT * FROM settlements WHERE id = ?", (settlement_id,)).fetchone()
+    if row is None:
+        raise ValueError("搵唔到批次")
+    batch = _settlement_dict(row)
+    batch["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
+    return _derive_batch(batch, _batch_allocations(conn, [settlement_id])[settlement_id])
 
-    This is the only way a batch becomes paid, and paid_on is the bank's own
-    value date rather than the moment anybody noticed.  Every refusal raises
-    rather than returning False: each one is a different thing for the operator
-    to do, so the reason has to reach them.  Checks and write share one
-    connection, so a batch linked in between cannot be linked twice.
+
+def allocate(db_path: str, credit_id: int, settlement_id: int,
+             amount: float | None = None) -> dict:
+    """Put part or all of a credit against a batch; returns the batch afterwards.
+
+    Default amount is as much of the batch as the credit can still pay, which
+    is the whole of it in the ordinary case and the shortfall when a make-up
+    payment lands.  Every refusal raises rather than returning False: each one
+    is a different thing for the operator to do, so the reason has to reach
+    them.  Checks and write share one connection, so money allocated in between
+    cannot be allocated twice.
+
+    paid_on is written here and nowhere else, at the moment the batch is whole,
+    and it is the bank's own value date rather than when anybody noticed.  The
+    legs the platform said it had not paid stop being owed at the same moment.
     """
     with _conn(db_path) as conn:
         row = conn.execute(f"{_CREDIT_SQL} WHERE c.id = ?", (credit_id,)).fetchone()
@@ -872,45 +972,95 @@ def link_credit(db_path: str, credit_id: int, settlement_id: int) -> dict:
         credit = _credit_dict(conn, row)
         if credit["archived_reason"]:
             raise ValueError("入數已收埋")
-        batch = conn.execute(
-            "SELECT * FROM settlements WHERE id = ?", (settlement_id,)
-        ).fetchone()
-        if batch is None:
-            raise ValueError("搵唔到批次")
-        if batch["bank_credit_id"] is not None:
-            raise ValueError("批次已經對咗")
+        batch = _load_batch(conn, settlement_id)
         if batch["platform"] != credit["platform"]:
             raise ValueError("唔同平台")
-        amount = batch["confirmed_amount"] or 0.0
-        if amount > credit["remaining"] + CENT:
-            raise ValueError(f"超過入數剩餘 ${credit['remaining']:g}")
+        if any(a["credit_id"] == credit_id for a in batch["allocations"]):
+            raise ValueError("已經對過呢筆入數")
+        outstanding = batch["outstanding"]
+        if outstanding <= CENT:
+            raise ValueError("批次已收齊")
+        remaining = credit["remaining"]
+        if amount is None:
+            amount = min(remaining, outstanding)
+        # A non-positive amount can only mean the credit has nothing left to
+        # give, which is the same refusal as trying to give more than it has.
+        if amount <= CENT or amount > remaining + CENT:
+            raise ValueError(f"入數剩 ${remaining:g} 唔夠")
+        if amount > outstanding + CENT:
+            raise ValueError(f"批次淨係差 ${outstanding:g}")
         conn.execute(
-            "UPDATE settlements SET bank_credit_id = ?, paid_on = ? WHERE id = ?",
-            (credit_id, credit["value_date"], settlement_id),
+            "INSERT INTO credit_allocations (credit_id, settlement_id, amount) VALUES (?, ?, ?)",
+            (credit_id, settlement_id, round(amount, 2)),
         )
+        if round(outstanding - amount, 2) <= CENT:
+            conn.execute("UPDATE settlements SET paid_on = ? WHERE id = ?",
+                         (credit["value_date"], settlement_id))
+            conn.execute("UPDATE orders SET unpaid = 0 WHERE settlement_id = ?", (settlement_id,))
         conn.commit()
-        return _credit_dict(conn, conn.execute(
-            f"{_CREDIT_SQL} WHERE c.id = ?", (credit_id,)).fetchone())
+        return _load_batch(conn, settlement_id)
 
 
-def unlink_credit(db_path: str, settlement_id: int) -> bool:
-    """Take a batch back off its credit; False when it was not linked.
+def deallocate(db_path: str, settlement_id: int, credit_id: int | None = None) -> int:
+    """Take money back off a batch; returns how many allocations were removed.
 
-    paid_on goes with the link: it means "the bank paid this", so a batch with
-    no credit behind it must not keep a date.
+    paid_on goes with the money: it means "the bank paid all of this", so a
+    batch that is owed anything again must not keep a date.  The unpaid flags
+    stay — which legs the platform failed to submit is a fact about the
+    statement, not about who paid for it.
     """
     with _conn(db_path) as conn:
-        cur = conn.execute(
-            "UPDATE settlements SET bank_credit_id = NULL, paid_on = NULL "
-            "WHERE id = ? AND bank_credit_id IS NOT NULL",
-            (settlement_id,),
-        )
+        sql = "DELETE FROM credit_allocations WHERE settlement_id = ?"
+        params: list = [settlement_id]
+        if credit_id is not None:
+            sql += " AND credit_id = ?"
+            params.append(credit_id)
+        cur = conn.execute(sql, params)
+        if cur.rowcount:
+            conn.execute("UPDATE settlements SET paid_on = NULL WHERE id = ?", (settlement_id,))
         conn.commit()
-        return cur.rowcount > 0
+        return cur.rowcount
+
+
+def mark_unpaid(db_path: str, settlement_id: int, order_ids: list[str]) -> dict:
+    """Name the legs the platform said it has not paid; returns the batch.
+
+    Replaces the whole set rather than adding to it, so a mis-tick is corrected
+    by ticking again.  The ticks are accepted only when they account for the
+    shortfall to the cent: the platform said which legs it failed to submit and
+    the money says how much they were worth, so a set that does not add up
+    means one of the two was misread.
+    """
+    with _conn(db_path) as conn:
+        batch = _load_batch(conn, settlement_id)
+        if batch["state"] == "paid":
+            raise ValueError("批次已收齊")
+        if batch["state"] == "awaiting":
+            raise ValueError("批次未收過錢")
+        by_id = {o["order_id"]: o for o in batch["orders"]}
+        total = 0.0
+        for order_id in order_ids:
+            if order_id not in by_id:
+                raise ValueError(f"{order_id}: 唔喺呢個批次")
+            # The platform's figure for the leg, not the system's: the
+            # shortfall is money the platform did not send, so it is measured
+            # in the amounts the platform itself printed.
+            total += leg_amount(batch, by_id[order_id])
+        total = round(total, 2)
+        if abs(total - batch["outstanding"]) > CENT:
+            raise ValueError(f"剔咗 ${total:g}，差額係 ${batch['outstanding']:g}")
+        conn.execute("UPDATE orders SET unpaid = 0 WHERE settlement_id = ?", (settlement_id,))
+        if order_ids:
+            conn.execute(
+                f"UPDATE orders SET unpaid = 1 WHERE order_id IN ({', '.join('?' * len(order_ids))})",
+                order_ids,
+            )
+        conn.commit()
+        return _load_batch(conn, settlement_id)
 
 
 def archive_credit(db_path: str, credit_id: int, reason: str, on: str) -> bool:
-    """Take a credit out of the work queue.  Links are deliberately untouched."""
+    """Take a credit out of the work queue.  Allocations are deliberately untouched."""
     with _conn(db_path) as conn:
         cur = conn.execute(
             "UPDATE bank_credits SET archived_reason = ?, archived_on = ? WHERE id = ?",
@@ -957,13 +1107,13 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
         credits = []
         for row in rows:
             c = dict(row)
-            c["linked"] = round(c["linked"], 2)
-            c["remaining"] = round(c["amount"] - c["linked"], 2)
+            c["allocated"] = round(c["allocated"], 2)
+            c["remaining"] = round(c["amount"] - c["allocated"], 2)
             if c["archived_reason"]:
                 c["state"] = "archived"
             elif c["remaining"] <= CENT:
                 c["state"] = "done"
-            elif c["linked"] > CENT:
+            elif c["allocated"] > CENT:
                 c["state"] = "partial"
             else:
                 c["state"] = "open"
@@ -971,12 +1121,13 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
             credits.append(c)
         by_credit = {c["id"]: c for c in credits}
         batch_rows = conn.execute(
-            "SELECT id, bank_credit_id, confirmed_amount, statement_image FROM settlements "
-            "WHERE platform = ? AND bank_credit_id IS NOT NULL ORDER BY id", (platform,)
+            "SELECT id, confirmed_amount, statement_image FROM settlements "
+            "WHERE platform = ? ORDER BY id", (platform,)
         ).fetchall()
         batches = {r["id"]: r for r in batch_rows}
         dates: dict[int, set] = {sid: set() for sid in batches}
         counts: dict[int, int] = {sid: 0 for sid in batches}
+        received: dict[int, float] = {sid: 0.0 for sid in batches}
         if batches:
             for r in conn.execute(
                 "SELECT settlement_id, scheduled_time FROM orders WHERE settlement_id IN "
@@ -984,17 +1135,32 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
             ):
                 dates[r["settlement_id"]].add((r["scheduled_time"] or "")[:10])
                 counts[r["settlement_id"]] += 1
-        for sid, r in batches.items():
-            # link_credit refuses a batch and a credit of different platforms,
-            # so both sides of this join are already scoped to one platform.
-            owner = by_credit.get(r["bank_credit_id"])
-            if owner is None:
-                continue
-            owner["batches"].append({
-                "id": sid, "confirmed_amount": r["confirmed_amount"],
-                "dates": sorted(d for d in dates[sid] if d), "orders": counts[sid],
-                "has_image": bool(r["statement_image"]),
-            })
+            for r in conn.execute(
+                "SELECT settlement_id, credit_id, amount FROM credit_allocations "
+                f"WHERE settlement_id IN ({', '.join('?' * len(batches))}) ORDER BY id",
+                list(batches)
+            ):
+                received[r["settlement_id"]] = round(received[r["settlement_id"]] + r["amount"], 2)
+                # allocate refuses a batch and a credit of different platforms,
+                # so both sides of this join are already scoped to one platform.
+                owner = by_credit.get(r["credit_id"])
+                if owner is None:
+                    continue
+                sid = r["settlement_id"]
+                owner["batches"].append({
+                    "id": sid, "confirmed_amount": batches[sid]["confirmed_amount"],
+                    "amount": r["amount"],
+                    "dates": sorted(d for d in dates[sid] if d), "orders": counts[sid],
+                    "has_image": bool(batches[sid]["statement_image"]),
+                })
+        # The batch's own state, not the credit's: a credit can be spent while
+        # the batch it paid part of is still owed money.
+        for c in credits:
+            for b in c["batches"]:
+                total = b["confirmed_amount"] or 0.0
+                got = received[b["id"]]
+                b["state"] = ("paid" if total - got <= CENT else
+                              "partial" if got > CENT else "awaiting")
         return credits
 
 
@@ -1021,26 +1187,16 @@ def get_settle_month(db_path: str, month: str, platform: str,
         settlements = []
         if settlement_ids:
             members = _settlement_orders(conn, settlement_ids)
+            allocations = _batch_allocations(conn, settlement_ids)
             rows = conn.execute(
                 "SELECT * FROM settlements WHERE id IN "
                 f"({', '.join('?' * len(settlement_ids))}) ORDER BY id",
                 settlement_ids,
             ).fetchall()
-            credit_ids = sorted({r["bank_credit_id"] for r in rows if r["bank_credit_id"]})
-            linked_credits = {}
-            if credit_ids:
-                linked_credits = {
-                    r["id"]: dict(r) for r in conn.execute(
-                        "SELECT id, amount, value_date FROM bank_credits WHERE id IN "
-                        f"({', '.join('?' * len(credit_ids))})",
-                        credit_ids,
-                    )
-                }
             for row in rows:
                 batch = _settlement_dict(row)
                 batch["orders"] = members[row["id"]]
-                batch["bank_credit"] = linked_credits.get(row["bank_credit_id"])
-                settlements.append(batch)
+                settlements.append(_derive_batch(batch, allocations[row["id"]]))
 
         counts = {p: 0 for p in PLATFORMS}
         unsettled = 0.0
@@ -1052,14 +1208,20 @@ def get_settle_month(db_path: str, month: str, platform: str,
             if p == platform:
                 unsettled += expected_of(dict(row))
 
-        # Waiting for money means having no credit against it.  paid_on is
-        # written from the link and would give the same answer, but only one of
-        # the two can be the definition, and the link is it.
-        awaiting = conn.execute(
-            "SELECT coalesce(sum(confirmed_amount), 0) FROM settlements "
-            "WHERE platform = ? AND bank_credit_id IS NULL",
+        # Waiting for money is what a batch is still owed, not what it is
+        # worth: a batch paid short contributes only its shortfall.  paid_on is
+        # written from a completed allocation and would agree, but only one of
+        # the two can be the definition, and the allocations are it.
+        awaiting = 0.0
+        for row in conn.execute(
+            "SELECT s.confirmed_amount - coalesce(sum(a.amount), 0) AS outstanding "
+            "FROM settlements s LEFT JOIN credit_allocations a ON a.settlement_id = s.id "
+            "WHERE s.platform = ? GROUP BY s.id",
             (platform,),
-        ).fetchone()[0]
+        ):
+            if row["outstanding"] > CENT:
+                awaiting += row["outstanding"]
+        awaiting = round(awaiting, 2)
 
     unallocated = unallocated_credits(db_path, platform)
 
