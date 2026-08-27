@@ -36,6 +36,7 @@ def db_path(monkeypatch):
     init_db(path)
     monkeypatch.setattr(bot, "DB_PATH", path)
     monkeypatch.setattr(bot, "_parking_miss_at", None)
+    monkeypatch.setattr(bot, "_parking_pay_busy", set())
     yield path
     os.unlink(path)
 
@@ -258,6 +259,7 @@ def _callback(data, chat_id=123):
     q.message.message_id = 7
     q.answer = AsyncMock()
     q.message.reply_text = AsyncMock()
+    q.message.edit_reply_markup = AsyncMock()
     upd = MagicMock()
     upd.callback_query = q
     ctx = MagicMock()
@@ -300,6 +302,99 @@ def test_pay_callback_when_not_inside_or_failed(db_path, tg, monkeypatch):
     upd, ctx, q = _callback(f"park:pay:{sid}")
     asyncio.run(bot.handle_callback(upd, ctx))
     assert "再撳" in q.message.reply_text.call_args.args[0]
+
+
+def _markups(q):
+    return [c.kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+            for c in q.message.edit_reply_markup.await_args_list]
+
+
+def test_pay_callback_swaps_button_before_the_gateway_and_restores_after(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    seen_at_query = {}
+
+    class Watching(FakeClient):
+        async def query(self):
+            # Snapshot what the operator's screen shows when the first gateway call goes out.
+            seen_at_query["answer"] = q.answer.await_args.args[0]
+            seen_at_query["markups"] = _markups(q)
+            seen_at_query["busy"] = set(bot._parking_pay_busy)
+            return await super().query()
+
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1)]))
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    client = Watching([inside(10)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    assert seen_at_query == {"answer": "攞緊 link，等幾秒", "markups": ["park:busy"], "busy": {sid}}
+    assert client.links == 1
+    assert _markups(q) == ["park:busy", f"park:pay:{sid}"]
+    assert bot._parking_pay_busy == set()
+
+
+def test_second_tap_during_a_fetch_answers_busy_and_opens_no_second_order(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1)]))
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+
+    class Slow(FakeClient):
+        def __init__(self, replies):
+            super().__init__(replies)
+            self.gate = None
+
+        async def query(self):
+            await self.gate.wait()
+            return await super().query()
+
+    client = Slow([inside(10)])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    first = _callback(f"park:pay:{sid}")
+    second = _callback(f"park:pay:{sid}")
+
+    async def double_tap():
+        client.gate = asyncio.Event()
+        t1 = asyncio.create_task(bot.handle_callback(*first[:2]))
+        await asyncio.sleep(0)            # first tap is now parked on the gateway
+        await bot.handle_callback(*second[:2])
+        client.gate.set()
+        await t1
+
+    asyncio.run(double_tap())
+    assert client.links == 1
+    q2 = second[2]
+    q2.answer.assert_awaited_once_with("攞緊，等陣")
+    q2.message.edit_reply_markup.assert_not_awaited()
+    q2.message.reply_text.assert_not_awaited()
+    assert _markups(first[2]) == ["park:busy", f"park:pay:{sid}"]
+    assert bot._parking_pay_busy == set()
+
+
+def test_busy_button_tap_only_answers(db_path, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx, q = _callback("park:busy")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    q.answer.assert_awaited_once_with("攞緊，等陣")
+    q.message.edit_reply_markup.assert_not_awaited()
+    q.message.reply_text.assert_not_awaited()
+
+
+def test_failed_fetch_restores_the_button_and_clears_busy(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    client = FakeClient([inside(1), ParkingError("down")])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    assert "再撳" in q.message.reply_text.call_args.args[0]
+    assert _markups(q) == ["park:busy", f"park:pay:{sid}"]
+    assert bot._parking_pay_busy == set()
 
 
 def _command(chat_id=123):
