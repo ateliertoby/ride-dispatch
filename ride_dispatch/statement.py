@@ -29,9 +29,10 @@ class StatementRow:
     amount: float             # 司機應結算金額
     time: str | None = None   # 用車時間, HH:MM
     settle_date: str | None = None  # 應結算日期, informational only
+    truncated: bool = False   # the platform's UI cut the id short with an ellipsis
 
 
-_ROW_KEYS = ("date", "order_id", "amount", "time", "settle_date")
+_ROW_KEYS = ("date", "order_id", "amount", "time", "settle_date", "truncated")
 
 
 @dataclass
@@ -192,26 +193,32 @@ def _nearest(statement_id: str, date: str, candidates: list[dict]) -> dict | Non
     return scored[0][1]
 
 
-def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
-           orders: list[dict]) -> dict[str, tuple[dict, bool]]:
-    """Bind statement lines to orders: {statement id: (order, was fuzzy)}.
+def _prefix(statement_id: str, date: str, candidates: list[dict]) -> dict | None:
+    """The one candidate on that date whose id starts with what was read.
 
-    Exact ids are settled first so a near-miss can never take an order that
-    another line names outright, and an order can be claimed only once — two
-    lines reaching for the same order leaves both unbound, the same verdict
-    that ambiguity gets everywhere else.  Both rules are decided over the whole
-    statement rather than line by line, so the result does not depend on the
-    order the lines or the candidates arrive in."""
-    bound = {sid: (by_id[sid], False) for sid in merged if sid in by_id}
+    The platform's table truncates a long code, so the line names its order
+    without spelling it out.  Two candidates sharing the prefix is the same
+    ambiguity a near-miss gets: no match, and the line stays visible on the
+    card rather than being batched against a guess."""
+    hits = [o for o in candidates
+            if o["order_id"].startswith(statement_id) and _date_near(o, date)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _bind_round(merged: dict[str, tuple[str, float]], bound: dict, orders: list[dict],
+                choose) -> None:
+    """Bind every line `choose` can place, refusing any order two lines want.
+
+    Decided over the whole statement rather than line by line, so the result
+    does not depend on the order the lines or the candidates arrive in."""
     claimed = {o["order_id"] for o, _ in bound.values()}
     free = [o for o in orders if o["order_id"] not in claimed]
-
     picks: dict[str, dict] = {}
     contenders: dict[str, int] = {}
     for sid, (date, _amount) in merged.items():
         if sid in bound:
             continue
-        order = _nearest(sid, date, free)
+        order = choose(sid, date, free)
         if order is None:
             continue
         picks[sid] = order
@@ -219,6 +226,22 @@ def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
     for sid, order in picks.items():
         if contenders[order["order_id"]] == 1:
             bound[sid] = (order, True)
+
+
+def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
+           orders: list[dict], truncated: set[str]) -> dict[str, tuple[dict, bool]]:
+    """Bind statement lines to orders: {statement id: (order, was inexact)}.
+
+    Three passes, weakest evidence last: exact ids are settled first so nothing
+    weaker can take an order that another line names outright; then a line that
+    was cut short (or is long enough that a shared prefix would be a
+    coincidence) binds to the order it is the start of; then the near-miss.
+    """
+    bound = {sid: (by_id[sid], False) for sid in merged if sid in by_id}
+    prefixable = {sid: v for sid, v in merged.items()
+                  if sid in truncated or len(sid) >= MIN_PREFIX}
+    _bind_round(prefixable, bound, orders, _prefix)
+    _bind_round(merged, bound, orders, _nearest)
     return bound
 
 
@@ -238,12 +261,15 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
     # Fold the statement to one line per order id, keeping first-seen order
     # (a 舉牌 line sits under the same id as its trip).
     merged: dict[str, tuple[str, float]] = {}
+    truncated: set[str] = set()
     for day in stmt.days:
         for r in day.rows:
             date, amt = merged.get(r.order_id, (r.date, 0.0))
             merged[r.order_id] = (date, round(amt + r.amount, 2))
+            if r.truncated:
+                truncated.add(r.order_id)
 
-    bound = _match(merged, by_id, orders)
+    bound = _match(merged, by_id, orders, truncated)
 
     entries: list[Entry] = []
     matched_ids: set[str] = set()
@@ -298,10 +324,33 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
 _MONEY_RE = re.compile(r"(?<![\d.])\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])")
 _DATE_RE = re.compile(r"20\d\d-\d\d-\d\d")
 _TIME_RE = re.compile(r"(?<!\d)\d\d:\d\d(?!\d)")
-_ID_RE = re.compile(r"(?<![\dA-Z])(?:SPACE)?(?=(?:[SOIlB]*\d){8})[\dSOIlB]{12,19}(?![\d])")
+# Three shapes of order number reach this reader, and one pattern has to know
+# all three or a perfectly readable statement fails its checksum over a line it
+# never saw:
+#   SPACE…  a short digit run behind a fixed prefix, as few as eight digits;
+#   a long digit run, where S O I l B may be mis-read digits (see _DIGIT_FIX);
+#   an alphanumeric code, which the platform's own UI truncates with an
+#   ellipsis, so it is recognised by shape rather than by length.
+# The last one needs at least four digits and one letter that is not an
+# OCR-confusable digit, or a mangled digit run would be taken for a code and
+# left un-normalised.  None of the three can hold "." "-" or ":", which is what
+# keeps amounts, dates and times out.
+_ID_RE = re.compile(
+    r"(?<![\dA-Z])SPACE\d{8,}(?![\dA-Z])"
+    r"|(?<![\dA-Z])(?=(?:[SOIlB]*\d){8})[\dSOIlB]{12,19}(?![\d])"
+    r"|(?<![A-Z0-9])(?=(?:[A-Z0-9]*\d){4})(?=[A-Z0-9]*[AC-HJ-NP-RT-Z])[A-Z0-9]{10,}(?![A-Z0-9])"
+)
+# The platform truncates a long code in its own table; the ellipsis is the only
+# sign that what was read is a prefix rather than the whole number.
+_TRUNCATED_RE = re.compile(r"\s*(?:\.\.\.|…)")
 _ACCOUNT_RE = re.compile(r"【([^】]+)】")
 _COUNT_RE = re.compile(r"(\d{1,3})$")
 _DIGIT_FIX = str.maketrans({"S": "5", "O": "0", "I": "1", "l": "1", "B": "8"})
+# A letter that is nobody's mis-read digit: its presence says the token is a
+# code, so the digit fixes must not touch it.
+_REAL_LETTER_RE = re.compile(r"[AC-HJ-NP-RT-Z]")
+# What binds a truncated or long id to the order it is the start of.
+MIN_PREFIX = 10
 
 
 def _money(text: str) -> float:
@@ -315,7 +364,19 @@ def _money(text: str) -> float:
 def _normalise_id(token: str) -> str:
     if token.startswith("SPACE"):
         return "SPACE" + token[5:].translate(_DIGIT_FIX)
+    # An alphanumeric code means its letters, so B is a B and not an 8.
+    if _REAL_LETTER_RE.search(token):
+        return token
     return token.translate(_DIGIT_FIX)
+
+
+def _ids_in(text: str) -> list[tuple[str, bool]]:
+    """Order numbers in one table row, each with whether it was cut short."""
+    out = []
+    for m in _ID_RE.finditer(text):
+        out.append((_normalise_id(m.group()),
+                    _TRUNCATED_RE.match(text, m.end()) is not None))
+    return out
 
 
 def _rows_from_boxes(boxes: list) -> list[list[tuple[float, float, str]]]:
@@ -352,7 +413,10 @@ def parse_boxes(boxes: list, width: int) -> Statement:
         moneys = [(x, m) for x, _, t in row for m in _MONEY_RE.findall(t)]
         rightmost = _money(max(moneys, key=lambda t: t[0])[1]) if moneys else None
         account = _ACCOUNT_RE.search(text)
-        ids = [(x, _normalise_id(m)) for x, _, t in row for m in _ID_RE.findall(t)]
+        # Read off the joined row rather than box by box: OCR puts the
+        # platform's ellipsis in whichever box it lands in, and the id is only
+        # known to be a prefix if that ellipsis is still beside it.
+        ids = _ids_in(text)
         dates = [(x, m) for x, _, t in row for m in _DATE_RE.findall(t)]
         leading_date = dates and dates[0][0] < width * 0.15 and row and _DATE_RE.match(row[0][2].strip()) is not None
         if account:
@@ -379,10 +443,12 @@ def parse_boxes(boxes: list, width: int) -> Statement:
                 continue
             times = _TIME_RE.findall(text)
             right_dates = [m for x, m in dates if x > width * 0.5]
+            order_id, truncated = ids[0]
             current.rows.append(StatementRow(
-                date=current.date, order_id=ids[0][1], amount=rightmost,
+                date=current.date, order_id=order_id, amount=rightmost,
                 time=times[0] if times else None,
                 settle_date=right_dates[-1] if right_dates else None,
+                truncated=truncated,
             ))
     return stmt
 
@@ -571,15 +637,21 @@ def corrected_json(stmt: Statement, rec: Reconciliation) -> dict:
     return d
 
 
-def confirm_label(rec: Reconciliation, credit: bool = False) -> str:
+def confirm_label(rec: Reconciliation, credit: bool = False,
+                  short: tuple[float, float] | None = None) -> str:
     """The button that writes the batch, stating the scale of what it writes.
 
     `credit` when a bank credit matched the statement's total: the same tap
-    links it, and the label has to say so before it is pressed.
+    allocates it, and the label has to say so before it is pressed.  `short` is
+    (what would be allocated, what would still be owed) when the credit does
+    not cover the statement — the amounts replace the batch's own figures
+    because agreeing to a part payment is the decision being taken.
     """
     n = len(rec.settle_ids)
     amount = money_str(rec.confirmed or 0.0)
     verb = ("確認結算" if rec.clean else "照平台數確認") + (" + 對入數" if credit else "")
+    if short is not None:
+        return f"{verb} {money_str(short[0])}（差 {money_str(short[1])}）"
     if rec.clean:
         return f"{verb} · {n} 程 · {amount}"
     return f"{verb} · {n} 程 · {amount}（差額 {_signed(rec.diff)}）"
@@ -600,9 +672,20 @@ def confirmation_line(rec: Reconciliation, dates: list[str]) -> str:
             f"HKD {money_str(rec.confirmed or 0.0)[1:]} 確認無誤")
 
 
-def awaiting_label(batch: dict) -> str:
+def batch_head(batch: dict) -> str:
+    """A batch named without a figure: which one, which days, how many legs."""
     dates = sorted({o["scheduled_time"][:10] for o in batch["orders"]})
-    return f"#{batch['id']} · {date_span_label(dates)} · {len(batch['orders'])} 程 · {money_str(batch['confirmed_amount'])}"
+    return f"#{batch['id']} · {date_span_label(dates)} · {len(batch['orders'])} 程"
+
+
+def batch_label(batch: dict) -> str:
+    """A batch as a button.
+
+    The figure is what the batch is still owed, not what it was worth: a batch
+    paid short is offered for the difference, which is the only part any credit
+    can still pay.
+    """
+    return f"{batch_head(batch)} · {money_str(batch['outstanding'])}"
 
 
 def fallback_report(orders: list[dict]) -> str:
