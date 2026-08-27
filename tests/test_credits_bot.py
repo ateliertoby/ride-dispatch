@@ -139,12 +139,12 @@ def reply_buttons(msg):
 
 def test_tick_ingests_and_links_exact(db_path):
     sid = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 2540.0)
-    write_feed(feed_line("R1", 2540.0, "2026-08-26"))
+    write_feed(feed_line("R1", 2540.0, YESTERDAY))
     b = fake_bot()
     tick(b)
-    assert sent(b).startswith(f"入數 $2,540 · 08-26 已對 批次 #{sid}")
+    assert sent(b).startswith(f"入數 $2,540 · {credits.md(YESTERDAY)} 已對 批次 #{sid}")
     assert sent(b).endswith("· 1 程")
-    assert get_settlement(db_path, sid)["paid_on"] == "2026-08-26"
+    assert get_settlement(db_path, sid)["paid_on"] == YESTERDAY
 
 
 def test_tick_unresolved_sends_card_with_candidates(db_path):
@@ -175,7 +175,7 @@ def test_tick_card_says_when_nothing_fits(db_path):
 
 def test_tick_backfill_summary(db_path):
     batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 2540.0)
-    write_feed(feed_line("R1", 2540.0, "2026-08-26"), feed_line("R2", 100.0, "2026-06-05"),
+    write_feed(feed_line("R1", 2540.0, YESTERDAY), feed_line("R2", 100.0, "2026-06-05"),
                feed_line("R3", 200.0, "2026-06-06"), feed_line("R4", 300.0, "2026-06-09"))
     b = fake_bot()
     tick(b)
@@ -429,11 +429,11 @@ def confirm_a_statement(db_path, monkeypatch, order_id, amount):
 
 def test_stmt_confirm_appends_the_linked_line(db_path, monkeypatch):
     insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2540.0, "currency": "HKD",
-                            "value_date": "2026-08-26", "payer": None, "memo": None,
+                            "value_date": YESTERDAY, "payer": None, "memo": None,
                             "email_id": None, "received_at": None, "recorded_at": None})
     q = confirm_a_statement(db_path, monkeypatch, "A1", 2540.0)
     reply = q.message.reply_text.call_args.args[0]
-    assert reply.endswith("\n已對 08-26 入數 $2,540")
+    assert reply.endswith(f"\n已對 {credits.md(YESTERDAY)} 入數 $2,540")
     assert q.message.reply_text.call_args.kwargs["reply_markup"] is None
 
 
@@ -573,9 +573,9 @@ def test_credits_archive_one_with_a_note(db_path):
 
 def test_credits_unlink_returns_a_batch_to_awaiting(db_path):
     sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 2540.0)
-    write_feed(feed_line("R1", 2540.0, "2026-08-26"))
+    write_feed(feed_line("R1", 2540.0, YESTERDAY))
     tick(fake_bot())
-    assert get_settlement(db_path, sid)["paid_on"] == "2026-08-26"
+    assert get_settlement(db_path, sid)["paid_on"] == YESTERDAY
     assert reply_text(run_credits("unlink", str(sid))) == f"批次 #{sid} 解除咗入數，返回等過數"
     assert get_settlement(db_path, sid)["paid_on"] is None
     assert get_credit(db_path, 1)["remaining"] == 2540.0
