@@ -22,6 +22,10 @@
     --scrim: rgba(0,0,0,.55);
     --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
     --paid-bg: rgba(61,220,132,.16);
+    /* Colour ranks what is owed attention, loudest first: amber = the platform
+       still owes money, blue = bank money in but not matched to a statement,
+       neutral = waiting on someone else, dimmed green = finished business. */
+    --blue: #5aa9ff;  --blue-bg: rgba(90,169,255,.16);
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -41,6 +45,7 @@
       --scrim: rgba(0,0,0,.35);
       --banner-bg: #fff8e1;  --banner-fg: #c77800;
       --paid-bg: #e3f6ea;
+      --blue: #1f6fd6;  --blue-bg: #e3eefb;
     }
   }
   html { -webkit-text-size-adjust: 100%; }

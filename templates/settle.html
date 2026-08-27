@@ -89,7 +89,9 @@
   }
   .bar.awaiting { background: var(--key-bg); color: var(--text); }
   .bar.partial { background: var(--banner-bg); color: var(--banner-fg); }
-  .bar.paid { background: var(--paid-bg); color: var(--green); }
+  /* A collected batch is a record, not a task, so it holds its fill but stops
+     shouting as loudly as the amber ones. */
+  .bar.paid { background: var(--paid-bg); color: var(--green); font-weight: 600; opacity: .8; }
   /* A batch cut by the week boundary squares off the cut end, so the two
      segments read as one bar wrapping. */
   .bar.cut-r { border-top-right-radius: 1px; border-bottom-right-radius: 1px; }
@@ -102,10 +104,11 @@
   .bar.spill-l { justify-content: flex-end; }
   .bar:active { filter: brightness(1.15); }
   /* A credit is an outline, not a fill: money arriving from outside the batch
-     never reads as one of the bars. */
+     never reads as one of the bars. A matched one is a record and dims away;
+     only a credit still waiting for a statement carries its colour at full. */
   .cchip {
     height: 18px; border-radius: 5px; background: none;
-    border: 1px solid var(--green); color: var(--green);
+    border: 1px solid var(--green); color: var(--green); opacity: .55;
     font-family: inherit; font-size: 10.5px; font-weight: 650;
     font-variant-numeric: tabular-nums; letter-spacing: -.2px;
     padding: 0 2px; min-width: 0; cursor: pointer;
@@ -116,8 +119,8 @@
     width: max-content; max-width: 100%; justify-self: start;
   }
   .cchip.spill-l { justify-self: end; }
-  .cchip.open { border-color: var(--amber); color: var(--amber); }
-  .cchip.gone { border-color: var(--text-3); color: var(--text-3); }
+  .cchip.open { border-color: var(--blue); color: var(--blue); opacity: 1; }
+  .cchip.gone { border-color: var(--text-3); color: var(--text-3); opacity: .5; }
   .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
@@ -130,6 +133,7 @@
   .hero-s { font-size: 14px; font-weight: 650; color: var(--text-2); padding-top: 2px; }
   .hero-s.paid { color: var(--green); }
   .hero-s.warn { color: var(--amber); }
+  .hero-s.blue { color: var(--blue); }
   .fold {
     display: flex; justify-content: space-between; align-items: center; width: 100%;
     background: none; border: none; border-bottom: 1px solid var(--line);
@@ -225,13 +229,13 @@
   }
   .qrow:active { background: var(--surface-press); }
   .qrow .t { flex: 1; min-width: 0; }
-  .qrow .s { color: var(--amber); font-weight: 650; font-size: 13px; }
+  .qrow .s { color: var(--blue); font-weight: 650; font-size: 13px; }
   .qrow .c { color: var(--text-3); font-size: 17px; }
   /* The count of unmatched credits in the header is the way into the queue, so
      it has to look like one without turning the summary line into a row of
      controls. */
   .sum-link {
-    background: none; border: none; padding: 0; font: inherit; color: inherit;
+    background: none; border: none; padding: 0; font: inherit; color: var(--blue);
     cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
   }
 
@@ -295,7 +299,7 @@
   <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
   <div class="weeks" id="grid"></div>
   <div id="calEmpty"></div>
-  <div class="legend">條 = 結算批次（灰 等過數 · 琥珀 差數 · 綠 已收 · 虛線 補結）· 框 = 銀行入數 · 琥珀數字 = 未結算</div>
+  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結</div>
 </div>
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet"></div>
@@ -964,10 +968,10 @@ function creditViewHtml(v) {
   if (!c) return '';
   let state, extra = '';
   if (c.state === 'done') state = '<div class="hero-s paid">已對</div>';
-  else if (c.state === 'partial') state = '<div class="hero-s warn">已對 $' + $(c.allocated) +
+  else if (c.state === 'partial') state = '<div class="hero-s blue">已對 $' + $(c.allocated) +
     ' · 剩 $' + $(c.remaining) + '</div>';
   else if (c.state === 'open') {
-    state = '<div class="hero-s warn">未對</div>';
+    state = '<div class="hero-s blue">未對</div>';
     extra = '<div class="sub-note mute">冇 statement 對得上</div>';
   } else state = '<div class="hero-s">收埋' +
     (c.archived_reason ? '（' + esc(c.archived_reason) + '）' : '') + '</div>';
