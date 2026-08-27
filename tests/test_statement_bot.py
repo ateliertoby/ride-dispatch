@@ -11,7 +11,7 @@ import ride_dispatch.bot as bot
 from ride_dispatch import statement
 from ride_dispatch.db import (
     init_db, save_order, update_price, get_settlement, get_order_by_id, create_settlement,
-    find_awaiting_settlements, statement_image_path,
+    awaiting_batches, statement_image_path,
 )
 from ride_dispatch.parser import Order
 from ride_dispatch.statement import Statement, StatementDay, StatementRow, format_report, date_span_label
@@ -43,6 +43,14 @@ def db_path(monkeypatch):
 def seed(db_path, oid, scheduled, price=210.0):
     save_order(db_path, make_order(oid, scheduled), telegram_msg_id=1, parking=0.0, source="携程")
     update_price(db_path, oid, price)
+
+
+def _commands():
+    """The command list the bot registers with Telegram."""
+    app = MagicMock()
+    app.bot.set_my_commands = AsyncMock()
+    asyncio.run(bot._set_commands(app))
+    return app.bot.set_my_commands.call_args.args[0]
 
 
 def stmt_for(rows_by_date, total):
@@ -129,7 +137,7 @@ def test_clean_statement_card_and_confirm(db_path, monkeypatch):
 
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, ctx))
-    batches = find_awaiting_settlements(db_path)
+    batches = awaiting_batches(db_path, "ride")
     assert len(batches) == 1
     b = batches[0]
     assert b["confirmed_amount"] == 490.0 and b["expected_amount"] == 490.0
@@ -154,7 +162,7 @@ def test_confirm_stores_corrected_ids(db_path, monkeypatch):
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, ctx))
 
-    b = find_awaiting_settlements(db_path)[0]
+    b = awaiting_batches(db_path, "ride")[0]
     stored = b["statement"]["days"][0]["rows"][0]
     assert stored["order_id"] == "A1" and stored["read_as"] == "A2"
     assert get_order_by_id(db_path, "A1")["settlement_id"] == b["id"]
@@ -171,7 +179,7 @@ def test_confirmation_line_keeps_cents(db_path, monkeypatch):
     asyncio.run(bot.handle_callback(cb, ctx))
     reply = q.message.reply_text.call_args.args[0]
     assert "HKD 490.50 確認無誤" in reply
-    assert find_awaiting_settlements(db_path)[0]["confirmed_amount"] == 490.5
+    assert awaiting_batches(db_path, "ride")[0]["confirmed_amount"] == 490.5
 
 
 def test_mixed_statement_lists_problems_and_offers_platform_figure(db_path, monkeypatch):
@@ -233,7 +241,7 @@ def test_confirm_reports_create_settlement_error(db_path, monkeypatch):
     q.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
     q.answer.assert_awaited_once_with("結算唔到")
     assert q.message.reply_text.call_args.args[0].startswith("結算唔到：A1: 已經結算咗")
-    assert find_awaiting_settlements(db_path) == []
+    assert awaiting_batches(db_path, "ride") == []
     assert 777 not in bot.pending_statements
 
 
@@ -245,7 +253,7 @@ def test_skip_drops_pending(db_path, monkeypatch):
     cb, q = callback_update("stmt:skip")
     asyncio.run(bot.handle_callback(cb, MagicMock()))
     assert bot.pending_statements == {}
-    assert find_awaiting_settlements(db_path) == []
+    assert awaiting_batches(db_path, "ride") == []
 
 
 def test_document_image_is_accepted(db_path, monkeypatch):
@@ -317,67 +325,24 @@ def test_fallback_when_ocr_missing(db_path, monkeypatch):
     assert buttons_of(msg) == []
 
 
-# ---- /paid ----
+# ---- the manual paid mark is gone ----
 
-def paid_update(text):
-    msg = MagicMock()
-    msg.chat_id = CHAT
-    msg.text = text
-    msg.reply_text = AsyncMock()
-    return MagicMock(message=msg), msg
+def test_no_handler_marks_a_batch_paid_by_hand(db_path):
+    """A batch becomes paid by being linked to a bank credit, so the bot offers
+    no command and no handler that sets the date itself."""
+    assert [n for n in dir(bot) if "paid" in n] == []
+    assert "paid" not in {c.command for c in _commands()}
 
 
-def test_paid_unique_amount_marks_batch(db_path):
+def test_a_retired_settlement_button_is_inert(db_path):
+    """Buttons stay in the chat history after the branch behind them is gone;
+    a tap on one must change nothing rather than raise."""
     seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
     sid = create_settlement(db_path, "ride", ["A1"], 280.0, YESTERDAY)
-    upd, msg = paid_update("/paid 280")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert get_settlement(db_path, sid)["paid_on"] == datetime.now().strftime("%Y-%m-%d")
-    assert sent_text(msg) == f"批次 #{sid} 已到帳 $280 · {date_span_label([YESTERDAY])} · 1 程"
-
-
-def test_paid_no_match_lists_awaiting(db_path):
-    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
-    sid = create_settlement(db_path, "ride", ["A1"], 280.0, YESTERDAY)
-    upd, msg = paid_update("/paid 999")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert "冇 $999 嘅 batch" in sent_text(msg)
-    assert buttons_of(msg) == [f"#{sid} · {date_span_label([YESTERDAY])} · 1 程 · $280"]
-    assert get_settlement(db_path, sid)["paid_on"] is None
-
-
-def test_paid_several_same_amount_asks(db_path):
-    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
-    seed(db_path, "A2", f"{TWO_DAYS} 09:00:00", 280.0)
-    s1 = create_settlement(db_path, "ride", ["A1"], 280.0, YESTERDAY)
-    s2 = create_settlement(db_path, "ride", ["A2"], 280.0, YESTERDAY)
-    upd, msg = paid_update("/paid 280")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert len(buttons_of(msg)) == 2
-    cb, q = callback_update(f"stmt:paid:{s2}")
+    cb, q = callback_update(f"stmt:retired:{sid}")
     asyncio.run(bot.handle_callback(cb, MagicMock()))
-    assert get_settlement(db_path, s2)["paid_on"] is not None
-    assert get_settlement(db_path, s1)["paid_on"] is None
-
-
-def test_paid_without_amount_lists_all(db_path):
-    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
-    create_settlement(db_path, "ride", ["A1"], 280.0, YESTERDAY)
-    upd, msg = paid_update("/paid")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert len(buttons_of(msg)) == 1
-
-
-def test_paid_nothing_awaiting(db_path):
-    upd, msg = paid_update("/paid 100")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert sent_text(msg) == "冇 batch 等緊過數。"
-
-
-def test_paid_bad_amount(db_path):
-    upd, msg = paid_update("/paid abc")
-    asyncio.run(bot.handle_paid(upd, MagicMock()))
-    assert sent_text(msg) == "用法：/paid 2540"
+    assert get_settlement(db_path, sid)["paid_on"] is None
+    q.message.reply_text.assert_not_awaited()
 
 
 # ---- pure text builders ----

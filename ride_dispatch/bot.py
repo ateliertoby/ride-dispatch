@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, find_awaiting_settlements, mark_settlement_paid, settlement_candidates, get_settleable_recent
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, awaiting_batches, link_credit, unlink_credit, archive_credit, archive_credits_before, unarchive_credit
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -25,6 +25,7 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
 from . import statement
+from . import credits
 from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError, cache_load as whiteboard_cache_load, cache_store as whiteboard_cache_store, cache_discard as whiteboard_cache_discard
 
 load_dotenv()
@@ -38,6 +39,15 @@ ALLOWED_CHAT_IDS: set[int] = (
     if _allowed_raw.strip()
     else set()
 )
+
+# Where first-reader publishes the bank credit advices it has recorded.  Unset
+# means the ledger is off: the bot is expected to run without it (a laptop, a
+# machine that is not the one holding the mailbox).
+FEED_PATH = os.environ.get("BANK_CREDITS_FEED", "")
+
+# Above this, an arriving batch of credits is a backfill rather than the day's
+# payout: one summary instead of a card per credit.
+BACKFILL_THRESHOLD = 3
 
 pending: dict = {}
 awaiting_price: dict[int, str] = {}
@@ -405,22 +415,64 @@ async def handle_callback(update: Update, context):
             return
         await query.message.edit_reply_markup(reply_markup=None)
         await query.answer("已結算")
-        await query.message.reply_text(statement.settled_reply(settlement_id, rec, dates))
+        text = statement.settled_reply(settlement_id, rec, dates)
+        markup = None
+        # A statement forwarded during the backfill is for money the bank has
+        # already sent, so the batch is matched against the ledger at birth.
+        m = credits.resolve_batch(DB_PATH, settlement_id)
+        if m.linked:
+            text += "\n" + credits.settled_link_line(get_credit(DB_PATH, m.linked[0]))
+        elif m.candidates:
+            text += "\n等緊過數 · 可能係："
+            markup = credit_choice_markup(m.candidates, settlement_id)
+        await query.message.reply_text(text, reply_markup=markup)
+
+    elif query.data.startswith("credit:link:"):
+        _, _, credit_id, settlement_id = query.data.split(":")
+        credit_id, settlement_id = int(credit_id), int(settlement_id)
+        prefix = ""
+        try:
+            credit = link_credit(DB_PATH, credit_id, settlement_id)
+            batch = get_settlement(DB_PATH, settlement_id)
+            prefix = (f"已對 批次 #{settlement_id} · {statement.money_str(batch['confirmed_amount'])} · "
+                      f"剩 {statement.money_str(credit['remaining'])}\n")
+            await query.answer("已對")
+        except ValueError as e:
+            # The card is a snapshot: another tap, a statement, or the feed may
+            # have spent the credit since it was drawn.  Say why, then redraw.
+            credit = get_credit(DB_PATH, credit_id)
+            await query.answer(str(e))
+            if credit is None:
+                return
+        # The operator is choosing by hand, so the redraw only offers what is
+        # left: a second automatic link mid-card would be a surprise.  An
+        # archived credit offers nothing — every button on it would be refused.
+        awaiting = [] if credit["archived_reason"] else awaiting_batches(DB_PATH, credit["platform"])
+        m = credits.match_credit(credit, awaiting) if awaiting else credits.Match()
+        offered = credits.offer(m, awaiting)
+        text = credits.credit_card_text(credit, offered)
+        if credit["remaining"] > 0.005:
+            text = prefix + text
+        await query.message.edit_text(text, reply_markup=credit_card_markup(credit, offered))
+
+    elif query.data.startswith("credit:pick:"):
+        # The batch side of the same link.  These buttons sit under the settled
+        # reply, so a tap appends to it rather than redrawing it as a card: the
+        # confirmation line under them is quoted back to the platform.
+        _, _, credit_id, settlement_id = query.data.split(":")
+        try:
+            credit = link_credit(DB_PATH, int(credit_id), int(settlement_id))
+        except ValueError as e:
+            await query.answer(str(e))
+            return
+        await query.answer("已對")
+        await query.message.edit_text(query.message.text + "\n" + credits.settled_link_line(credit),
+                                      reply_markup=None)
 
     elif query.data == "stmt:skip":
         pending_statements.pop(msg_id, None)
         await query.message.edit_reply_markup(reply_markup=None)
         await query.answer("已略過")
-
-    elif query.data.startswith("stmt:paid:"):
-        settlement_id = int(query.data.rsplit(":", 1)[1])
-        today = datetime.now().strftime("%Y-%m-%d")
-        if not mark_settlement_paid(DB_PATH, settlement_id, today):
-            await query.answer("搵唔到呢個 batch")
-            return
-        await query.message.edit_reply_markup(reply_markup=None)
-        await query.answer("已到帳")
-        await query.message.reply_text(f"批次 #{settlement_id} 已到帳（{today}）")
 
     elif query.data.startswith("park:pay:"):
         session_id = int(query.data.rsplit(":", 1)[1])
@@ -704,43 +756,60 @@ async def handle_statement_image(update: Update, context):
         await msg.reply_text(f"讀圖出錯（{type(e).__name__}）— 再 send 一次，或者用「Send as file」send 原檔")
 
 
-async def handle_paid(update: Update, context):
+CREDITS_USAGE = ("用法：/credits · /credits <id> · /credits archive before YYYY-MM-DD · "
+                 "/credits archive <id> [note] · /credits unarchive <id> · /credits unlink <批次>")
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+async def handle_credits(update: Update, context):
     msg = update.message
     if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
         return
-    parts = (msg.text or "").split(maxsplit=1)
-    amount = None
-    if len(parts) > 1:
-        try:
-            amount = float(parts[1].replace(",", "").replace("$", ""))
-        except ValueError:
-            await msg.reply_text("用法：/paid 2540")
+    args = context.args or []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if not args:
+        await msg.reply_text(credits.queue_text(unallocated_credits(DB_PATH)))
+        return
+
+    if args[0].isdigit():
+        credit = get_credit(DB_PATH, int(args[0]))
+        if credit is None:
+            await msg.reply_text(f"搵唔到入數 #{args[0]}")
             return
-    awaiting = find_awaiting_settlements(DB_PATH)
-    if not awaiting:
-        await msg.reply_text("冇 batch 等緊過數。")
+        awaiting = []
+        if credit["remaining"] > 0.005 and not credit["archived_reason"]:
+            awaiting = awaiting_batches(DB_PATH, credit["platform"])
+        m = credits.match_credit(credit, awaiting) if awaiting else credits.Match()
+        await msg.reply_text(credits.detail_text(credit, DB_PATH),
+                             reply_markup=credit_card_markup(credit, credits.offer(m, awaiting)))
         return
-    hits = find_awaiting_settlements(DB_PATH, amount) if amount is not None else []
-    if amount is not None and len(hits) == 1:
-        b = hits[0]
-        today = datetime.now().strftime("%Y-%m-%d")
-        mark_settlement_paid(DB_PATH, b["id"], today)
-        dates = sorted({o["scheduled_time"][:10] for o in b["orders"]})
-        await msg.reply_text(f"批次 #{b['id']} 已到帳 {statement.money_str(b['confirmed_amount'])} · "
-                             f"{statement.date_span_label(dates)} · {len(b['orders'])} 程")
+
+    if args[0] == "archive" and len(args) >= 3 and args[1] == "before" and _DATE_RE.match(args[2]):
+        done = archive_credits_before(DB_PATH, args[2], "pre-system", today)
+        total = statement.money_str(round(sum(c["remaining"] for c in done), 2))
+        await msg.reply_text(f"收埋 {len(done)} 筆 · {total}（{credits.md(args[2])} 之前）")
         return
-    if amount is not None and not hits:
-        head = f"冇 {statement.money_str(amount)} 嘅 batch 等緊過數，等緊嘅係："
-        choices = awaiting
-    elif amount is not None:
-        head = f"{len(hits)} 個 batch 都係 {statement.money_str(amount)}，揀邊個："
-        choices = hits
-    else:
-        head = "等緊過數："
-        choices = awaiting
-    buttons = [[InlineKeyboardButton(statement.awaiting_label(b), callback_data=f"stmt:paid:{b['id']}")]
-               for b in choices]
-    await msg.reply_text(head, reply_markup=InlineKeyboardMarkup(buttons))
+
+    if args[0] == "archive" and len(args) >= 2 and args[1].isdigit():
+        note = " ".join(args[2:]).strip()
+        reason = f"manual: {note}" if note else "manual"
+        ok = archive_credit(DB_PATH, int(args[1]), reason, today)
+        await msg.reply_text(f"收埋 #{args[1]}" if ok else f"搵唔到入數 #{args[1]}")
+        return
+
+    if args[0] == "unarchive" and len(args) == 2 and args[1].isdigit():
+        ok = unarchive_credit(DB_PATH, int(args[1]))
+        await msg.reply_text(f"#{args[1]} 返返嚟" if ok else f"搵唔到入數 #{args[1]}")
+        return
+
+    if args[0] == "unlink" and len(args) == 2 and args[1].isdigit():
+        ok = unlink_credit(DB_PATH, int(args[1]))
+        await msg.reply_text(f"批次 #{args[1]} 解除咗入數，返回等過數" if ok else f"批次 #{args[1]} 冇對住入數")
+        return
+
+    await msg.reply_text(CREDITS_USAGE)
 
 
 async def handle_start(update: Update, context):
@@ -852,8 +921,85 @@ def _kick_poll(context):
     context.application.job_queue.run_once(_poll_tick, 5, job_kwargs=_JOB_KWARGS)
 
 
+def credit_card_markup(credit: dict, offered: list[dict]) -> InlineKeyboardMarkup | None:
+    """A credit card's buttons: one per batch it could still pay for."""
+    if credit["remaining"] <= 0.005 or not offered:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(statement.awaiting_label(b),
+                              callback_data=f"credit:link:{credit['id']}:{b['id']}")]
+        for b in offered
+    ])
+
+
+def credit_choice_markup(candidates: list[dict], settlement_id: int) -> InlineKeyboardMarkup | None:
+    """The card seen from the batch's side: which credit paid this batch.
+
+    Its own callback, not the credit card's: these buttons hang off the settled
+    reply, which carries the line the operator pastes back to the platform and
+    must survive the tap.
+    """
+    if not candidates:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(credits.credit_label(c),
+                              callback_data=f"credit:pick:{c['id']}:{settlement_id}")]
+        for c in candidates
+    ])
+
+
+async def _check_credits(bot, chat_id: int):
+    """Take whatever the feed has gained since the last tick into the ledger."""
+    if not FEED_PATH or not credits.feed_changed(FEED_PATH):
+        return
+    try:
+        new = credits.ingest_feed(DB_PATH, FEED_PATH)
+    except Exception:
+        # The file was recorded as seen before it was read: without this the
+        # next tick skips it and its credits wait for an append that may be
+        # days away.
+        credits.forget_feed(FEED_PATH)
+        raise
+    if not new:
+        return
+    # One unusable credit must cost only itself.  Each is resolved and reported
+    # under its own guard so the rest of the batch still lands.
+    if len(new) > BACKFILL_THRESHOLD:
+        auto = []
+        for c in new:
+            try:
+                if credits.resolve_credit(DB_PATH, c["id"]).linked:
+                    auto.append(c["id"])
+            except Exception:
+                logger.exception("credit %s not resolved", c["ref"])
+        await bot.send_message(chat_id=chat_id, text=credits.backfill_summary(len(new), auto))
+        return
+    for c in new:
+        try:
+            m = credits.resolve_credit(DB_PATH, c["id"])
+            # Re-read: the credit's linked/remaining changed under
+            # resolve_credit, and the card is drawn from what is left.
+            fresh = get_credit(DB_PATH, c["id"])
+            if m.linked:
+                await bot.send_message(chat_id=chat_id,
+                                       text=credits.linked_line(fresh, m.linked, DB_PATH))
+            else:
+                await bot.send_message(chat_id=chat_id,
+                                       text=credits.credit_card_text(fresh, m.candidates),
+                                       reply_markup=credit_card_markup(fresh, m.candidates))
+        except Exception:
+            logger.exception("credit %s not handled", c["ref"])
+
+
 async def _poll_tick(context):
     global _next_poll_at, _poll_running, _parking_running
+    # Before the flight gate: a credit must not wait out a long flight interval.
+    try:
+        chat_id = _notify_chat_id()
+        if chat_id:
+            await _check_credits(context.application.bot, chat_id)
+    except Exception:
+        logger.exception("credit feed check error")
     if not _parking_running:
         _parking_running = True
         try:
@@ -1435,7 +1581,7 @@ async def _set_commands(app):
         BotCommand("cancel", "取消訂單"),
         BotCommand("board", "生成舉牌相"),
         BotCommand("parking", "停車場狀態"),
-        BotCommand("paid", "過咗數：/paid 金額"),
+        BotCommand("credits", "入數紀錄：/credits"),
     ])
 
 
@@ -1515,6 +1661,10 @@ def main():
     # Relative DB_PATH depends on cwd; if .env fails to load this line makes
     # a silently-created empty DB obvious.
     logging.getLogger("bot").info("DB: %s (%d active orders)", os.path.abspath(DB_PATH), count_active_orders(DB_PATH))
+    if FEED_PATH:
+        logging.getLogger("bot").info("bank credits feed: %s", FEED_PATH)
+    else:
+        logging.getLogger("bot").info("BANK_CREDITS_FEED not set, credit feed off")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("didi", handle_didi))
@@ -1522,7 +1672,7 @@ def main():
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CommandHandler("board", handle_board))
     app.add_handler(CommandHandler("parking", handle_parking))
-    app.add_handler(CommandHandler("paid", handle_paid))
+    app.add_handler(CommandHandler("credits", handle_credits))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_statement_image))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
