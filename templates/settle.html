@@ -109,6 +109,22 @@
   .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
+  /* The batch sheet is read for its money on every open and for its order
+     numbers only when tracing a problem, so the figure leads at hero size and
+     the list sits behind a count. */
+  .hero { padding: 12px 2px 10px; border-bottom: 1px solid var(--line); }
+  .hero-k { font-size: 12px; color: var(--text-2); }
+  .hero-v { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; line-height: 1.2; }
+  .hero-s { font-size: 14px; font-weight: 650; color: var(--text-2); padding-top: 2px; }
+  .hero-s.paid { color: var(--green); }
+  .hero-s.warn { color: var(--amber); }
+  .fold {
+    display: flex; justify-content: space-between; align-items: center; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 12px 2px; font-family: inherit; font-size: 15px; color: var(--text-2); cursor: pointer;
+  }
+  .fold .c { color: var(--text-3); font-size: 13px; }
+  .fold:active { background: var(--surface-press); }
   .oday {
     font-size: 12px; font-weight: 650; color: var(--text-3);
     padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
@@ -120,6 +136,10 @@
     display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid var(--line); padding: 11px 2px;
   }
+  /* In a short-paid batch the same row is the operator's answer to which leg
+     was not paid, so the whole row is the target, not just the box. */
+  .orow.tick { cursor: pointer; }
+  .orow.tick:active { background: var(--surface-press); }
   .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .ol { flex: 1; min-width: 0; }
   /* Reconciling is done number by number against the platform's statement, so
@@ -141,10 +161,15 @@
     background: var(--banner-bg); color: var(--banner-fg);
   }
   .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
-  /* A leg the platform has not paid for sits inside an otherwise settled
-     batch, so it carries the same amber the calendar uses for money owed. */
-  .omark.owed { background: none; color: var(--amber); padding: 2px 0; margin-right: 6px; }
   .sum-row a { color: var(--amber); text-decoration: none; }
+  /* An allocation row hands the operator to the credit that paid it, so it is
+     a button wearing the same shape as the rows around it. */
+  .sum-row.link {
+    width: 100%; background: none; border: none; font: inherit; color: inherit;
+    cursor: pointer; text-align: left;
+  }
+  .sum-row.link:active { background: var(--surface-press); }
+  .sum-row .c { color: var(--text-3); margin-left: 6px; }
   /* In the day sheet the amount is never the answer on its own -- $500 already
      collected and $500 still owed are the same number -- so every leg carries
      its state under the amount, in the same colours the calendar uses. */
@@ -208,23 +233,17 @@
   /* ---- unpaid tick section ---- */
   .up-sec { padding: 12px 2px 0; }
   .up-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
-  .up-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; }
+  .up-note { font-size: 12px; color: var(--text-3); padding: 0 2px 6px; }
+  .up-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-bottom: 8px; }
+  .up-chips .up-note { padding-bottom: 0; }
   .up-chip {
     background: var(--key-bg); border: 1px solid var(--line); border-radius: 8px;
     padding: 5px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
     cursor: pointer;
   }
   .up-chip:active { background: var(--key-press); }
-  .up-row {
-    display: flex; align-items: center; gap: 10px;
-    border-bottom: 1px solid var(--line); padding: 10px 2px;
-    cursor: pointer;
-  }
-  .up-row:active { background: var(--surface-press); }
   .up-chk { flex-shrink: 0; font-size: 16px; line-height: 1; width: 18px; color: var(--text-2); }
   .up-chk.on { color: var(--text); }
-  .up-id { flex: 1; min-width: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
-  .up-amt { flex-shrink: 0; font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .up-foot {
     display: flex; align-items: center; gap: 10px; padding: 10px 2px 0;
     font-size: 13px; font-variant-numeric: tabular-nums;
@@ -297,6 +316,9 @@ let BATCH_OF = new Map();
 // Archived credits are ones already dealt with, so they stay folded away until
 // asked for. The fold outlives a repaint.
 let archOpen = false;
+// Which batches have their order list unfolded. Page state rather than DOM
+// state, so an SSE repaint mid-read does not fold the list away.
+let foldOpen = new Set();
 
 // The operator works one platform for a stretch, so reopening lands where he
 // left off. Storage can be unavailable (private mode), and the page must
@@ -636,12 +658,16 @@ function viewHtml(v) {
   }
   return batchViewHtml(v);
 }
-function paintView() {
+// keepScroll is for a repaint the operator asked for from inside the sheet
+// (unfolding a list): the sheet is where he was reading, so it must not jump
+// back to the top under him.
+function paintView(keepScroll) {
   const v = curView();
   if (!v) return;
   const el = document.getElementById('sheet');
+  const top = keepScroll ? el.scrollTop : 0;
   el.innerHTML = '<div class="grab"></div>' + viewHtml(v);
-  el.scrollTop = 0;
+  el.scrollTop = top;
   el.classList.add('show');
   document.getElementById('scrim').classList.add('show');
 }
@@ -664,37 +690,58 @@ function sheetHead(title, sub) {
     (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
 }
 
-// One row shape for both sheets. The mode decides what the right-hand end
+// One row shape for every sheet. The mode decides what the right-hand end
 // says: 'day' states where the leg's money has got to, 'batch' shows the
-// platform's own figure beside the system's. Neither is a control -- a batch
-// is created from a statement image in the bot, never from here.
-function orderRowHtml(o, mode, plat) {
+// platform's own figure beside the system's. A tick option turns the batch row
+// into the operator's answer to which leg the platform has not paid; without
+// it the row is a read, since a batch is created from a statement image in the
+// bot, never from here.
+function orderRowHtml(o, mode, opts) {
+  const tick = opts && opts.tick;
   let right;
   if (mode === 'day') {
     const tag = dayTag(o);
     const amt = expectedOf(o);
     right = '<span class="oend">' + (amt ? '<span class="oa">$' + $(amt) + '</span>' : '') +
       '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span></span>';
+  } else if (tick) {
+    // The figure to tick against is the platform's, because the outstanding
+    // amount the ticks have to add up to is the platform's own arithmetic.
+    right = '<span class="oend"><span class="oa">$' + $(o.platform_amount) + '</span>' +
+      (opts.ticked ? '<span class="otag unsettled">未過數</span>' : '') + '</span>';
   } else {
+    const plat = opts && opts.plat;
     const mark = !o.price ? '未入價' : (o.scheduled_time >= NOW ? '未完成' : '');
     // In batch detail the platform's own figure is shown when it disagrees;
     // an equal figure would only repeat the number.
     const platNote = plat !== undefined && Math.abs(plat - expectedOf(o)) >= 0.005
       ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
-    // The platform said it failed to submit this leg, so its money is still
-    // outstanding while the rest of the batch has been paid.
-    const b = batchOf(o.order_id);
-    const owed = o.unpaid && b && b.state === 'partial' ? '<span class="omark owed">未過數</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
-                 : owed + '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
+                 : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
   }
-  const body =
+  const chk = tick
+    ? '<span class="up-chk' + (opts.ticked ? ' on' : '') + '">' + (opts.ticked ? '☑' : '☐') + '</span>' : '';
+  return '<div class="orow' + (tick ? ' tick" data-uptick="' + esc(o.order_id) + '"' : '"') + '>' + chk +
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
     '<span class="ol">' +
       '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(groupId(o.order_id)) + '</span>' +
       '<span class="oll">' + esc(orderLabel(o)) + '</span></span>' +
-    right;
-  return '<div class="orow">' + body + '</div>';
+    right + '</div>';
+}
+
+// Grouped by day whenever the batch holds more than one, because each day is a
+// page of the statement the batch was read from. A tick set turns every row
+// into a tick row.
+function orderListHtml(b, rows, tickSet) {
+  const plat = new Map();
+  (b.statement ? b.statement.days.flatMap(d => d.rows) : []).forEach(r =>
+    plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
+  const row = o => orderRowHtml(o, 'batch', tickSet
+    ? { tick: true, ticked: tickSet.has(o.order_id) } : { plat: plat.get(o.order_id) });
+  const dates = batchDates(b);
+  if (dates.length === 1) return rows.map(row).join('');
+  return dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
+    rows.filter(o => orderDate(o) === d).map(row).join('')).join('');
 }
 
 // ---- day sheet ----
@@ -725,108 +772,96 @@ function dayViewHtml(v) {
     ordersOn(v.date).map(o => orderRowHtml(o, 'day')).join('') +
     (batches.length ? '<div class="blinks">' + batches.map(b =>
       '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
-      esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
-      ' · ' + batchTag(b) + '</span>' +
+      esc(batchLabel(b)) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
+      ' · ' + batchTag(b) + (heldLabel(b) ? ' · ' + esc(heldLabel(b)) : '') + '</span>' +
       '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '');
 }
 
 // ---- batch sheet ----
+// Read money first: the confirmed figure and where its payment has got to are
+// what the sheet is opened for. The order numbers are only read when tracing a
+// problem, so they fold away -- except in a short-paid batch, where the same
+// list is where the operator names the leg that was not paid.
+function legLabel(o) {
+  return (+orderDate(o).slice(8)) + '日 ' + orderTime(o) + ' ' + orderLabel(o);
+}
+// A guess of more than two legs is a sum, not a list: naming four legs in a
+// chip is unreadable, while the count and the total are enough to choose by.
+function guessLabel(ids, b) {
+  const legs = ids.map(id => b.orders.find(o => o.order_id === id)).filter(Boolean);
+  if (legs.length > 2) return legs.length + ' 程 $' + $(legs.reduce((sum, o) => sum + o.platform_amount, 0));
+  return legs.map(legLabel).join(' + ');
+}
+
 function batchViewHtml(v) {
   const b = batchById(v.id);
   if (!b) return '';
   const rows = b.orders.slice().sort((x, y) => x.scheduled_time.localeCompare(y.scheduled_time));
-  // Platform amount per order id, 舉牌 lines folded in (same fold as reconcile()).
-  const plat = new Map();
-  const stmtRows = b.statement ? b.statement.days.flatMap(d => d.rows) : [];
-  stmtRows.forEach(r => plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
-  const inBatch = new Set(b.orders.map(o => o.order_id));
-  const extras = [...plat.keys()].filter(id => !inBatch.has(id));
-  const dates = batchDates(b);
-  let body;
-  // A one-day batch needs no day heading; the title above already names the day.
-  if (dates.length > 1) {
-    body = dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
-      rows.filter(o => orderDate(o) === d).map(o => orderRowHtml(o, 'batch', plat.get(o.order_id))).join('')).join('');
-  } else {
-    body = rows.map(o => orderRowHtml(o, 'batch', plat.get(o.order_id))).join('');
-  }
   const diff = b.confirmed_amount - b.expected_amount;
-  const sums = [
-    ['應收', '$' + $(b.expected_amount)],
-    ['平台確認', '$' + $(b.confirmed_amount)],
-  ];
-  if (diff) sums.push(['差額', (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff))]);
-  sums.push(['結算日', b.settled_on]);
   // A batch is not paid or unpaid but owed a figure: what the bank has sent
   // and what it still owes are two different numbers until the last one lands.
-  if (b.state === 'paid') sums.push(['到帳', '已收齊 · ' + mdSlash(b.paid_on)]);
-  else if (b.state === 'partial') sums.push(['到帳', '已收 $' + $(b.received) +
-    '（' + mdSlash(b.allocations[b.allocations.length - 1].value_date) + '） · 未收 $' + $(b.outstanding)]);
-  else sums.push(['到帳', '等緊過數']);
-  b.allocations.forEach(a => sums.push(['入數 ' + mdSlash(a.value_date), '$' + $(a.amount)]));
+  let state;
+  if (b.state === 'paid') state = '<div class="hero-s paid">已收齊 · ' + mdSlash(b.paid_on) + '</div>';
+  else if (b.state === 'partial') state = '<div class="hero-s warn">已收 $' + $(b.received) +
+    '（' + mdSlash(b.allocations[b.allocations.length - 1].value_date) + '） · 差 $' + $(b.outstanding) + '</div>';
+  else state = '<div class="hero-s">等過數</div>';
+
+  const sums = ['<div class="sum-row"><span class="k">應收</span><span class="v">$' + $(b.expected_amount) + '</span></div>'];
+  if (diff) sums.push('<div class="sum-row"><span class="k">差額</span><span class="v">' +
+    (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff)) + '</span></div>');
+  b.allocations.forEach(a => sums.push('<button class="sum-row link" data-credit="' + a.credit_id + '">' +
+    '<span class="k">入數 ' + mdSlash(a.value_date) + '</span>' +
+    '<span class="v">$' + $(a.amount) + '<span class="c">&rsaquo;</span></span></button>'));
   if (b.statement) {
-    extras.forEach(id => sums.push(['平台多出 ' + esc(groupId(id)), '$' + $(plat.get(id))]));
-    if (b.statement_image) sums.push(['結算單', '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>']);
+    // Platform amount per order id, 舉牌 lines folded in (same fold as reconcile()).
+    const inBatch = new Set(b.orders.map(o => o.order_id));
+    const plat = new Map();
+    b.statement.days.flatMap(d => d.rows).forEach(r => plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
+    [...plat.keys()].filter(id => !inBatch.has(id)).forEach(id =>
+      sums.push('<div class="sum-row"><span class="k">平台多出 ' + esc(groupId(id)) +
+        '</span><span class="v">$' + $(plat.get(id)) + '</span></div>'));
+    if (b.statement_image) sums.push('<div class="sum-row"><span class="k">結算單</span><span class="v">' +
+      '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a></span></div>');
   }
+
+  let mid;
+  if (b.state === 'partial') {
+    // Pre-tick: existing marks win; else if exactly one guess, pre-tick that.
+    const ticked = new Set(b.orders.filter(o => o.unpaid).map(o => o.order_id));
+    const guesses = b.unpaid_guesses || [];
+    if (!ticked.size && guesses.length === 1) guesses[0].forEach(id => ticked.add(id));
+    let note;
+    if (guesses.length === 1) note = '<div class="up-note">系統估：' + esc(guessLabel(guesses[0], b)) + '，啱差額，已剔</div>';
+    else if (guesses.length > 1) note = '<div class="up-chips"><span class="up-note">系統估：</span>' +
+      guesses.map((g, i) => '<button class="up-chip" data-upguess="' + i + '">' +
+        esc(guessLabel(g, b)) + '</button>').join('') + '</div>';
+    else note = '<div class="up-note">冇組合啱 $' + $(b.outstanding) + '，自己剔</div>';
+    const tickedAmt = rows.reduce((sum, o) => ticked.has(o.order_id) ? sum + o.platform_amount : sum, 0);
+    const match = Math.abs(tickedAmt - b.outstanding) < 0.005;
+    mid = '<div class="up-sec" data-upbatch="' + b.id + '">' +
+      '<div class="up-head">邊張單未過？ · 差 $' + $(b.outstanding) + '</div>' + note +
+      orderListHtml(b, rows, ticked) +
+      '<div class="up-foot"><span class="up-sum' + (match ? '' : ' warn') + '">' +
+      esc(tickFootText(tickedAmt, b)) + '</span>' +
+      '<button class="up-btn" data-upsave="' + b.id + '"' + (match ? '' : ' disabled') +
+      '>記低</button></div></div>';
+  } else {
+    const open = foldOpen.has(b.id);
+    mid = '<button class="fold" data-fold="' + b.id + '"><span>' + b.orders.length + ' 程</span>' +
+      '<span class="c">' + (open ? '&#9662;' : '&#9656;') + '</span></button>' +
+      (open ? orderListHtml(b, rows, null) : '');
+  }
+
+  const held = heldLabel(b);
   return sheetHead('結算 ' + esc(batchLabel(b)),
-      esc(platLabel(b.platform)) + ' · ' + b.orders.length + ' 程') +
-    body +
-    '<div class="sum-rows">' + sums.map(r =>
-      '<div class="sum-row"><span class="k">' + r[0] +
-      '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
-    unpaidSectionHtml(b) +
+      esc(platLabel(b.platform)) + ' · ' + b.orders.length + ' 程 · 結算日 ' + mdSlash(b.settled_on) +
+      (held ? ' · ' + esc(held) : '')) +
+    '<div class="hero"><div class="hero-k">平台確認</div>' +
+    '<div class="hero-v">$' + $(b.confirmed_amount) + '</div>' + state + '</div>' +
+    '<div class="sum-rows">' + sums.join('') + '</div>' +
+    mid +
     '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
     '<button class="ghost-btn" data-back="1">收埋</button>';
-}
-
-// ---- unpaid legs section ----
-// The section only appears for a partial batch: the operator names which legs
-// the platform has not paid, with the system's guess pre-filled when one
-// exists.  Legs already marked unpaid override the guess and are pre-ticked.
-function unpaidSectionHtml(b) {
-  if (b.state !== 'partial') return '';
-  const ticked = new Set(b.orders.filter(o => o.unpaid).map(o => o.order_id));
-  const guesses = b.unpaid_guesses || [];
-  // Pre-tick: existing marks win; else if exactly one guess, pre-tick that.
-  if (!ticked.size && guesses.length === 1) {
-    guesses[0].forEach(id => ticked.add(id));
-  }
-  let chips = '';
-  if (guesses.length === 1) {
-    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">系統估：' +
-      esc(guesses[0].map(id => '…' + id.slice(-4)).join(' + ')) +
-      '（啱 $' + $(b.outstanding) + '）</span></div>';
-  } else if (guesses.length > 1) {
-    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">系統估：</span>' +
-      guesses.map((g, i) =>
-        '<button class="up-chip" data-upguess="' + i + '">' +
-        esc(g.map(id => '…' + id.slice(-4)).join(' + ')) + '</button>'
-      ).join('') + '</div>';
-  } else {
-    chips = '<div class="up-chips"><span style="font-size:12px;color:var(--text-3)">冇組合啱 $' +
-      $(b.outstanding) + '，自己剔</span></div>';
-  }
-  const sorted = b.orders.slice().sort((x, y) => x.scheduled_time.localeCompare(y.scheduled_time));
-  const rows = sorted.map(o => {
-    const on = ticked.has(o.order_id);
-    return '<div class="up-row" data-uptick="' + esc(o.order_id) + '">' +
-      '<span class="up-chk' + (on ? ' on' : '') + '">' + (on ? '☑' : '☐') + '</span>' +
-      '<span class="up-id">…' + esc(o.order_id.slice(-4)) + ' · ' +
-      esc(mdSlash(orderDate(o))) + '</span>' +
-      '<span class="up-amt">$' + $(o.platform_amount) + '</span></div>';
-  }).join('');
-  const tickedAmt = sorted.reduce((s, o) => ticked.has(o.order_id) ? s + o.platform_amount : s, 0);
-  const match = Math.abs(tickedAmt - b.outstanding) < 0.005;
-  const sumCls = match ? 'up-sum' : 'up-sum warn';
-  const sumText = match
-    ? '剔咗 $' + $(tickedAmt)
-    : '剔咗 $' + $(tickedAmt) + ' ≠ 差 $' + $(b.outstanding);
-  return '<div class="up-sec" data-upbatch="' + b.id + '">' +
-    '<div class="up-head">邊張單未過？ · 差 $' + $(b.outstanding) + '</div>' +
-    chips + rows +
-    '<div class="up-foot"><span class="' + sumCls + '">' + sumText + '</span>' +
-    '<button class="up-btn" data-upsave="' + b.id + '"' + (match ? '' : ' disabled') +
-    '>記低</button></div></div>';
 }
 
 // ---- credits sheet ----
@@ -879,7 +914,7 @@ function creditsViewHtml() {
 function undoViewHtml(v) {
   const b = batchById(v.id);
   if (!b) return '';
-  return sheetHead('撤銷結算', esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程') +
+  return sheetHead('撤銷結算', esc(batchLabel(b)) + ' · ' + b.orders.length + ' 程') +
     '<div class="undo-info">呢 ' + b.orders.length + ' 程會變返未結算，' +
       '$' + $(b.confirmed_amount) + ' 嘅結算紀錄會刪走。</div>' +
     '<button class="primary-btn danger" data-undogo="' + b.id + '">確認撤銷</button>' +
@@ -976,6 +1011,15 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (guess) { applyGuess(+guess.dataset.upguess); return; }
   const save = e.target.closest('[data-upsave]');
   if (save && !save.disabled) { saveUnpaid(+save.dataset.upsave); return; }
+  const fold = e.target.closest('[data-fold]');
+  if (fold) {
+    const id = +fold.dataset.fold;
+    foldOpen.has(id) ? foldOpen.delete(id) : foldOpen.add(id);
+    paintView(true);
+    return;
+  }
+  const cr = e.target.closest('[data-credit]');
+  if (cr) { pushView({ kind: 'credit', id: +cr.dataset.credit }); return; }
   const link = e.target.closest('[data-bl]');
   if (link) { openBatch(+link.dataset.bl); return; }
   if (e.target.closest('[data-arch]')) { archOpen = !archOpen; paintView(); }
@@ -990,6 +1034,17 @@ function getTickedIds() {
   return new Set([...sec.querySelectorAll('.up-chk.on')].map(
     el => el.closest('[data-uptick]').dataset.uptick));
 }
+// A row's tag mirrors its box, so a ticked leg already reads 未過數 the way it
+// will once the save has round-tripped.
+function setTickRow(row, on) {
+  const chk = row.querySelector('.up-chk');
+  chk.classList.toggle('on', on);
+  chk.textContent = on ? '☑' : '☐';
+  const end = row.querySelector('.oend');
+  const tag = end.querySelector('.otag');
+  if (on && !tag) end.insertAdjacentHTML('beforeend', '<span class="otag unsettled">未過數</span>');
+  if (!on && tag) tag.remove();
+}
 function toggleUnpaid(orderId) {
   const sec = document.querySelector('[data-upbatch]');
   if (!sec) return;
@@ -998,9 +1053,7 @@ function toggleUnpaid(orderId) {
   if (!b) return;
   const row = sec.querySelector('[data-uptick="' + orderId + '"]');
   if (!row) return;
-  const chk = row.querySelector('.up-chk');
-  const on = chk.classList.toggle('on');
-  chk.textContent = on ? '☑' : '☐';
+  setTickRow(row, !row.querySelector('.up-chk').classList.contains('on'));
   refreshUnpaidFoot(sec, b);
 }
 function applyGuess(idx) {
@@ -1011,14 +1064,17 @@ function applyGuess(idx) {
   if (!b) return;
   const guessIds = new Set((b.unpaid_guesses || [])[idx] || []);
   sec.querySelectorAll('[data-uptick]').forEach(row => {
-    const chk = row.querySelector('.up-chk');
     const want = guessIds.has(row.dataset.uptick);
-    if (want !== chk.classList.contains('on')) {
-      chk.classList.toggle('on', want);
-      chk.textContent = want ? '☑' : '☐';
-    }
+    if (want !== row.querySelector('.up-chk').classList.contains('on')) setTickRow(row, want);
   });
   refreshUnpaidFoot(sec, b);
+}
+// One phrasing for the footer, so the first paint and every toggle after it
+// cannot drift apart.
+function tickFootText(amt, b) {
+  return Math.abs(amt - b.outstanding) < 0.005
+    ? '剔咗 $' + $(amt) + ' = 差額'
+    : '剔咗 $' + $(amt) + ' ≠ 差 $' + $(b.outstanding);
 }
 function refreshUnpaidFoot(sec, b) {
   const ticked = getTickedIds();
@@ -1029,9 +1085,7 @@ function refreshUnpaidFoot(sec, b) {
   const foot = sec.querySelector('.up-foot');
   const sumEl = foot.querySelector('.up-sum');
   sumEl.className = match ? 'up-sum' : 'up-sum warn';
-  sumEl.textContent = match
-    ? '剔咗 $' + $(amt)
-    : '剔咗 $' + $(amt) + ' ≠ 差 $' + $(b.outstanding);
+  sumEl.textContent = tickFootText(amt, b);
   foot.querySelector('.up-btn').disabled = !match;
 }
 async function saveUnpaid(bid) {

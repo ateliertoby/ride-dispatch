@@ -783,8 +783,8 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     new action has to be added here deliberately."""
     page = client.get("/settle").get_data(as_text=True)
     assert set(re.findall(r"data-([a-z]+)=", page)) == {
-        "arch", "back", "bar", "bl", "chip", "close", "copy", "credits", "d", "f",
-        "upbatch", "upguess", "uptick", "upsave",
+        "arch", "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
+        "fold", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo"}
 
 
