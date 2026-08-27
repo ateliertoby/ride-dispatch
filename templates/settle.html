@@ -113,6 +113,9 @@
     background: var(--banner-bg); color: var(--banner-fg);
   }
   .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
+  /* A leg the platform has not paid for sits inside an otherwise settled
+     batch, so it carries the same amber the calendar uses for money owed. */
+  .omark.owed { background: none; color: var(--amber); padding: 2px 0; margin-right: 6px; }
   .sum-row a { color: var(--amber); text-decoration: none; }
   /* In the day sheet the amount is never the answer on its own -- $500 already
      collected and $500 still owed are the same number -- so every leg carries
@@ -268,7 +271,9 @@ function reindex() {
 function orderState(o) {
   const b = batchOf(o.order_id);
   if (!b) return 'unsettled';
-  return b.paid_on ? 'paid' : 'awaiting';
+  // Part-paid counts as awaiting: money is still owed on the day, which is the
+  // whole reason the calendar marks it.
+  return b.state === 'paid' ? 'paid' : 'awaiting';
 }
 // Mirrors db.py's settleable predicate: finished, priced, not already batched.
 // Both other kinds of leg stay visible; neither can enter a batch.
@@ -317,6 +322,13 @@ function mdLabel(dateStr) {
 function mdSlash(dateStr) { return (+dateStr.slice(5, 7)) + '/' + (+dateStr.slice(8, 10)); }
 function platLabel(key) { return PLATFORMS.find(p => p.key === key).label; }
 function paidLabel(b) { return '已收 ' + mdSlash(b.paid_on); }
+// What a batch is owed, in one phrase: a part-paid batch is neither 已收 nor
+// simply 等過數 -- the outstanding half is what the operator is chasing.
+function batchTag(b) {
+  if (b.state === 'paid') return paidLabel(b);
+  if (b.state === 'partial') return '差 $' + $(b.outstanding);
+  return '等過數';
+}
 // Display-only shortening; the raw string stays on the order.
 function shortPlace(s) {
   const t = String(s || '').replace(/[(（][^)）]*[)）]\s*$/, '').trim();
@@ -524,8 +536,12 @@ function orderRowHtml(o, mode, plat) {
     // an equal figure would only repeat the number.
     const platNote = plat !== undefined && Math.abs(plat - expectedOf(o)) >= 0.005
       ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
+    // The platform said it failed to submit this leg, so its money is still
+    // outstanding while the rest of the batch has been paid.
+    const b = batchOf(o.order_id);
+    const owed = o.unpaid && b && b.state === 'partial' ? '<span class="omark owed">未過數</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
-                 : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
+                 : owed + '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
   }
   const body =
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
@@ -541,7 +557,7 @@ function orderRowHtml(o, mode, plat) {
 // the batches it belongs to. Nothing is written from here.
 function dayTag(o) {
   const b = batchOf(o.order_id);
-  if (b) return b.paid_on ? [paidLabel(b), 'paid'] : ['等過數', 'awaiting'];
+  if (b) return b.state === 'paid' ? [paidLabel(b), 'paid'] : [batchTag(b), 'awaiting'];
   if (isSettleable(o)) return ['未結算', 'unsettled'];
   return [o.price ? '未完成' : '未入價', 'mute'];
 }
@@ -565,7 +581,7 @@ function dayViewHtml(v) {
     (batches.length ? '<div class="blinks">' + batches.map(b =>
       '<button class="blink" data-bl="' + b.id + '"><span class="blink-t">批次 ' +
       esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
-      ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
+      ' · ' + batchTag(b) + '</span>' +
       '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '');
 }
 
@@ -596,7 +612,13 @@ function batchViewHtml(v) {
   ];
   if (diff) sums.push(['差額', (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff))]);
   sums.push(['結算日', b.settled_on]);
-  sums.push(['到帳', b.bank_credit ? mdSlash(b.bank_credit.value_date) + ' · 入數 $' + $(b.bank_credit.amount) : '等緊過數']);
+  // A batch is not paid or unpaid but owed a figure: what the bank has sent
+  // and what it still owes are two different numbers until the last one lands.
+  if (b.state === 'paid') sums.push(['到帳', '已收齊 · ' + mdSlash(b.paid_on)]);
+  else if (b.state === 'partial') sums.push(['到帳', '已收 $' + $(b.received) +
+    '（' + mdSlash(b.allocations[b.allocations.length - 1].value_date) + '） · 未收 $' + $(b.outstanding)]);
+  else sums.push(['到帳', '等緊過數']);
+  b.allocations.forEach(a => sums.push(['入數 ' + mdSlash(a.value_date), '$' + $(a.amount)]));
   if (b.statement) {
     extras.forEach(id => sums.push(['平台多出 ' + esc(groupId(id)), '$' + $(plat.get(id))]));
     if (b.statement_image) sums.push(['結算單', '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>']);
@@ -628,9 +650,12 @@ function creditRowHtml(c) {
     head = esc(text) + '<span class="cstate ' + state[1] + '">' + state[0] + '</span>' +
       (c.state === 'partial' ? esc(' · 剩 $' + $(c.remaining)) : '');
   }
+  // The amount is shown only when the credit did not pay the whole batch:
+  // otherwise it would repeat the figure the row already carries.
   const batches = c.batches.map(b =>
     '<button class="cbatch" data-bl="' + b.id + '">批次 ' + esc(dateSpanLabel(b.dates)) +
-    ' · ' + b.orders + ' 程</button>' +
+    ' · ' + b.orders + ' 程' +
+    (Math.abs(b.amount - b.confirmed_amount) >= 0.005 ? ' · $' + $(b.amount) : '') + '</button>' +
     (b.has_image ? '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>' : '')
   ).join('');
   return '<div class="' + cls + '"><span>' + head + '</span>' + batches + '</div>';

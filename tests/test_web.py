@@ -570,31 +570,51 @@ def test_paid_endpoint_is_gone(client):
     assert settle(client)["settlements"][0]["paid_on"] is None
 
 
-def test_settle_carries_the_credit_summary_and_the_link(client):
-    from ride_dispatch.db import link_credit
+def test_settle_carries_what_a_batch_has_received_and_still_owes(client):
+    from ride_dispatch.db import allocate, mark_unpaid
     seed_ride("R1")
-    settlement_id = create_batch(["R1"], confirmed=530)
-    cid = seed_credit(amount=530.0)
+    seed_ride("R2", scheduled="2026-07-01 10:00:00", price=200.0, banner=0.0)
+    settlement_id = create_batch(["R1", "R2"], confirmed=740)
+    cid = seed_credit(amount=540.0)
     data = settle(client)
-    assert data["credits"] == {"unallocated": 1, "unallocated_sum": 530.0}
-    assert data["settlements"][0]["bank_credit"] is None
-    link_credit(web.DB_PATH, cid, settlement_id)
+    assert data["credits"] == {"unallocated": 1, "unallocated_sum": 540.0}
+    batch = data["settlements"][0]
+    assert batch["state"] == "awaiting" and batch["received"] == 0 and batch["outstanding"] == 740.0
+    assert batch["allocations"] == []
+    allocate(web.DB_PATH, cid, settlement_id)
+    mark_unpaid(web.DB_PATH, settlement_id, ["R2"])
     data = settle(client)
+    batch = data["settlements"][0]
+    assert batch["state"] == "partial"
+    assert batch["received"] == 540.0 and batch["outstanding"] == 200.0
+    assert batch["allocations"] == [{"credit_id": cid, "amount": 540.0,
+                                     "value_date": "2026-07-05"}]
+    assert {o["order_id"]: o["unpaid"] for o in batch["orders"]} == {"R1": 0, "R2": 1}
+    # Waiting for money is the shortfall, not the whole batch.
+    assert data["totals"]["awaiting"] == 200.0
     assert data["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
-    assert data["settlements"][0]["bank_credit"] == {"id": cid, "amount": 530.0,
-                                                     "value_date": "2026-07-05"}
 
 
 def test_fingerprint_tracks_the_credit_ledger(client):
-    """An open settle page has to repaint when a credit lands or is archived,
-    neither of which touches an order or a batch."""
-    from ride_dispatch.db import archive_credit
+    """An open settle page has to repaint when a credit lands, is archived, is
+    put against a batch, or a leg is marked unpaid — none of which changes an
+    order or a batch row."""
+    from ride_dispatch.db import allocate, archive_credit, mark_unpaid
+    seed_ride("R1", price=300.0, banner=0.0)
+    seed_ride("R2", scheduled="2026-07-01 10:00:00", price=200.0, banner=0.0)
+    settlement_id = create_batch(["R1", "R2"], confirmed=500)
     before = web._fingerprint()
-    cid = seed_credit()
+    cid = seed_credit(amount=300.0)
     landed = web._fingerprint()
     assert landed != before
+    allocate(web.DB_PATH, cid, settlement_id)
+    put = web._fingerprint()
+    assert put != landed
+    mark_unpaid(web.DB_PATH, settlement_id, ["R2"])
+    ticked = web._fingerprint()
+    assert ticked != put
     archive_credit(web.DB_PATH, cid, "pre-system", "2026-07-06")
-    assert web._fingerprint() != landed
+    assert web._fingerprint() != ticked
 
 
 def test_web_does_not_pull_in_telegram(tmp_path):
@@ -612,7 +632,7 @@ def test_web_does_not_pull_in_telegram(tmp_path):
 
 
 def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
-    from ride_dispatch.db import archive_credit, link_credit
+    from ride_dispatch.db import archive_credit, allocate
     seed_ride("R1", scheduled="2026-07-01 09:00:00", price=500.0, banner=40.0)
     seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
     paid = create_batch(["R1"], confirmed=540)
@@ -621,8 +641,8 @@ def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
     partial = seed_credit(amount=1000.0, value_date="2026-07-06", ref="C2")
     seed_credit(amount=1200.0, value_date="2026-06-05", ref="C3")
     gone = seed_credit(amount=99.0, value_date="2026-06-01", ref="C4")
-    link_credit(web.DB_PATH, done, paid)
-    link_credit(web.DB_PATH, partial, part)
+    allocate(web.DB_PATH, done, paid)
+    allocate(web.DB_PATH, partial, part)
     archive_credit(web.DB_PATH, gone, "pre-system", "2026-07-06")
 
     data = client.get("/api/credits?platform=ride").get_json()
@@ -636,23 +656,24 @@ def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
     by_ref = {c["ref"]: c for c in data["credits"]}
     assert [by_ref[r]["state"] for r in ("C1", "C2", "C3", "C4")] == [
         "done", "partial", "open", "archived"]
-    assert by_ref["C2"]["remaining"] == 700.0 and by_ref["C2"]["linked"] == 300.0
+    assert by_ref["C2"]["remaining"] == 700.0 and by_ref["C2"]["allocated"] == 300.0
     assert by_ref["C4"]["archived_reason"] == "pre-system"
     assert by_ref["C1"]["memo"] == "SUPPLIERPAY"
     assert by_ref["C3"]["batches"] == []
     assert by_ref["C1"]["batches"] == [{"id": paid, "confirmed_amount": 540.0,
+                                        "amount": 540.0, "state": "paid",
                                         "dates": ["2026-07-01"], "orders": 1,
                                         "has_image": False}]
 
 
 def test_credits_endpoint_reports_the_batch_that_has_a_statement_image(client):
-    from ride_dispatch.db import create_settlement, link_credit
+    from ride_dispatch.db import create_settlement, allocate
     client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
     sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
                             now=datetime(2026, 7, 23, 9, 0), statement=STATEMENT_JSON,
                             image=b"\xff\xd8x")
     cid = seed_credit(amount=500.0, value_date="2026-07-24")
-    link_credit(web.DB_PATH, cid, sid)
+    allocate(web.DB_PATH, cid, sid)
     batch = client.get("/api/credits").get_json()["credits"][0]["batches"][0]
     assert batch["has_image"] is True and batch["orders"] == 1
     assert batch["dates"] == ["2026-07-22"]
@@ -685,14 +706,28 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
         "arch", "back", "bl", "close", "copy", "credits", "d", "f", "undo", "undogo"}
 
 
-def test_linking_a_credit_pays_the_batch(client):
-    from ride_dispatch.db import link_credit
+def test_allocating_the_whole_batch_pays_it(client):
+    from ride_dispatch.db import allocate
     seed_ride("R1")
     settlement_id = create_batch(["R1"], confirmed=530)
-    link_credit(web.DB_PATH, seed_credit(amount=530.0), settlement_id)
+    allocate(web.DB_PATH, seed_credit(amount=530.0), settlement_id)
     data = settle(client)
     assert data["settlements"][0]["paid_on"] == "2026-07-05"
     assert data["totals"]["awaiting"] == 0
+
+
+def test_a_credits_row_carries_what_it_paid_of_each_batch(client):
+    """A credit that paid part of a batch is a different row from one that
+    paid all of it: the page needs both figures to say which."""
+    from ride_dispatch.db import allocate
+    seed_ride("R1", price=3000.0, banner=0.0)
+    settlement_id = create_batch(["R1"], confirmed=3000)
+    part = seed_credit(amount=2540.0, ref="C1")
+    allocate(web.DB_PATH, part, settlement_id)
+    batches = client.get("/api/credits").get_json()["credits"][0]["batches"]
+    assert batches == [{"id": settlement_id, "confirmed_amount": 3000.0, "amount": 2540.0,
+                        "state": "partial", "dates": ["2026-07-01"], "orders": 1,
+                        "has_image": False}]
 
 
 def test_delete_settlement_endpoint(client):
@@ -732,8 +767,8 @@ def test_api_orders_carry_settlement_columns(client):
     assert rows[0]["settlement_paid_on"] is None
     assert rows[0]["settlement_settled_on"] is None
     settlement_id = create_batch(["R1"])
-    from ride_dispatch.db import link_credit
-    link_credit(web.DB_PATH, seed_credit(), settlement_id)
+    from ride_dispatch.db import allocate
+    allocate(web.DB_PATH, seed_credit(), settlement_id)
     rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
     assert rows[0]["settlement_settled_on"] == "2026-07-03"
     assert rows[0]["settlement_paid_on"] == "2026-07-05"
@@ -745,8 +780,8 @@ def test_fingerprint_tracks_settlements(client):
     settlement_id = create_batch(["R1"])
     created = web._fingerprint()
     assert created != before
-    from ride_dispatch.db import link_credit
-    link_credit(web.DB_PATH, seed_credit(), settlement_id)
+    from ride_dispatch.db import allocate
+    allocate(web.DB_PATH, seed_credit(), settlement_id)
     paid = web._fingerprint()
     assert paid != created
     client.delete(f"/api/settlements/{settlement_id}")
