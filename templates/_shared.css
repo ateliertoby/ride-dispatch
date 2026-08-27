@@ -21,6 +21,7 @@
     --green: #3ddc84;
     --scrim: rgba(0,0,0,.55);
     --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
+    --paid-bg: rgba(61,220,132,.16);
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -39,6 +40,7 @@
       --green: #1d9e57;
       --scrim: rgba(0,0,0,.35);
       --banner-bg: #fff8e1;  --banner-fg: #c77800;
+      --paid-bg: #e3f6ea;
     }
   }
   html { -webkit-text-size-adjust: 100%; }
