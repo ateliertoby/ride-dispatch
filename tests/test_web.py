@@ -1,4 +1,7 @@
 import os
+import re
+import subprocess
+import sys
 import tempfile
 from datetime import datetime
 import pytest
@@ -471,6 +474,14 @@ def seed_ride(order_id="R1", scheduled="2026-07-01 09:00:00", price=500.0, banne
     return order_id
 
 
+def seed_credit(amount=540.0, value_date="2026-07-05", ref="R1", platform="ride"):
+    from ride_dispatch.db import insert_credit
+    return insert_credit(web.DB_PATH, {"ref": ref, "platform": platform, "amount": amount,
+                                       "currency": "HKD", "value_date": value_date,
+                                       "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
+                                       "email_id": None, "received_at": None, "recorded_at": None})
+
+
 def settle(client, month="2026-07", platform="ride"):
     res = client.get(f"/api/settle?month={month}&platform={platform}")
     assert res.status_code == 200
@@ -588,30 +599,94 @@ def test_create_settlement_rejects_unknown_order(client):
     assert "NOPE" in res.get_json()["error"]
 
 
-def test_mark_settlement_paid_endpoint(client):
+def test_paid_endpoint_is_gone(client):
+    """The page cannot mark a batch paid any more: only a bank credit can."""
     seed_ride("R1")
     settlement_id = create_batch(client, ["R1"]).get_json()["id"]
-    res = client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
-    assert res.status_code == 200
+    assert client.post(f"/api/settlements/{settlement_id}/paid", json={}).status_code in (404, 405)
+    assert settle(client)["settlements"][0]["paid_on"] is None
+
+
+def test_settle_carries_the_credit_summary_and_the_link(client):
+    from ride_dispatch.db import link_credit
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"], confirmed=530).get_json()["id"]
+    cid = seed_credit(amount=530.0)
+    data = settle(client)
+    assert data["credits"] == {"unallocated": 1, "unallocated_sum": 530.0}
+    assert data["settlements"][0]["bank_credit"] is None
+    link_credit(web.DB_PATH, cid, settlement_id)
+    data = settle(client)
+    assert data["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
+    assert data["settlements"][0]["bank_credit"] == {"id": cid, "amount": 530.0,
+                                                     "value_date": "2026-07-05"}
+
+
+def test_create_settlement_links_when_a_credit_fits(client):
+    """A batch created from the page is matched the same way the bot does it."""
+    cid = seed_credit(amount=540.0)
+    seed_ride("R1")
+    body = create_batch(client, ["R1"], confirmed=540).get_json()
+    assert body["bank_credit_id"] == cid
+    assert settle(client)["settlements"][0]["paid_on"] == "2026-07-05"
+
+
+def test_create_settlement_reports_no_link_when_nothing_fits(client):
+    seed_credit(amount=999.0)
+    seed_ride("R1")
+    assert create_batch(client, ["R1"], confirmed=540).get_json()["bank_credit_id"] is None
+    assert settle(client)["settlements"][0]["paid_on"] is None
+
+
+def test_fingerprint_tracks_the_credit_ledger(client):
+    """An open settle page has to repaint when a credit lands or is archived,
+    neither of which touches an order or a batch."""
+    from ride_dispatch.db import archive_credit
+    before = web._fingerprint()
+    cid = seed_credit()
+    landed = web._fingerprint()
+    assert landed != before
+    archive_credit(web.DB_PATH, cid, "pre-system", "2026-07-06")
+    assert web._fingerprint() != landed
+
+
+def test_web_does_not_pull_in_telegram(tmp_path):
+    """The dashboard process has never needed the bot library and must not
+    start needing it: credits.py keeps the text, bot.py owns the buttons.
+    A fresh interpreter, because the test run has telegram imported already."""
+    env = {**os.environ, "RIDE_DB_PATH": str(tmp_path / "orders.db")}
+    done = subprocess.run(
+        [sys.executable, "-c", "import ride_dispatch.web, sys; assert 'telegram' not in sys.modules"],
+        capture_output=True, text=True, env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert done.returncode == 0, done.stderr
+
+
+def test_no_route_sets_a_batch_paid_by_hand(client):
+    """Paid means linked to a bank credit, so the only writes a batch accepts
+    are being created and being undone."""
+    writes = {(r.rule, m) for r in web.app.url_map.iter_rules()
+              for m in r.methods - {"GET", "HEAD", "OPTIONS"}}
+    assert {r for r, _ in writes if r.startswith("/api/settlements")} == {
+        "/api/settlements", "/api/settlements/<int:settlement_id>"}
+
+
+def test_settle_page_exposes_only_the_actions_that_remain(client):
+    """The button behind the manual mark left nothing behind: these attribute
+    names are the whole of what the page can still do, so a resurrected action
+    has to be added here deliberately."""
+    page = client.get("/settle").get_data(as_text=True)
+    assert set(re.findall(r"data-([a-z]+)=", page)) == {
+        "add", "back", "bl", "close", "copy", "d", "f", "o", "undo", "undogo"}
+
+
+def test_linking_a_credit_pays_the_batch(client):
+    from ride_dispatch.db import link_credit
+    seed_ride("R1")
+    settlement_id = create_batch(client, ["R1"], confirmed=530).get_json()["id"]
+    link_credit(web.DB_PATH, seed_credit(amount=530.0), settlement_id)
     data = settle(client)
     assert data["settlements"][0]["paid_on"] == "2026-07-05"
     assert data["totals"]["awaiting"] == 0
-
-
-def test_mark_settlement_paid_defaults_to_today(client):
-    from datetime import date as _date
-    seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
-    client.post(f"/api/settlements/{settlement_id}/paid", json={})
-    assert settle(client)["settlements"][0]["paid_on"] == _date.today().isoformat()
-
-
-def test_mark_settlement_paid_bad_input(client):
-    seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
-    assert client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-32"}).status_code == 400
-    assert client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-7-5"}).status_code == 400
-    assert client.post("/api/settlements/999/paid", json={"paid_on": "2026-07-05"}).status_code == 404
 
 
 def test_delete_settlement_endpoint(client):
@@ -651,7 +726,8 @@ def test_api_orders_carry_settlement_columns(client):
     assert rows[0]["settlement_paid_on"] is None
     assert rows[0]["settlement_settled_on"] is None
     settlement_id = create_batch(client, ["R1"]).get_json()["id"]
-    client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
+    from ride_dispatch.db import link_credit
+    link_credit(web.DB_PATH, seed_credit(), settlement_id)
     rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
     assert rows[0]["settlement_settled_on"] == "2026-07-03"
     assert rows[0]["settlement_paid_on"] == "2026-07-05"
@@ -663,7 +739,8 @@ def test_fingerprint_tracks_settlements(client):
     settlement_id = create_batch(client, ["R1"]).get_json()["id"]
     created = web._fingerprint()
     assert created != before
-    client.post(f"/api/settlements/{settlement_id}/paid", json={"paid_on": "2026-07-05"})
+    from ride_dispatch.db import link_credit
+    link_credit(web.DB_PATH, seed_credit(), settlement_id)
     paid = web._fingerprint()
     assert paid != created
     client.delete(f"/api/settlements/{settlement_id}")
