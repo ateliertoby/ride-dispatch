@@ -571,12 +571,18 @@ def corrected_json(stmt: Statement, rec: Reconciliation) -> dict:
     return d
 
 
-def confirm_label(rec: Reconciliation) -> str:
+def confirm_label(rec: Reconciliation, credit: bool = False) -> str:
+    """The button that writes the batch, stating the scale of what it writes.
+
+    `credit` when a bank credit matched the statement's total: the same tap
+    links it, and the label has to say so before it is pressed.
+    """
     n = len(rec.settle_ids)
     amount = money_str(rec.confirmed or 0.0)
+    verb = ("確認結算" if rec.clean else "照平台數確認") + (" + 對入數" if credit else "")
     if rec.clean:
-        return f"確認結算 · {n} 程 · {amount}"
-    return f"照平台數確認 · {n} 程 · {amount}（差額 {_signed(rec.diff)}）"
+        return f"{verb} · {n} 程 · {amount}"
+    return f"{verb} · {n} 程 · {amount}（差額 {_signed(rec.diff)}）"
 
 
 def settled_reply(settlement_id: int, rec: Reconciliation, dates: list[str]) -> str:

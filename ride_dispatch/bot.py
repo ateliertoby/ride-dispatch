@@ -401,7 +401,7 @@ async def handle_callback(update: Update, context):
         if not entry:
             await query.answer("已過期，再 send 一次張圖")
             return
-        _chat, rec, stmt_json, image = entry
+        _chat, rec, stmt_json, image, credit_id = entry
         dates = sorted({d.date for d in rec.days})
         try:
             settlement_id = create_settlement(
@@ -417,14 +417,23 @@ async def handle_callback(update: Update, context):
         await query.answer("已結算")
         text = statement.settled_reply(settlement_id, rec, dates)
         markup = None
-        # A statement forwarded during the backfill is for money the bank has
-        # already sent, so the batch is matched against the ledger at birth.
-        m = credits.resolve_batch(DB_PATH, settlement_id)
-        if m.linked:
-            text += "\n" + credits.settled_link_line(get_credit(DB_PATH, m.linked[0]))
-        elif m.candidates:
-            text += "\n等緊過數 · 可能係："
-            markup = credit_choice_markup(m.candidates, settlement_id)
+        # The card named this credit before the batch existed, so this one tap
+        # confirms both.  The credit can have been spent in between, in which
+        # case the batch still stands and the reply falls back to offering the
+        # credits that are left.
+        if credit_id is not None:
+            try:
+                credit = link_credit(DB_PATH, credit_id, settlement_id)
+                text += "\n" + credits.settled_link_line(credit)
+            except ValueError as e:
+                text += f"\n對唔到入數：{e}"
+                credit_id = None
+        if credit_id is None:
+            offered = credits.offer(credits.propose_batch(DB_PATH, settlement_id),
+                                    unallocated_credits(DB_PATH, "ride"))
+            if offered:
+                text += "\n等緊過數 · 可能係："
+                markup = credit_choice_markup(offered, settlement_id)
         await query.message.reply_text(text, reply_markup=markup)
 
     elif query.data.startswith("credit:link:"):
@@ -444,13 +453,12 @@ async def handle_callback(update: Update, context):
             await query.answer(str(e))
             if credit is None:
                 return
-        # The operator is choosing by hand, so the redraw only offers what is
-        # left: a second automatic link mid-card would be a surprise.  An
-        # archived credit offers nothing — every button on it would be refused.
-        awaiting = [] if credit["archived_reason"] else awaiting_batches(DB_PATH, credit["platform"])
-        m = credits.match_credit(credit, awaiting) if awaiting else credits.Match()
-        offered = credits.offer(m, awaiting)
-        text = credits.credit_card_text(credit, offered)
+        # The redraw only offers what is left of the credit.  propose_credit
+        # answers with nothing for a credit that is archived or fully
+        # allocated, which is exactly what such a card should offer.
+        m = credits.propose_credit(DB_PATH, credit_id)
+        offered = credits.offer(m, awaiting_batches(DB_PATH, credit["platform"]))
+        text = credits.credit_card_text(credit, m, offered)
         if credit["remaining"] > 0.005:
             text = prefix + text
         await query.message.edit_text(text, reply_markup=credit_card_markup(credit, offered))
@@ -468,6 +476,16 @@ async def handle_callback(update: Update, context):
         await query.answer("已對")
         await query.message.edit_text(query.message.text + "\n" + credits.settled_link_line(credit),
                                       reply_markup=None)
+
+    elif query.data.startswith("credit:archive:"):
+        # The statement proved this money is for legs the system never had, so
+        # the credit leaves the work queue instead of waiting for a batch that
+        # is never coming.  /credits unarchive puts it back.
+        _, _, credit_id, reason = query.data.split(":")
+        found = archive_credit(DB_PATH, int(credit_id), reason,
+                               datetime.now().strftime("%Y-%m-%d"))
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer("已收埋" if found else "搵唔到入數")
 
     elif query.data == "stmt:skip":
         pending_statements.pop(msg_id, None)
@@ -742,15 +760,38 @@ async def handle_statement_image(update: Update, context):
         orders = settlement_candidates(DB_PATH, dates)
         rec = statement.reconcile(stmt, orders, datetime.now())
         text = statement.format_report(rec)
+        # The ledger is asked before anything is written: a batch has to trace
+        # back to a statement, so the statement is where the operator is told
+        # which credit it accounts for, and one tap confirms both.
+        stmt_json = statement.corrected_json(stmt, rec)
+        m = credits.propose_statement(DB_PATH, "ride", rec.confirmed or 0.0, stmt_json)
+        matched = get_credit(DB_PATH, m.exact[0]) if m.reason == "exact" else None
         if not rec.can_settle:
-            await msg.reply_text(text)
+            # No batch can come out of this statement.  A credit that agrees
+            # with its total is money for legs the system never had, so the
+            # only offer is taking that credit out of the queue.
+            markup = None
+            if matched and not rec.settle_ids:
+                text += "\n" + credits.no_orders_text(matched, sum(len(d.rows) for d in rec.days))
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "收埋入數（單未入系統）",
+                    callback_data=f"credit:archive:{matched['id']}:no-orders")]])
+            await msg.reply_text(text, reply_markup=markup)
             return
+        if matched:
+            text += "\n" + credits.statement_match_text(matched)
+        else:
+            offered = credits.offer(m, unallocated_credits(DB_PATH, "ride"))
+            text += "\n" + (credits.statement_offer_text(offered) if offered
+                            else credits.NO_CREDIT_YET)
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(statement.confirm_label(rec), callback_data="stmt:confirm"),
+            InlineKeyboardButton(statement.confirm_label(rec, credit=matched is not None),
+                                 callback_data="stmt:confirm"),
             InlineKeyboardButton("唔確認", callback_data="stmt:skip"),
         ]])
         sent = await msg.reply_text(text, reply_markup=keyboard)
-        pending_statements[sent.message_id] = (msg.chat_id, rec, statement.corrected_json(stmt, rec), data)
+        pending_statements[sent.message_id] = (msg.chat_id, rec, stmt_json, data,
+                                               matched["id"] if matched else None)
     except Exception as e:
         logging.getLogger("bot").exception("statement image failed")
         await msg.reply_text(f"讀圖出錯（{type(e).__name__}）— 再 send 一次，或者用「Send as file」send 原檔")
@@ -778,12 +819,10 @@ async def handle_credits(update: Update, context):
         if credit is None:
             await msg.reply_text(f"搵唔到入數 #{args[0]}")
             return
-        awaiting = []
-        if credit["remaining"] > 0.005 and not credit["archived_reason"]:
-            awaiting = awaiting_batches(DB_PATH, credit["platform"])
-        m = credits.match_credit(credit, awaiting) if awaiting else credits.Match()
+        m = credits.propose_credit(DB_PATH, credit["id"])
+        offered = credits.offer(m, awaiting_batches(DB_PATH, credit["platform"]))
         await msg.reply_text(credits.detail_text(credit, DB_PATH),
-                             reply_markup=credit_card_markup(credit, credits.offer(m, awaiting)))
+                             reply_markup=credit_card_markup(credit, offered))
         return
 
     if args[0] == "archive" and len(args) >= 3 and args[1] == "before" and _DATE_RE.match(args[2]):
@@ -962,31 +1001,27 @@ async def _check_credits(bot, chat_id: int):
         raise
     if not new:
         return
-    # One unusable credit must cost only itself.  Each is resolved and reported
-    # under its own guard so the rest of the batch still lands.
+    # Money arriving needs no confirmation as an event, so the heartbeat only
+    # announces: which batch a credit pays for is the operator's tap, never
+    # this loop's.  One unusable credit must cost only itself, so each is
+    # matched and reported under its own guard.
     if len(new) > BACKFILL_THRESHOLD:
-        auto = []
+        found = []
         for c in new:
             try:
-                if credits.resolve_credit(DB_PATH, c["id"]).linked:
-                    auto.append(c["id"])
+                if credits.propose_credit(DB_PATH, c["id"]).exact:
+                    found.append(c["id"])
             except Exception:
-                logger.exception("credit %s not resolved", c["ref"])
-        await bot.send_message(chat_id=chat_id, text=credits.backfill_summary(len(new), auto))
+                logger.exception("credit %s not matched", c["ref"])
+        await bot.send_message(chat_id=chat_id, text=credits.backfill_summary(len(new), found))
         return
     for c in new:
         try:
-            m = credits.resolve_credit(DB_PATH, c["id"])
-            # Re-read: the credit's linked/remaining changed under
-            # resolve_credit, and the card is drawn from what is left.
-            fresh = get_credit(DB_PATH, c["id"])
-            if m.linked:
-                await bot.send_message(chat_id=chat_id,
-                                       text=credits.linked_line(fresh, m.linked, DB_PATH))
-            else:
-                await bot.send_message(chat_id=chat_id,
-                                       text=credits.credit_card_text(fresh, m.candidates),
-                                       reply_markup=credit_card_markup(fresh, m.candidates))
+            m = credits.propose_credit(DB_PATH, c["id"])
+            offered = credits.offer(m, awaiting_batches(DB_PATH, c["platform"]))
+            await bot.send_message(chat_id=chat_id,
+                                   text=credits.credit_card_text(c, m, offered),
+                                   reply_markup=credit_card_markup(c, offered))
         except Exception:
             logger.exception("credit %s not handled", c["ref"])
 
