@@ -119,6 +119,61 @@ def test_fuzzy_match_ambiguous_is_unknown():
     assert r.entries[0].kind == "unknown"
 
 
+def test_truncated_id_binds_to_the_one_order_it_starts():
+    """The platform's own table cuts a long code short, so the line names its
+    order without spelling it out."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBK6A85D6FB8089", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    r = reconcile(s, [order("VBK6A85D6FB8089ABCD", "2026-08-23 09:00:00", 280.0)], NOW)
+    e = r.entries[0]
+    assert e.kind == "matched" and e.order_id == "VBK6A85D6FB8089ABCD"
+    assert e.statement_id == "VBK6A85D6FB8089"
+    assert corrected_json(s, r)["days"][0]["rows"][0]["read_as"] == "VBK6A85D6FB8089"
+
+
+def test_two_orders_sharing_the_prefix_leave_the_line_unknown():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBK6A85D6FB8089", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    orders = [order("VBK6A85D6FB8089ABCD", "2026-08-23 09:00:00", 280.0),
+              order("VBK6A85D6FB8089WXYZ", "2026-08-23 10:00:00", 280.0)]
+    assert reconcile(s, orders, NOW).entries[0].kind == "unknown"
+
+
+def test_a_prefix_only_binds_on_the_statements_dates():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBK6A85D6FB8089", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    r = reconcile(s, [order("VBK6A85D6FB8089ABCD", "2026-08-10 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "unknown"
+
+
+def test_a_long_id_binds_by_prefix_even_without_an_ellipsis():
+    """OCR loses the ellipsis when it lands in its own box; ten characters of
+    agreement is already more than a coincidence."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "1128150000000001", 280.0)], 1, 280.0)], total=280.0)
+    r = reconcile(s, [order("11281500000000019", "2026-08-23 09:00:00", 280.0)], NOW)
+    assert r.entries[0].order_id == "11281500000000019"
+
+
+def test_a_short_id_never_binds_by_prefix():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "A1", 280.0)], 1, 280.0)], total=280.0)
+    r = reconcile(s, [order("A1234567", "2026-08-23 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "unknown"
+
+
+def test_an_exact_id_beats_a_prefix_of_it():
+    """A line naming its order outright must keep it, whatever a shorter line
+    on the same statement would have taken."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBK6A85D6FB8089ABCD", 280.0),
+                                 row("2026-08-23", "VBK6A85D6FB8089", 210.0, truncated=True)], 2, 490.0)],
+             total=490.0)
+    orders = [order("VBK6A85D6FB8089ABCD", "2026-08-23 09:00:00", 280.0),
+              order("VBK6A85D6FB8089QQQQ", "2026-08-23 10:00:00", 210.0)]
+    r = reconcile(s, orders, NOW)
+    assert [(e.statement_id, e.order_id) for e in r.entries] == [
+        ("VBK6A85D6FB8089ABCD", "VBK6A85D6FB8089ABCD"),
+        ("VBK6A85D6FB8089", "VBK6A85D6FB8089QQQQ")]
+
+
 def test_exact_match_beats_fuzzy_neighbour():
     s = stmt([day("2026-08-23", [row("2026-08-23", "A1", 280.0)], 1, 280.0)], total=280.0)
     r = reconcile(s, [order("A1", "2026-08-23 09:00:00", 280.0), order("A2", "2026-08-23 10:00:00", 280.0)], NOW)

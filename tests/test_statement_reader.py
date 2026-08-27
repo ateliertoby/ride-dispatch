@@ -80,6 +80,48 @@ def test_id_needs_digits_not_just_lookalike_letters():
     assert statement._ID_RE.findall("901234S678901234") == ["901234S678901234"]
 
 
+def row_boxes(date, order_id, amount, y, settle_date="2026-01-03"):
+    """One statement line as OCR hands it over: date, id, settle date, amount."""
+    return [[[[10, y], [120, y], [120, y + 12], [10, y + 12]], date + " 09:00", 0.9],
+            [[[200, y], [430, y], [430, y + 12], [200, y + 12]], order_id, 0.9],
+            [[[600, y], [700, y], [700, y + 12], [600, y + 12]], settle_date, 0.9],
+            [[[900, y], [980, y], [980, y + 12], [900, y + 12]], f"{amount:.2f}", 0.9]]
+
+
+def day_header(date, count, total):
+    return [[[[10, 10], [120, 10], [120, 22], [10, 22]], date, 0.9],
+            [[[300, 10], [340, 10], [340, 22], [300, 22]], str(count), 0.9],
+            [[[900, 10], [980, 10], [980, 22], [900, 22]], f"{total:.2f}", 0.9]]
+
+
+def test_short_space_ids_and_alphanumeric_ids_are_read():
+    """Two shapes the reader used to miss, which failed the checksum of a
+    perfectly readable image: SPACE with a short digit run, and 同程's
+    alphanumeric code, which the platform's own UI truncates."""
+    boxes = day_header("2026-01-01", 2, 420.0)
+    boxes += row_boxes("2026-01-01", "SPACE20260101001", 210.0, y=40)
+    boxes += row_boxes("2026-01-01", "VBK6A85D6FB8089...", 210.0, y=80)
+    stmt = parse_boxes(boxes, 1000)
+    rows = stmt.days[0].rows
+    assert [r.order_id for r in rows] == ["SPACE20260101001", "VBK6A85D6FB8089"]
+    assert [r.truncated for r in rows] == [False, True]
+    assert [r.amount for r in rows] == [210.0, 210.0]
+
+
+def test_an_alphanumeric_id_keeps_its_letters():
+    """B is an 8 inside a run of digits and a B inside a code, so the digit
+    fixes must know which it is looking at."""
+    assert statement._normalise_id("VBK6A85D6FB8089ABCD") == "VBK6A85D6FB8089ABCD"
+    assert statement._normalise_id("11281B0000000001") == "1128180000000001"
+
+
+def test_ids_do_not_swallow_amounts_dates_or_times():
+    assert statement._ID_RE.findall("210.00") == []
+    assert statement._ID_RE.findall("2026-08-22") == []
+    assert statement._ID_RE.findall("09:30") == []
+    assert statement._ID_RE.findall("2026-08-22 09:30 1,330.00") == []
+
+
 def test_undecodable_input_is_reported_without_starting_the_engine(monkeypatch):
     def boom():
         raise AssertionError("OCR engine must not be built for undecodable input")
