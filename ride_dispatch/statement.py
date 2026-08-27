@@ -245,6 +245,28 @@ def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
     return bound
 
 
+def leg_amount(batch: dict, order: dict) -> float:
+    """What the platform is paying for one leg of a batch.
+
+    The platform's own figure whenever the batch carries its statement, because
+    the transfer is the sum of those figures and nothing else.  A leg the
+    platform priced differently from the system (an amount_diff line) would
+    otherwise never account for what the bank actually sent, and the operator
+    would be told his ticks do not add up over a discrepancy that is the
+    platform's.  A 舉牌 line shares its trip's id, so the rows are summed
+    exactly as reconcile folds them, and the ids are the corrected ones
+    (corrected_json rewrites a near-miss and keeps the original as read_as).
+    Without a statement row to read there is no platform figure, so the
+    system's own is the only answer available.
+    """
+    stmt = batch.get("statement") or {}
+    rows = [r for day in stmt.get("days", []) for r in day.get("rows", [])
+            if r.get("order_id") == order["order_id"]]
+    if rows:
+        return round(sum(r["amount"] for r in rows), 2)
+    return expected_of(order)
+
+
 def _settleable(order: dict, now: datetime) -> str | None:
     """None when the order can enter a batch, else the reason it cannot."""
     if not (order.get("price") or 0) > 0:
