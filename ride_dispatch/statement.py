@@ -111,6 +111,12 @@ class Reconciliation:
         return self.can_settle and not self.missing and all(e.kind == "matched" for e in self.entries)
 
 
+# A near miss is allowed the same two edits wherever it is measured — over a
+# whole id, or over the opening of a truncated one — so the passes that use it
+# cannot drift apart.
+MAX_EDITS = 2
+
+
 def levenshtein(a: str, b: str) -> int:
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
@@ -179,14 +185,14 @@ def _date_near(order: dict, date: str) -> bool:
 
 
 def _nearest(statement_id: str, date: str, candidates: list[dict]) -> dict | None:
-    """The unique nearest candidate on that date within two edits.
+    """The unique nearest candidate on that date within MAX_EDITS edits.
     Ambiguity is reported as no match — a wrong order would be batched
     silently, an unmatched line is visible on the card."""
     scored = sorted(
         ((levenshtein(statement_id, o["order_id"]), o) for o in candidates if _date_near(o, date)),
         key=lambda t: t[0],
     )
-    if not scored or scored[0][0] > 2:
+    if not scored or scored[0][0] > MAX_EDITS:
         return None
     if len(scored) > 1 and scored[1][0] == scored[0][0]:
         return None
@@ -202,6 +208,28 @@ def _prefix(statement_id: str, date: str, candidates: list[dict]) -> dict | None
     card rather than being batched against a guess."""
     hits = [o for o in candidates
             if o["order_id"].startswith(statement_id) and _date_near(o, date)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _prefix_near(statement_id: str, date: str, candidates: list[dict]) -> dict | None:
+    """The one candidate whose opening agrees with a code read imperfectly.
+
+    Telegram's photo compression turns letters into other letters — on the
+    operator's normal path a K came back as X and a B as 8 — and in an
+    alphanumeric code those are letters, so _DIGIT_FIX must not touch them and
+    the exact-prefix pass finds nothing on a compressed copy of an image whose
+    original binds.  The opening is therefore compared with the same tolerance
+    a whole id gets, against each candidate cut to the token's length.
+
+    Stricter than _nearest in one way: a second candidate anywhere inside the
+    bound leaves the line unknown rather than letting the nearer one win.  A
+    prefix is already partial evidence, and money must not be batched against
+    two codes that both nearly agree.
+    """
+    n = len(statement_id)
+    hits = [o for o in candidates
+            if _date_near(o, date)
+            and levenshtein(statement_id, o["order_id"][:n]) <= MAX_EDITS]
     return hits[0] if len(hits) == 1 else None
 
 
@@ -232,15 +260,25 @@ def _match(merged: dict[str, tuple[str, float]], by_id: dict[str, dict],
            orders: list[dict], truncated: set[str]) -> dict[str, tuple[dict, bool]]:
     """Bind statement lines to orders: {statement id: (order, was inexact)}.
 
-    Three passes, weakest evidence last: exact ids are settled first so nothing
-    weaker can take an order that another line names outright; then a line that
-    was cut short (or is long enough that a shared prefix would be a
-    coincidence) binds to the order it is the start of; then the near-miss.
+    Four passes, weakest evidence last, so nothing weaker can take an order a
+    stronger rule already claimed: exact ids; then a line that was cut short
+    (or is long enough that a shared prefix would be a coincidence) binding to
+    the order it is the start of; then the same opening allowed the near-miss
+    tolerance, for a code the image mangled; then the near-miss over whole ids.
     """
     bound = {sid: (by_id[sid], False) for sid in merged if sid in by_id}
     prefixable = {sid: v for sid, v in merged.items()
                   if sid in truncated or len(sid) >= MIN_PREFIX}
     _bind_round(prefixable, bound, orders, _prefix)
+    # Only a code needs the tolerant opening: the platform truncates those and
+    # nothing else, and a digit run's mis-reads are already covered by
+    # _DIGIT_FIX and then by _nearest over the whole id.  For a digit id read
+    # at full length this round would change nothing anyway — binding on a
+    # unique candidate inside the bound is a subset of _nearest's unique
+    # nearest — so all the gate withholds is a shortened digit token binding
+    # on an opening the whole-id comparison would have rejected.
+    mangled = {sid: v for sid, v in prefixable.items() if _REAL_LETTER_RE.search(sid)}
+    _bind_round(mangled, bound, orders, _prefix_near)
     _bind_round(merged, bound, orders, _nearest)
     return bound
 
@@ -369,9 +407,15 @@ _ACCOUNT_RE = re.compile(r"【([^】]+)】")
 _COUNT_RE = re.compile(r"(\d{1,3})$")
 _DIGIT_FIX = str.maketrans({"S": "5", "O": "0", "I": "1", "l": "1", "B": "8"})
 # A letter that is nobody's mis-read digit: its presence says the token is a
-# code, so the digit fixes must not touch it.
+# code, so the digit fixes must not touch it — and, downstream, that a mangled
+# opening is worth measuring against the candidates (see _prefix_near, which
+# reads this to tell a code from a digit run).
 _REAL_LETTER_RE = re.compile(r"[AC-HJ-NP-RT-Z]")
-# What binds a truncated or long id to the order it is the start of.
+# What makes an id long enough to bind on its opening alone.  A code the
+# platform truncated qualifies whatever its length; a whole id needs this many
+# characters before a shared opening stops being a coincidence.  The opening
+# then binds exactly (_prefix) or within MAX_EDITS (_prefix_near), because
+# photo compression rewrites letters the digit fixes are not allowed to touch.
 MIN_PREFIX = 10
 
 
