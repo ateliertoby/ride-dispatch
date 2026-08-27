@@ -11,7 +11,7 @@ import ride_dispatch.bot as bot
 from ride_dispatch import statement
 from ride_dispatch.db import (
     init_db, save_order, update_price, get_settlement, get_order_by_id, create_settlement,
-    awaiting_batches, statement_image_path,
+    open_batches, statement_image_path,
 )
 from ride_dispatch.parser import Order
 from ride_dispatch.statement import Statement, StatementDay, StatementRow, format_report, date_span_label
@@ -137,7 +137,7 @@ def test_clean_statement_card_and_confirm(db_path, monkeypatch):
 
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, ctx))
-    batches = awaiting_batches(db_path, "ride")
+    batches = open_batches(db_path, "ride")
     assert len(batches) == 1
     b = batches[0]
     assert b["confirmed_amount"] == 490.0 and b["expected_amount"] == 490.0
@@ -162,7 +162,7 @@ def test_confirm_stores_corrected_ids(db_path, monkeypatch):
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, ctx))
 
-    b = awaiting_batches(db_path, "ride")[0]
+    b = open_batches(db_path, "ride")[0]
     stored = b["statement"]["days"][0]["rows"][0]
     assert stored["order_id"] == "A1" and stored["read_as"] == "A2"
     assert get_order_by_id(db_path, "A1")["settlement_id"] == b["id"]
@@ -179,7 +179,7 @@ def test_confirmation_line_keeps_cents(db_path, monkeypatch):
     asyncio.run(bot.handle_callback(cb, ctx))
     reply = q.message.reply_text.call_args.args[0]
     assert "HKD 490.50 確認無誤" in reply
-    assert awaiting_batches(db_path, "ride")[0]["confirmed_amount"] == 490.5
+    assert open_batches(db_path, "ride")[0]["confirmed_amount"] == 490.5
 
 
 def test_mixed_statement_lists_problems_and_offers_platform_figure(db_path, monkeypatch):
@@ -241,7 +241,7 @@ def test_confirm_reports_create_settlement_error(db_path, monkeypatch):
     q.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
     q.answer.assert_awaited_once_with("結算唔到")
     assert q.message.reply_text.call_args.args[0].startswith("結算唔到：A1: 已經結算咗")
-    assert awaiting_batches(db_path, "ride") == []
+    assert open_batches(db_path, "ride") == []
     assert 777 not in bot.pending_statements
 
 
@@ -253,7 +253,7 @@ def test_skip_drops_pending(db_path, monkeypatch):
     cb, q = callback_update("stmt:skip")
     asyncio.run(bot.handle_callback(cb, MagicMock()))
     assert bot.pending_statements == {}
-    assert awaiting_batches(db_path, "ride") == []
+    assert open_batches(db_path, "ride") == []
 
 
 def test_document_image_is_accepted(db_path, monkeypatch):
@@ -328,9 +328,11 @@ def test_fallback_when_ocr_missing(db_path, monkeypatch):
 # ---- the manual paid mark is gone ----
 
 def test_no_handler_marks_a_batch_paid_by_hand(db_path):
-    """A batch becomes paid by being linked to a bank credit, so the bot offers
-    no command and no handler that sets the date itself."""
-    assert [n for n in dir(bot) if "paid" in n] == []
+    """A batch becomes paid by money allocated to it, so the bot offers no
+    command and no handler that sets the date itself.  The names that remain
+    are the tick card's, which records what the platform has NOT paid for."""
+    assert [n for n in dir(bot) if "paid" in n] == [
+        "mark_unpaid", "pending_unpaid", "unpaid_markup"]
     assert "paid" not in {c.command for c in _commands()}
 
 
