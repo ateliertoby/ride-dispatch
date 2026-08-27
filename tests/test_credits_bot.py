@@ -44,7 +44,6 @@ def db_path(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
     monkeypatch.setattr(bot, "FEED_PATH", str(tmp_path / "ride-dispatch.jsonl"))
     bot.pending_statements.clear()
-    bot.pending_unpaid.clear()
     credits._feed_seen.clear()
     credits._feed_missing_logged.clear()
     yield path
@@ -695,6 +694,12 @@ def test_allocate_is_only_called_by_a_tapped_callback():
     assert _call_sites("allocate") == {("bot.py", "handle_callback")}
 
 
+def test_mark_unpaid_is_only_called_from_the_web_handler():
+    """Naming the legs a short payment left out is a dashboard operation, not a
+    chat interaction.  A new call site has to be added here deliberately."""
+    assert _call_sites("mark_unpaid") == {("web.py", "api_mark_unpaid")}
+
+
 def test_round_two_linking_is_gone_rather_than_unused():
     """One credit paying one batch in full cannot record a short payment, so
     the functions that only did that are removed: a caller of either would be
@@ -752,35 +757,14 @@ def test_an_exact_credit_beats_a_short_one(db_path, monkeypatch):
     assert bot.pending_statements[777][4] == exact
 
 
-def test_confirming_a_short_statement_opens_the_tick_card(db_path, monkeypatch):
+def confirm_short(db_path, monkeypatch):
+    """Confirm the short statement and return (settlement_id, query)."""
     cid, stmt = short_statement(db_path, monkeypatch)
     card_for(monkeypatch, stmt)
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, context_with_file()))
     sid = get_credit(db_path, cid)["allocations"][0]["settlement_id"]
-    batch_ = get_settlement(db_path, sid)
-    assert batch_["received"] == 2950.0 and batch_["outstanding"] == 510.0
-    assert batch_["paid_on"] is None
-
-    said = replies(q.message)
-    assert said[0].endswith("\n已收 $2,950 · 未收 $510")
-    assert said[1] == "揀邊張單未過數 · 差 $510"
-    rows = buttons_of(reply_markups(q.message)[1])
-    assert [b.callback_data for b in rows] == [
-        f"unpaid:t:{sid}:1128150000000001", f"unpaid:t:{sid}:1128150000001704",
-        f"unpaid:t:{sid}:1128150000003137", f"unpaid:ok:{sid}"]
-    assert rows[1].text == f"☐ …1704 · {credits._slash(TWO_DAYS)} · $210"
-    assert rows[-1].text == "剔咗 $0 ≠ 差額 $510"
-
-
-def open_tick_card(db_path, monkeypatch):
-    cid, stmt = short_statement(db_path, monkeypatch)
-    card_for(monkeypatch, stmt)
-    cb, q = callback_update("stmt:confirm")
-    asyncio.run(bot.handle_callback(cb, context_with_file()))
-    sid = get_credit(db_path, cid)["allocations"][0]["settlement_id"]
-    card_id = next(iter(bot.pending_unpaid))
-    return sid, card_id
+    return sid, q
 
 
 def tap(data, message_id):
@@ -789,89 +773,36 @@ def tap(data, message_id):
     return q
 
 
-def test_ticking_legs_keeps_the_footer_honest(db_path, monkeypatch):
-    sid, card = open_tick_card(db_path, monkeypatch)
-    q = tap(f"unpaid:t:{sid}:1128150000001704", card)
-    rows = [b for row in q.message.edit_reply_markup.call_args.kwargs["reply_markup"].inline_keyboard
-            for b in row]
-    assert rows[1].text.startswith("☑ …1704")
-    assert rows[-1].text == "剔咗 $210 ≠ 差額 $510"
-    q = tap(f"unpaid:t:{sid}:1128150000003137", card)
-    rows = [b for row in q.message.edit_reply_markup.call_args.kwargs["reply_markup"].inline_keyboard
-            for b in row]
-    assert rows[-1].text == "確認 · 剔咗 $510"
-    # A tick is a toggle: tapping the same leg again takes it back off.
-    q = tap(f"unpaid:t:{sid}:1128150000003137", card)
-    rows = [b for row in q.message.edit_reply_markup.call_args.kwargs["reply_markup"].inline_keyboard
-            for b in row]
-    assert rows[2].text.startswith("☐ …3137")
+def test_confirming_a_short_statement_ends_with_the_dashboard_line(db_path, monkeypatch):
+    """Round 4: the short allocation says where to name the legs, not here."""
+    sid, q = confirm_short(db_path, monkeypatch)
+    batch_ = get_settlement(db_path, sid)
+    assert batch_["received"] == 2950.0 and batch_["outstanding"] == 510.0
+    assert batch_["paid_on"] is None
+    said = replies(q.message)
+    assert len(said) == 1       # one reply, no tick card
+    assert "已收 $2,950 · 未收 $510 · 平台查完喺 dashboard 入返邊張單" in said[0]
 
 
-def test_a_tick_set_that_does_not_add_up_writes_nothing(db_path, monkeypatch):
-    sid, card = open_tick_card(db_path, monkeypatch)
-    tap(f"unpaid:t:{sid}:1128150000001704", card)
-    q = tap(f"unpaid:ok:{sid}", card)
-    # The footer the operator is looking at, not a second phrasing of it.
-    q.answer.assert_awaited_once_with("剔咗 $210 ≠ 差額 $510")
-    q.message.edit_text.assert_not_awaited()
-    assert all(o["unpaid"] == 0 for o in get_settlement(db_path, sid)["orders"])
-    assert card in bot.pending_unpaid
+def test_tick_vocabulary_is_gone_from_the_bot():
+    """Round 4: the tick card, its state, and /credits short are all gone."""
+    assert not hasattr(bot, "pending_unpaid")
+    assert not hasattr(bot, "unpaid_markup")
+    assert not hasattr(bot, "_send_tick_card")
+    assert "short" not in bot.CREDITS_USAGE
 
 
-def test_confirming_the_ticks_records_the_legs_and_closes_the_card(db_path, monkeypatch):
-    sid, card = open_tick_card(db_path, monkeypatch)
-    tap(f"unpaid:t:{sid}:1128150000001704", card)
-    tap(f"unpaid:t:{sid}:1128150000003137", card)
-    q = tap(f"unpaid:ok:{sid}", card)
-    q.answer.assert_awaited_once_with("已記低")
-    assert edited(q) == "等到帳 $510：…1704 $210、…3137 $300"
-    assert q.message.edit_text.call_args.kwargs["reply_markup"] is None
-    assert [o["order_id"] for o in get_settlement(db_path, sid)["orders"] if o["unpaid"]] == [
-        "1128150000001704", "1128150000003137"]
-    assert card not in bot.pending_unpaid
-
-
-def test_a_tick_card_whose_state_is_gone_says_how_to_reopen_it(db_path, monkeypatch):
-    sid, card = open_tick_card(db_path, monkeypatch)
-    bot.pending_unpaid.clear()
-    q = tap(f"unpaid:t:{sid}:1128150000001704", card)
-    q.answer.assert_awaited_once_with("已過期，用 /credits short 再開")
-    q = tap(f"unpaid:ok:{sid}", card)
-    q.answer.assert_awaited_once_with("已過期，用 /credits short 再開")
-
-
-def test_credits_short_reopens_the_card_with_the_recorded_ticks(db_path, monkeypatch):
-    sid, card = open_tick_card(db_path, monkeypatch)
-    tap(f"unpaid:t:{sid}:1128150000001704", card)
-    tap(f"unpaid:t:{sid}:1128150000003137", card)
-    tap(f"unpaid:ok:{sid}", card)
-    bot.pending_unpaid.clear()
-    msg = run_credits("short", str(sid))
-    assert reply_text(msg) == "揀邊張單未過數 · 差 $510"
-    rows = reply_buttons(msg)
-    assert rows[1].text.startswith("☑ …1704") and rows[2].text.startswith("☑ …3137")
-    assert rows[-1].text == "確認 · 剔咗 $510"
-
-
-def test_credits_short_refuses_a_batch_with_nothing_to_split(db_path):
-    sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 500.0)
-    assert reply_text(run_credits("short", str(sid))) == f"批次 #{sid} 未收過錢"
-    cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 500.0,
-                                  "currency": "HKD", "value_date": TODAY, "payer": None,
-                                  "memo": None, "email_id": None, "received_at": None,
-                                  "recorded_at": None})
-    allocate(db_path, cid, sid)
-    assert reply_text(run_credits("short", str(sid))) == f"批次 #{sid} 已收齊"
-    assert reply_text(run_credits("short", "99")) == "搵唔到批次 #99"
+def test_credits_short_is_not_a_command(db_path):
+    """The /credits short form is gone; typing it shows the usage string."""
+    assert reply_text(run_credits("short", "1")) == bot.CREDITS_USAGE
 
 
 def test_the_make_up_payment_closes_the_batch_and_names_the_legs(db_path, monkeypatch):
     """The whole point of the round: the $510 arrives later, alone or as the
     leftover of a bigger transfer, and the batch closes naming the two legs."""
-    sid, card = open_tick_card(db_path, monkeypatch)
-    tap(f"unpaid:t:{sid}:1128150000001704", card)
-    tap(f"unpaid:t:{sid}:1128150000003137", card)
-    tap(f"unpaid:ok:{sid}", card)
+    from ride_dispatch.db import mark_unpaid
+    sid, _q = confirm_short(db_path, monkeypatch)
+    mark_unpaid(db_path, sid, ["1128150000001704", "1128150000003137"])
     later = credit_row(db_path, "R2", 510.0, TODAY)
     q = tap(f"credit:link:{later}:{sid}", 900)
     said = replies(q.message)
@@ -882,9 +813,9 @@ def test_the_make_up_payment_closes_the_batch_and_names_the_legs(db_path, monkey
     assert all(o["unpaid"] == 0 for o in batch_["orders"])
 
 
-def test_a_part_payment_from_the_credit_card_asks_for_the_legs(db_path):
+def test_a_part_payment_from_the_credit_card_ends_with_the_dashboard_line(db_path):
     """The statement can be settled before the money lands, so the short
-    payment arrives at the credit card instead: same question, same card."""
+    payment arrives at the credit card instead: same reply, dashboard line."""
     seed(db_path, "1128150000000001", f"{TWO_DAYS} 09:00:00", 2950.0)
     seed(db_path, "1128150000001704", f"{TWO_DAYS} 10:00:00", 510.0)
     sid = create_settlement(db_path, "ride", ["1128150000000001", "1128150000001704"],
@@ -892,23 +823,22 @@ def test_a_part_payment_from_the_credit_card_asks_for_the_legs(db_path):
     write_feed(feed_line("R1", 2950.0, TODAY))
     tick(fake_bot())
     q = tap(f"credit:link:1:{sid}", 901)
-    # The credit is spent, so its own card says only that; what happened to the
-    # batch is a reply, because the batch is not what the card is about.
     assert edited(q) == f"入數 $2,950 · {credits.md(TODAY)} · 已全部對齊"
     said = replies(q.message)
-    assert said[0] == "已收 $2,950 · 未收 $510"
-    assert said[1] == "揀邊張單未過數 · 差 $510"
-    assert bot.pending_unpaid
+    assert len(said) == 1
+    assert "已收 $2,950 · 未收 $510 · 平台查完喺 dashboard 入返邊張單" in said[0]
 
 
 def test_a_leftover_credit_is_chained_onto_the_batch_that_is_short(db_path, monkeypatch):
     """A make-up payment bundled into a later day's transfer: the tap that
     spends the first part of the credit is what offers the rest."""
-    sid, _card = open_tick_card(db_path, monkeypatch)
+    sid, _q = confirm_short(db_path, monkeypatch)
     other = batch(db_path, "B1", f"{YESTERDAY} 09:00:00", 1000.0)
     bundle = credit_row(db_path, "R2", 1510.0, TODAY)
     q = tap(f"credit:pick:{bundle}:{other}", 902)
     lines = edited(q).split("\n")
+    # `other` is fully paid by the $1,510 credit ($1,000 used), so no
+    # dashboard line for it; the remaining $510 is offered against `sid`.
     assert lines[-1] == "剩 $510 · 可能係："
     assert [b.callback_data for b in edited_buttons(q)] == [f"credit:link:{bundle}:{sid}"]
     assert edited_buttons(q)[0].text.endswith("· $510")

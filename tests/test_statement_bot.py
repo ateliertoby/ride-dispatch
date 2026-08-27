@@ -329,10 +329,9 @@ def test_fallback_when_ocr_missing(db_path, monkeypatch):
 
 def test_no_handler_marks_a_batch_paid_by_hand(db_path):
     """A batch becomes paid by money allocated to it, so the bot offers no
-    command and no handler that sets the date itself.  The names that remain
-    are the tick card's, which records what the platform has NOT paid for."""
-    assert [n for n in dir(bot) if "paid" in n] == [
-        "mark_unpaid", "pending_unpaid", "unpaid_markup"]
+    command and no handler that sets the date itself.  Round 4 moved the tick
+    card to the dashboard, so no paid-related symbols remain in the bot."""
+    assert [n for n in dir(bot) if "paid" in n] == []
     assert "paid" not in {c.command for c in _commands()}
 
 
