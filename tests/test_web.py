@@ -724,7 +724,25 @@ def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
     assert by_ref["C1"]["batches"] == [{"id": paid, "confirmed_amount": 540.0,
                                         "amount": 540.0, "state": "paid",
                                         "dates": ["2026-07-01"], "orders": 1,
-                                        "has_image": False}]
+                                        "has_image": False, "outstanding": 0.0}]
+
+
+def test_credits_endpoint_carries_payer_and_what_a_batch_is_still_owed(client):
+    """The credit sheet names who paid and, for a batch the credit only partly
+    covered, what that batch is still owed; neither is re-derived on the page."""
+    from ride_dispatch.db import allocate
+    seed_ride("R1", scheduled="2026-07-01 09:00:00", price=500.0, banner=40.0)
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=800.0, banner=0.0)
+    whole = create_batch(["R1"], confirmed=540)
+    short = create_batch(["R2"], confirmed=800, settled_on="2026-07-04")
+    cid = seed_credit(amount=1040.0, value_date="2026-07-05", ref="C1")
+    allocate(web.DB_PATH, cid, whole)
+    allocate(web.DB_PATH, cid, short, 500.0)
+
+    credit = client.get("/api/credits?platform=ride").get_json()["credits"][0]
+    assert credit["payer"] == "A B**** C***** L"
+    assert [(b["id"], b["state"], b["outstanding"]) for b in credit["batches"]] == [
+        (whole, "paid", 0.0), (short, "partial", 300.0)]
 
 
 def test_credits_endpoint_reports_the_batch_that_has_a_statement_image(client):
@@ -791,7 +809,7 @@ def test_a_credits_row_carries_what_it_paid_of_each_batch(client):
     batches = client.get("/api/credits").get_json()["credits"][0]["batches"]
     assert batches == [{"id": settlement_id, "confirmed_amount": 3000.0, "amount": 2540.0,
                         "state": "partial", "dates": ["2026-07-01"], "orders": 1,
-                        "has_image": False}]
+                        "has_image": False, "outstanding": 460.0}]
 
 
 def test_delete_settlement_endpoint(client):

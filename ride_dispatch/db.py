@@ -1159,6 +1159,7 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
             for b in c["batches"]:
                 total = b["confirmed_amount"] or 0.0
                 got = received[b["id"]]
+                b["outstanding"] = round(max(total - got, 0.0), 2)
                 b["state"] = ("paid" if total - got <= CENT else
                               "partial" if got > CENT else "awaiting")
         return credits

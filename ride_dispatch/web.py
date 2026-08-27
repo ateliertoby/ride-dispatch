@@ -305,7 +305,7 @@ def api_credits():
         "platform": platform,
         "counts": counts,
         "sums": {k: round(v, 2) for k, v in sums.items()},
-        "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "allocated",
+        "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "payer", "allocated",
                                        "remaining", "state", "archived_reason", "memo",
                                        "batches")} for c in credits],
     })
