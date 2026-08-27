@@ -24,6 +24,8 @@ CHAT = 123
 YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 TWO_DAYS = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
 TODAY = datetime.now().strftime("%Y-%m-%d")
+MONTHS_AGO = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+LAST_MONTH = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
 
 def make_order(order_id, scheduled, service_type="送机"):
@@ -444,9 +446,9 @@ def context_with_file(data=b"\xff\xd8img"):
     return ctx
 
 
-def confirm_a_statement(db_path, monkeypatch, order_id, amount):
-    seed(db_path, order_id, f"{YESTERDAY} 09:00:00", amount)
-    use_statement(monkeypatch, stmt_for({YESTERDAY: [(order_id, amount)]}, amount))
+def confirm_a_statement(db_path, monkeypatch, order_id, amount, when=YESTERDAY):
+    seed(db_path, order_id, f"{when} 09:00:00", amount)
+    use_statement(monkeypatch, stmt_for({when: [(order_id, amount)]}, amount))
     upd, msg = photo_update()
     asyncio.run(bot.handle_statement_image(upd, context_with_file()))
     cb, q = callback_update("stmt:confirm")
@@ -466,7 +468,7 @@ def test_stmt_confirm_says_the_batch_is_paid_in_full(db_path, monkeypatch):
 
 def test_stmt_confirm_offers_candidates(db_path, monkeypatch):
     insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2950.0, "currency": "HKD",
-                            "value_date": "2026-08-24", "payer": None, "memo": None,
+                            "value_date": TODAY, "payer": None, "memo": None,
                             "email_id": None, "received_at": None, "recorded_at": None})
     q = confirm_a_statement(db_path, monkeypatch, "A1", 1450.0)
     reply = q.message.reply_text.call_args.args[0]
@@ -474,7 +476,7 @@ def test_stmt_confirm_offers_candidates(db_path, monkeypatch):
     markup = q.message.reply_text.call_args.kwargs["reply_markup"]
     buttons = [b for row in markup.inline_keyboard for b in row]
     assert [b.callback_data for b in buttons] == ["credit:pick:1:1"]
-    assert buttons[0].text == "入數 $2,950 · 08-24"
+    assert buttons[0].text == f"入數 $2,950 · {credits.md(TODAY)}"
 
 
 def test_pick_appends_to_the_settled_reply_instead_of_replacing_it(db_path):
@@ -527,14 +529,16 @@ def test_a_refused_pick_leaves_the_settled_reply_alone(db_path):
 
 def test_stmt_confirm_offers_a_credit_that_would_pay_only_part(db_path, monkeypatch):
     """The batch-side card says what a tap would leave the batch owed, the same
-    way the credit-side one does."""
+    way the credit-side one does.  The money arrived a month after the service,
+    which is too late for the window to prove it: it stays a suggestion the
+    operator picks instead of an answer the tap acts on by itself."""
     insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 900.0, "currency": "HKD",
-                            "value_date": "2026-08-24", "payer": None, "memo": None,
+                            "value_date": LAST_MONTH, "payer": None, "memo": None,
                             "email_id": None, "received_at": None, "recorded_at": None})
-    q = confirm_a_statement(db_path, monkeypatch, "A1", 1450.0)
+    q = confirm_a_statement(db_path, monkeypatch, "A1", 1450.0, when=MONTHS_AGO)
     markup = q.message.reply_text.call_args.kwargs["reply_markup"]
     buttons = [b for row in markup.inline_keyboard for b in row]
-    assert buttons[0].text == "入數 $900 · 08-24（差 $550）"
+    assert buttons[0].text == f"入數 $900 · {credits.md(LAST_MONTH)}（差 $550）"
 
 
 def test_stmt_confirm_reply_is_unchanged_without_credits(db_path, monkeypatch):
@@ -598,6 +602,17 @@ def test_statement_card_says_the_money_has_not_arrived(db_path, monkeypatch):
     msg = card_for(monkeypatch, stmt_for({YESTERDAY: [("A1", 1450.0)]}, 1450.0))
     assert reply_text(msg).endswith("\n未收到呢筆數")
     assert [b.text for b in reply_buttons(msg)] == ["確認結算 · 1 程 · $1,450", "唔確認"]
+    assert bot.pending_statements[777][4] is None
+
+
+def test_statement_card_will_not_offer_a_credit_older_than_the_service(db_path, monkeypatch):
+    """Case C again, with the queue full of old unmatched money: a credit that
+    predates the legs is not what paid for them, so the card still says the
+    money has not arrived rather than listing June's leftovers."""
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
+    credit_row(db_path, "R1", 1450.0, MONTHS_AGO)
+    msg = card_for(monkeypatch, stmt_for({YESTERDAY: [("A1", 1450.0)]}, 1450.0))
+    assert reply_text(msg).endswith("\n未收到呢筆數")
     assert bot.pending_statements[777][4] is None
 
 
