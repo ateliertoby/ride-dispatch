@@ -541,6 +541,14 @@ def seed_leg(db_path, order_id, service_type="接机", scheduled="2026-08-17 09:
     return order_id
 
 
+def seed_credit(db_path, amount, value_date="2026-08-22", ref="R1", platform="ride"):
+    from ride_dispatch.db import insert_credit
+    return insert_credit(db_path, {"ref": ref, "platform": platform, "amount": amount,
+                                   "currency": "HKD", "value_date": value_date,
+                                   "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
+                                   "email_id": None, "received_at": None, "recorded_at": None})
+
+
 def settlement_row(db_path, settlement_id):
     from ride_dispatch.db import _conn
     with _conn(db_path) as conn:
@@ -668,26 +676,30 @@ def test_create_settlement_didi_expects_tunnel(db_path):
     assert settlement_row(db_path, sid)["expected_amount"] == 230.0
 
 
-def test_mark_settlement_paid(db_path):
-    from ride_dispatch.db import create_settlement, mark_settlement_paid
+def test_link_credit_sets_paid_on_from_the_bank_date(db_path):
+    from ride_dispatch.db import create_settlement, link_credit
     seed_leg(db_path, "A1")
     sid = create_settlement(db_path, "ride", ["A1"], 500.0, "2026-08-20", now=NOW)
-    assert mark_settlement_paid(db_path, sid, "2026-08-22") is True
+    cid = seed_credit(db_path, 500.0)
+    link_credit(db_path, cid, sid)
     assert settlement_row(db_path, sid)["paid_on"] == "2026-08-22"
 
 
-def test_mark_settlement_paid_again_keeps_first_date(db_path):
-    from ride_dispatch.db import create_settlement, mark_settlement_paid
+def test_link_credit_refuses_a_batch_that_already_has_one(db_path):
+    from ride_dispatch.db import create_settlement, link_credit
     seed_leg(db_path, "A1")
     sid = create_settlement(db_path, "ride", ["A1"], 500.0, "2026-08-20", now=NOW)
-    mark_settlement_paid(db_path, sid, "2026-08-22")
-    assert mark_settlement_paid(db_path, sid, "2026-08-25") is True
+    link_credit(db_path, seed_credit(db_path, 500.0), sid)
+    other = seed_credit(db_path, 500.0, value_date="2026-08-25", ref="R2")
+    with pytest.raises(ValueError, match="已經對"):
+        link_credit(db_path, other, sid)
     assert settlement_row(db_path, sid)["paid_on"] == "2026-08-22"
 
 
-def test_mark_settlement_paid_unknown_id(db_path):
-    from ride_dispatch.db import mark_settlement_paid
-    assert mark_settlement_paid(db_path, 999, "2026-08-22") is False
+def test_link_credit_unknown_batch(db_path):
+    from ride_dispatch.db import link_credit
+    with pytest.raises(ValueError, match="搵唔到批次"):
+        link_credit(db_path, seed_credit(db_path, 500.0), 999)
 
 
 def test_delete_settlement_unlinks_orders(db_path):
@@ -771,7 +783,7 @@ def test_get_settlement_unknown_id(db_path):
 
 
 def test_get_orders_by_date_carries_settlement_dates(db_path):
-    from ride_dispatch.db import create_settlement, mark_settlement_paid
+    from ride_dispatch.db import create_settlement, link_credit
     seed_leg(db_path, "A1")
     rows = get_orders_by_date(db_path, "2026-08-17")
     assert rows[0]["settlement_id"] is None
@@ -781,7 +793,7 @@ def test_get_orders_by_date_carries_settlement_dates(db_path):
     rows = get_orders_by_date(db_path, "2026-08-17")
     assert rows[0]["settlement_settled_on"] == "2026-08-20"
     assert rows[0]["settlement_paid_on"] is None
-    mark_settlement_paid(db_path, sid, "2026-08-22")
+    link_credit(db_path, seed_credit(db_path, 500.0), sid)
     assert get_orders_by_date(db_path, "2026-08-17")[0]["settlement_paid_on"] == "2026-08-22"
 
 
@@ -804,12 +816,16 @@ def test_get_settle_month_counts_all_platforms_all_time(db_path):
     assert data["totals"]["awaiting"] == 480.0
 
 
-def test_get_settle_month_awaiting_drops_once_paid(db_path):
-    from ride_dispatch.db import get_settle_month, create_settlement, mark_settlement_paid
+def test_get_settle_month_awaiting_drops_once_a_credit_is_linked(db_path):
+    from ride_dispatch.db import get_settle_month, create_settlement, link_credit
     seed_leg(db_path, "A1")
     sid = create_settlement(db_path, "ride", ["A1"], 500.0, "2026-08-20", now=NOW)
-    mark_settlement_paid(db_path, sid, "2026-08-22")
-    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["totals"]["awaiting"] == 0
+    cid = seed_credit(db_path, 500.0)
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["credits"]["unallocated"] == 1
+    link_credit(db_path, cid, sid)
+    month = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert month["totals"]["awaiting"] == 0
+    assert month["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
 
 
 def test_get_settle_month_filters_by_platform_and_month(db_path):

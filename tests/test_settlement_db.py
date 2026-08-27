@@ -4,9 +4,10 @@ from datetime import datetime
 
 import pytest
 
+from ride_dispatch import db as db_module
 from ride_dispatch.db import (
     init_db, save_order, update_price, cancel_order, create_settlement, delete_settlement,
-    get_settlement, get_settle_month, mark_settlement_paid, find_awaiting_settlements,
+    get_settlement, get_settle_month, awaiting_batches, insert_credit, link_credit,
     settlement_candidates, statement_image_path, image_extension,
 )
 from ride_dispatch.parser import Order
@@ -93,21 +94,31 @@ def test_delete_removes_image_file(db_path):
     assert not os.path.exists(path)
 
 
-def test_find_awaiting_by_amount(db_path):
+def test_awaiting_batches_drops_a_batch_once_a_credit_is_linked(db_path):
     seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
     seed(db_path, "A2", "2026-08-24 09:00:00", 210.0)
     seed(db_path, "A3", "2026-08-25 09:00:00", 280.0)
     s1 = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
     s2 = create_settlement(db_path, "ride", ["A2"], 210.0, "2026-08-26", now=NOW)
     s3 = create_settlement(db_path, "ride", ["A3"], 280.0, "2026-08-26", now=NOW)
-    mark_settlement_paid(db_path, s3, "2026-08-26")
-    all_awaiting = find_awaiting_settlements(db_path)
-    assert [b["id"] for b in all_awaiting] == [s1, s2]
-    assert all_awaiting[0]["orders"][0]["order_id"] == "A1"
-    assert [b["id"] for b in find_awaiting_settlements(db_path, 280.0)] == [s1]
-    assert [b["id"] for b in find_awaiting_settlements(db_path, 280.004)] == [s1]
-    assert find_awaiting_settlements(db_path, 280.01) == []
-    assert find_awaiting_settlements(db_path, 999.0) == []
+    cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 280.0,
+                                  "currency": "HKD", "value_date": "2026-08-26",
+                                  "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
+                                  "email_id": None, "received_at": None, "recorded_at": None})
+    link_credit(db_path, cid, s3)
+    awaiting = awaiting_batches(db_path, "ride")
+    assert [b["id"] for b in awaiting] == [s1, s2]
+    assert awaiting[0]["orders"][0]["order_id"] == "A1"
+
+
+def test_no_db_function_marks_a_batch_paid_by_hand():
+    """paid_on is the bank's value date and link_credit is the only writer.
+
+    Asserted over the module surface rather than over the names that used to
+    exist, so a second hand-written mark under any name fails here too.
+    """
+    assert [n for n in dir(db_module) if "paid" in n] == []
+    assert [n for n in dir(db_module) if "awaiting" in n] == ["awaiting_batches"]
 
 
 def test_candidates_window_and_settleable_tail(db_path):
