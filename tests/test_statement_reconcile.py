@@ -131,6 +131,45 @@ def test_truncated_id_binds_to_the_one_order_it_starts():
     assert corrected_json(s, r)["days"][0]["rows"][0]["read_as"] == "VBK6A85D6FB8089"
 
 
+def test_a_compressed_image_mangles_a_code_and_it_still_binds():
+    """Telegram's photo compression is the operator's normal path, and on it
+    RapidOCR read K as X and B as 8 inside an alphanumeric code — letters the
+    digit fixes must not touch.  The original image binds by exact prefix; the
+    compressed one has to bind on the same opening within two edits."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBX6A85D6F8808930A", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    r = reconcile(s, [order("VBK6A85D6FB808930ABCD", "2026-08-23 09:00:00", 280.0)], NOW)
+    e = r.entries[0]
+    assert e.kind == "matched" and e.order_id == "VBK6A85D6FB808930ABCD"
+    assert r.settle_ids == ["VBK6A85D6FB808930ABCD"]
+    # What was actually read is kept, so batch detail can show it.
+    assert corrected_json(s, r)["days"][0]["rows"][0]["read_as"] == "VBX6A85D6F8808930A"
+
+
+def test_two_codes_within_the_bound_leave_the_line_unknown():
+    """A prefix is already partial evidence: two openings that both nearly
+    agree is not enough to batch money against, even though one is nearer."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBX6A85D6F8808930A", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    orders = [order("VBK6A85D6FB808930ABCD", "2026-08-23 09:00:00", 280.0),   # 2 edits
+              order("VBX6A85D6F8808931AWXY", "2026-08-23 10:00:00", 280.0)]   # 1 edit
+    assert reconcile(s, orders, NOW).entries[0].kind == "unknown"
+
+
+def test_a_code_three_edits_out_stays_unknown():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBX6A85D6F8808930A", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    r = reconcile(s, [order("VXX6A85D6F0808931ABCD", "2026-08-23 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "unknown"
+
+
+def test_a_mangled_code_only_binds_on_the_statements_dates():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "VBX6A85D6F8808930A", 280.0, truncated=True)], 1, 280.0)],
+             total=280.0)
+    r = reconcile(s, [order("VBK6A85D6FB808930ABCD", "2026-08-10 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "unknown"
+
+
 def test_two_orders_sharing_the_prefix_leave_the_line_unknown():
     s = stmt([day("2026-08-23", [row("2026-08-23", "VBK6A85D6FB8089", 280.0, truncated=True)], 1, 280.0)],
              total=280.0)
