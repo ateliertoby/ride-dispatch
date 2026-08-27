@@ -197,34 +197,27 @@
   }
   .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
 
-  /* ---- credits sheet ----
-     One credit per row: when the bank paid, how much, and whether a statement
-     accounts for it. The batch is a way out of the row, so it is the only
-     control on it. */
-  .crow {
-    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
-    border-bottom: 1px solid var(--line); padding: 11px 2px;
-    font-size: 14px; font-variant-numeric: tabular-nums;
+  /* ---- credit and queue sheets ---- */
+  /* A note qualifies the summary row above it rather than stating a figure of
+     its own, so it hangs off that row instead of starting a new one. */
+  .sub-note { font-size: 12px; padding: 0 2px 8px; margin-top: -4px; }
+  .sub-note.warn { color: var(--amber); }
+  .sub-note.mute { color: var(--text-3); }
+  /* The queue is a work list rather than a record: every row is a credit still
+     to be accounted for and the way into it, so the whole row is the control. */
+  .qrow {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 46px;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 11px 2px; text-align: left; cursor: pointer; font-family: inherit;
+    color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums;
   }
-  .crow.gone { color: var(--text-3); }
-  /* The same three answers to "is this money accounted for" the calendar uses. */
-  .cstate.open { color: var(--amber); font-weight: 650; }
-  .cstate.done { color: var(--green); font-weight: 650; }
-  .cbatch {
-    flex-shrink: 0; background: var(--key-bg); border: none; border-radius: 8px;
-    padding: 6px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
-    cursor: pointer;
-  }
-  .cbatch:active { background: var(--key-press); }
-  .crow a { color: var(--amber); text-decoration: none; font-size: 12px; }
-  .cfold {
-    width: 100%; background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 13px 2px; text-align: left; font-family: inherit; font-size: 13px;
-    color: var(--text-3); cursor: pointer;
-  }
-  .cfold:active { background: var(--surface-press); }
-  /* The ledger count in the header is a way into the sheet, so it has to look
-     like one without turning the summary line into a row of controls. */
+  .qrow:active { background: var(--surface-press); }
+  .qrow .t { flex: 1; min-width: 0; }
+  .qrow .s { color: var(--amber); font-weight: 650; font-size: 13px; }
+  .qrow .c { color: var(--text-3); font-size: 17px; }
+  /* The count of unmatched credits in the header is the way into the queue, so
+     it has to look like one without turning the summary line into a row of
+     controls. */
   .sum-link {
     background: none; border: none; padding: 0; font: inherit; color: inherit;
     cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
@@ -313,9 +306,6 @@ let curMonth = fmtDate(new Date()).slice(0, 7);
 let NOW = '';
 let TODAY = '';
 let BATCH_OF = new Map();
-// Archived credits are ones already dealt with, so they stay folded away until
-// asked for. The fold outlives a repaint.
-let archOpen = false;
 // Which batches have their order list unfolded. Page state rather than DOM
 // state, so an SSE repaint mid-read does not fold the list away.
 let foldOpen = new Set();
@@ -343,6 +333,10 @@ function expectedOf(o) {
 }
 function orderDate(o) { return (o.scheduled_time || '').split(' ')[0]; }
 function batchById(id) { return data.settlements.find(b => b.id === +id) || null; }
+function creditById(id) { return ledger.credits.find(c => c.id === +id) || null; }
+// The work queue: the credits no statement accounts for yet. Oldest value date
+// first, the order list_credits returns -- those are the ones being chased.
+function openCredits() { return ledger.credits.filter(c => c.state === 'open' || c.state === 'partial'); }
 function batchOf(orderId) { return BATCH_OF.get(orderId) || null; }
 function reindex() {
   // A batch can straddle months, so its own member list is the only place legs
@@ -496,7 +490,8 @@ async function load() {
 // show the new state, and a batch that no longer exists cannot be shown at all.
 function repaintOpenView() {
   if (!views.length) return;
-  views = views.filter(v => (v.kind !== 'batch' && v.kind !== 'undo') || batchById(v.id));
+  views = views.filter(v => ((v.kind !== 'batch' && v.kind !== 'undo') || batchById(v.id)) &&
+                            (v.kind !== 'credit' || creditById(v.id)));
   if (!views.length) { closeSheet(); return; }
   paintView();
 }
@@ -515,12 +510,13 @@ function renderHeader() {
   // Totals span the whole book, not the month on screen: old unsettled days
   // are exactly the ones the operator is here to clear. The server computes
   // them, so the chips and the calendar cannot disagree about the same money.
-  const n = ledger.counts;
-  const total = n.open + n.partial + n.done + n.archived;
+  // Only what is still to be done: a matched or archived credit is finished
+  // business and is read off the calendar by its value date instead.
+  const open = openCredits();
   document.getElementById('summary').innerHTML =
     '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
-    (total ? ' · <button class="sum-link" data-credits="1">入數 ' + total + ' 筆（已對 ' + n.done +
-      ' · 未對 ' + (n.open + n.partial) + (n.archived ? ' · 收埋 ' + n.archived : '') + '）</button>' : '');
+    (open.length ? ' · <button class="sum-link" data-credits="1">入數未對 ' + open.length +
+      ' 筆 $' + $(ledger.sums.open) + '</button>' : '');
 }
 
 function renderChips() {
@@ -651,11 +647,8 @@ function curView() { return views[views.length - 1] || null; }
 function viewHtml(v) {
   if (v.kind === 'day') return dayViewHtml(v);
   if (v.kind === 'undo') return undoViewHtml(v);
-  if (v.kind === 'credits') return creditsViewHtml();
-  // Placeholder until the credit sheet and the 未對 queue land.
-  if (v.kind === 'credit' || v.kind === 'queue') {
-    return sheetHead('入數', '') + '<button class="ghost-btn" data-back="1">收埋</button>';
-  }
+  if (v.kind === 'credit') return creditViewHtml(v);
+  if (v.kind === 'queue') return queueViewHtml();
   return batchViewHtml(v);
 }
 // keepScroll is for a repaint the operator asked for from inside the sheet
@@ -864,47 +857,55 @@ function batchViewHtml(v) {
     '<button class="ghost-btn" data-back="1">收埋</button>';
 }
 
-// ---- credits sheet ----
-// The ledger as a list: how much came in, how much of it a statement accounts
-// for, and which credits are still waiting for one. Oldest first among the
-// unaccounted ones -- those are the ones the operator is here to clear -- and
-// newest first among the settled, which are read as a record.
-function creditRowHtml(c) {
-  const state = c.state === 'done' ? ['已對', 'done'] : ['未對', 'open'];
-  let text = c.value_date.slice(5) + ' · $' + $(c.amount) + ' · ';
-  let cls = 'crow';
-  let head;
-  if (c.state === 'archived') {
-    cls += ' gone';
-    head = esc(text + '收埋' + (c.archived_reason ? '（' + c.archived_reason + '）' : ''));
-  } else {
-    head = esc(text) + '<span class="cstate ' + state[1] + '">' + state[0] + '</span>' +
-      (c.state === 'partial' ? esc(' · 剩 $' + $(c.remaining)) : '');
-  }
-  // The amount is shown only when the credit did not pay the whole batch:
-  // otherwise it would repeat the figure the row already carries.
-  const batches = c.batches.map(b =>
-    '<button class="cbatch" data-bl="' + b.id + '">批次 ' + esc(dateSpanLabel(b.dates)) +
-    ' · ' + b.orders + ' 程' +
-    (Math.abs(b.amount - b.confirmed_amount) >= 0.005 ? ' · $' + $(b.amount) : '') + '</button>' +
-    (b.has_image ? '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>' : '')
-  ).join('');
-  return '<div class="' + cls + '"><span>' + head + '</span>' + batches + '</div>';
+// ---- credit sheet ----
+// One bank credit: how much arrived, who sent it, and which batch it was read
+// against. The batch row hands the operator on to that batch, and says what it
+// is still owed, because a credit covering a batch in full is not the same as
+// one that left it short.
+function creditViewHtml(v) {
+  const c = creditById(v.id);
+  if (!c) return '';
+  let state, extra = '';
+  if (c.state === 'done') state = '<div class="hero-s paid">已對</div>';
+  else if (c.state === 'partial') state = '<div class="hero-s warn">已對 $' + $(c.allocated) +
+    ' · 剩 $' + $(c.remaining) + '</div>';
+  else if (c.state === 'open') {
+    state = '<div class="hero-s warn">未對</div>';
+    extra = '<div class="sub-note mute">冇 statement 對得上</div>';
+  } else state = '<div class="hero-s">收埋' +
+    (c.archived_reason ? '（' + esc(c.archived_reason) + '）' : '') + '</div>';
+  // The label comes from the entry's own dates: the batch itself can sit in a
+  // month the page has not loaded.
+  const rows = c.batches.map(b =>
+    '<button class="sum-row link" data-bl="' + b.id + '">' +
+    '<span class="k">批次 ' + esc(spanLabelOf(b.dates)) + '</span>' +
+    '<span class="v">' + b.orders + ' 程 · $' + $(b.amount) + '<span class="c">&rsaquo;</span></span></button>' +
+    (b.state === 'partial' ? '<div class="sub-note warn">批次仲差 $' + $(b.outstanding) + '</div>' : ''));
+  rows.push('<div class="sum-row"><span class="k">Ref</span><span class="v">' + esc(c.ref) + '</span></div>');
+  if (c.memo) rows.push('<div class="sum-row"><span class="k">備註</span><span class="v">' +
+    esc(c.memo) + '</span></div>');
+  // /api/credits scopes the ledger to one platform rather than stamping each
+  // credit with it, so the platform on screen is the credit's platform.
+  return sheetHead('入數 ' + esc(mdLabel(c.value_date)),
+      esc(platLabel(curPlat)) + (c.payer ? ' · ' + esc(c.payer) : '')) +
+    '<div class="hero"><div class="hero-k">到帳</div>' +
+    '<div class="hero-v">$' + $(c.amount) + '</div>' + state + '</div>' +
+    extra +
+    '<div class="sum-rows">' + rows.join('') + '</div>' +
+    '<button class="ghost-btn" data-back="1">收埋</button>';
 }
-function creditsViewHtml() {
-  const all = ledger.credits;
-  const open = all.filter(c => c.state === 'open' || c.state === 'partial');
-  const done = all.filter(c => c.state === 'done').reverse();
-  const gone = all.filter(c => c.state === 'archived');
-  const sub = '未對 ' + open.length + ' 筆 $' + $(ledger.sums.open) +
-    ' · 已對 ' + done.length + ' 筆 $' + $(ledger.sums.done);
-  return sheetHead('入數', esc(platLabel(curPlat)) + ' · ' + sub) +
-    (all.length ? '' : '<div class="empty">未有入數紀錄</div>') +
-    open.map(creditRowHtml).join('') +
-    done.map(creditRowHtml).join('') +
-    (gone.length ? '<button class="cfold" data-arch="1">收埋 ' + gone.length + ' 筆 ' +
-      (archOpen ? '&#9652;' : '&#9662;') + '</button>' : '') +
-    (archOpen ? gone.map(creditRowHtml).join('') : '') +
+
+// Only the work queue is a list: a matched or archived credit is found on the
+// calendar by its value date, so listing it again would only bury the ones
+// still waiting for a statement.
+function queueViewHtml() {
+  const open = openCredits();
+  return sheetHead('入數未對', esc(platLabel(curPlat)) + ' · ' + open.length + ' 筆 $' + $(ledger.sums.open)) +
+    (open.length ? '' : '<div class="empty">冇未對嘅入數</div>') +
+    open.map(c => '<button class="qrow" data-credit="' + c.id + '">' +
+      '<span class="t">' + esc(mdSlash(c.value_date)) + ' · $' + $(c.amount) + '</span>' +
+      '<span class="s">未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : '') + '</span>' +
+      '<span class="c">&rsaquo;</span></button>').join('') +
     '<button class="ghost-btn" data-back="1">收埋</button>';
 }
 
@@ -946,7 +947,7 @@ async function undoBatch(id) {
 async function openBatch(id) {
   if (!batchById(id)) {
     const b = ledger.credits.flatMap(c => c.batches).find(x => x.id === id);
-    const month = b && b.dates.length ? b.dates[0].slice(0, 7) : '';
+    const month = b && b.dates.length ? b.dates[b.dates.length - 1].slice(0, 7) : '';
     if (!month || month === curMonth) return;
     curMonth = month;
     await load();
@@ -983,7 +984,7 @@ document.getElementById('chips').addEventListener('click', e => {
   load();
 });
 document.getElementById('summary').addEventListener('click', e => {
-  if (e.target.closest('[data-credits]')) openView({ kind: 'credits' });
+  if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
 });
 document.getElementById('grid').addEventListener('click', e => {
   const bar = e.target.closest('[data-bar]');
@@ -1022,7 +1023,6 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (cr) { pushView({ kind: 'credit', id: +cr.dataset.credit }); return; }
   const link = e.target.closest('[data-bl]');
   if (link) { openBatch(+link.dataset.bl); return; }
-  if (e.target.closest('[data-arch]')) { archOpen = !archOpen; paintView(); }
 });
 
 // ---- unpaid tick interaction ----
