@@ -12,13 +12,13 @@ from .db import (
     init_db,
     resolve_db_path,
     count_active_orders,
-    create_settlement,
     delete_settlement,
     diff_order_against_row,
     get_orders_by_date,
     get_order_by_id,
     get_settle_month,
     get_settlement,
+    list_credits,
     save_or_revive_order,
     save_quick_order,
     statements_dir,
@@ -27,7 +27,6 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
-from .credits import resolve_batch
 from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
@@ -90,23 +89,9 @@ def _parse_money(value, field: str) -> tuple[float | None, tuple | None]:
 
 
 # Zero padding is enforced on top of strptime, which accepts "2026-7-1".
-# Dates are stored and compared as strings (prefix match for a month, plain
-# ordering for a day), so an unpadded value matches and sorts wrong instead
-# of failing loudly.
-_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A month is compared as a string prefix, so an unpadded value matches nothing
+# and reads as an empty month instead of failing loudly.
 _MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
-
-
-def _parse_day(value, field: str) -> tuple[str | None, tuple | None]:
-    day = str(value)
-    err = (jsonify({"error": f"{field} must be YYYY-MM-DD"}), 400)
-    if not _DAY_RE.fullmatch(day):
-        return None, err
-    try:
-        datetime.strptime(day, "%Y-%m-%d")
-    except ValueError:
-        return None, err
-    return day, None
 
 
 @app.post("/api/orders/parse")
@@ -290,32 +275,33 @@ def api_settle():
     return jsonify({"month": month, "platform": platform, **data})
 
 
-@app.post("/api/settlements")
-def api_create_settlement():
-    body = request.get_json(silent=True) or {}
-    platform = body.get("platform")
+# A batch is created by the bot's statement flow and nowhere else: every batch
+# has to trace back to the statement image it was read from, and on to the
+# orders that statement lists.  The page can still undo one.
+
+
+@app.get("/api/credits")
+def api_credits():
+    platform = request.args.get("platform", "ride")
     if platform not in PLATFORMS:
         return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
-    order_ids = body.get("order_ids")
-    if not isinstance(order_ids, list) or not order_ids:
-        return jsonify({"error": "order_ids required"}), 400
-    confirmed, cerr = _parse_money(body.get("confirmed_amount"), "confirmed_amount")
-    if cerr:
-        return cerr
-    settled_on, derr = _parse_day(body.get("settled_on") or date.today().isoformat(), "settled_on")
-    if derr:
-        return derr
-    try:
-        settlement_id = create_settlement(
-            DB_PATH, platform, [str(i) for i in order_ids], confirmed, settled_on
-        )
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    # A batch created here is matched against the ledger exactly as one created
-    # from a statement in the bot is: paid means linked, wherever the batch was
-    # born.
-    m = resolve_batch(DB_PATH, settlement_id)
-    return jsonify({"id": settlement_id, "bank_credit_id": m.linked[0] if m.linked else None}), 201
+    credits = list_credits(DB_PATH, platform)
+    counts = {state: 0 for state in ("open", "partial", "done", "archived")}
+    sums = {"open": 0.0, "done": 0.0}
+    for c in credits:
+        counts[c["state"]] += 1
+        if c["state"] in ("open", "partial"):
+            sums["open"] += c["remaining"]
+        elif c["state"] == "done":
+            sums["done"] += c["amount"]
+    return jsonify({
+        "platform": platform,
+        "counts": counts,
+        "sums": {k: round(v, 2) for k, v in sums.items()},
+        "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "linked",
+                                       "remaining", "state", "archived_reason", "memo",
+                                       "batches")} for c in credits],
+    })
 
 
 @app.delete("/api/settlements/<int:settlement_id>")

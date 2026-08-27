@@ -488,11 +488,13 @@ def settle(client, month="2026-07", platform="ride"):
     return res.get_json()
 
 
-def create_batch(client, order_ids, platform="ride", confirmed=540, settled_on="2026-07-03"):
-    return client.post("/api/settlements", json={
-        "platform": platform, "order_ids": order_ids,
-        "confirmed_amount": confirmed, "settled_on": settled_on,
-    })
+# A batch is born from a statement image in the bot and nowhere else, so these
+# tests create one the way that flow does rather than through an endpoint.
+def create_batch(order_ids, platform="ride", confirmed=540, settled_on="2026-07-03",
+                 statement=None):
+    from ride_dispatch.db import create_settlement
+    return create_settlement(web.DB_PATH, platform, order_ids, confirmed, settled_on,
+                             statement=statement)
 
 
 def test_settle_shape(client):
@@ -513,7 +515,7 @@ def test_settle_shape(client):
 def test_settle_totals_follow_the_batch(client):
     seed_ride("R1")
     seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
-    create_batch(client, ["R1"], confirmed=530)
+    create_batch(["R1"], confirmed=530)
     data = settle(client)
     assert data["counts"]["ride"] == 1
     assert data["totals"] == {"unsettled": 300.0, "awaiting": 530.0}
@@ -527,7 +529,7 @@ def test_settle_totals_follow_the_batch(client):
 def test_settle_returns_straddling_batch_whole(client):
     seed_ride("JUN30", scheduled="2026-06-30 20:00:00", banner=0.0)
     seed_ride("JUL01", scheduled="2026-07-01 09:00:00", banner=0.0)
-    create_batch(client, ["JUN30", "JUL01"], confirmed=1000, settled_on="2026-07-02")
+    create_batch(["JUN30", "JUL01"], confirmed=1000, settled_on="2026-07-02")
     data = settle(client)
     assert [o["order_id"] for o in data["orders"]] == ["JUL01"]
     assert [o["order_id"] for o in data["settlements"][0]["orders"]] == ["JUN30", "JUL01"]
@@ -547,62 +549,23 @@ def test_settle_defaults_to_this_month_and_ride(client):
     assert res.get_json()["platform"] == "ride"
 
 
-def test_create_settlement_endpoint(client):
-    seed_ride("R1")
-    res = create_batch(client, ["R1"])
-    assert res.status_code == 201
-    settlement_id = res.get_json()["id"]
-    batch = settle(client)["settlements"][0]
-    assert batch["id"] == settlement_id
-    assert batch["settled_on"] == "2026-07-03"
-    assert batch["paid_on"] is None
-
-
-def test_create_settlement_defaults_settled_on_to_today(client):
-    from datetime import date as _date
+def test_settlements_cannot_be_created_from_the_page(client):
+    """A batch exists only because a statement image was read, so it traces
+    back to that image and on to the orders the statement lists.  The page
+    ticking legs together left no such trail, so it is gone rather than
+    hidden."""
     seed_ride("R1")
     res = client.post("/api/settlements", json={
         "platform": "ride", "order_ids": ["R1"], "confirmed_amount": 540,
     })
-    assert res.status_code == 201
-    assert settle(client)["settlements"][0]["settled_on"] == _date.today().isoformat()
-
-
-def test_create_settlement_rejects_bad_input(client):
-    seed_ride("R1")
-    base = {"platform": "ride", "order_ids": ["R1"], "confirmed_amount": 540, "settled_on": "2026-07-03"}
-    assert client.post("/api/settlements", json={**base, "platform": "taxi"}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "order_ids": []}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "order_ids": "R1"}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "confirmed_amount": "abc"}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "confirmed_amount": -1}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "settled_on": "2026-13-01"}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "settled_on": "2026-2-30"}).status_code == 400
-    assert client.post("/api/settlements", json={**base, "settled_on": "2026-7-3"}).status_code == 400
+    assert res.status_code in (404, 405)
     assert settle(client)["settlements"] == []
-
-
-def test_create_settlement_rejects_unsettleable_order(client):
-    from datetime import date as _date, timedelta
-    seed_ride("R1")
-    tomorrow = (_date.today() + timedelta(days=1)).isoformat()
-    seed_ride("FUTURE", scheduled=f"{tomorrow} 09:00:00")
-    res = create_batch(client, ["R1", "FUTURE"], confirmed=1080)
-    assert res.status_code == 400
-    assert "FUTURE" in res.get_json()["error"]
-    assert settle(client)["settlements"] == []
-
-
-def test_create_settlement_rejects_unknown_order(client):
-    res = create_batch(client, ["NOPE"])
-    assert res.status_code == 400
-    assert "NOPE" in res.get_json()["error"]
 
 
 def test_paid_endpoint_is_gone(client):
     """The page cannot mark a batch paid any more: only a bank credit can."""
     seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    settlement_id = create_batch(["R1"])
     assert client.post(f"/api/settlements/{settlement_id}/paid", json={}).status_code in (404, 405)
     assert settle(client)["settlements"][0]["paid_on"] is None
 
@@ -610,7 +573,7 @@ def test_paid_endpoint_is_gone(client):
 def test_settle_carries_the_credit_summary_and_the_link(client):
     from ride_dispatch.db import link_credit
     seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"], confirmed=530).get_json()["id"]
+    settlement_id = create_batch(["R1"], confirmed=530)
     cid = seed_credit(amount=530.0)
     data = settle(client)
     assert data["credits"] == {"unallocated": 1, "unallocated_sum": 530.0}
@@ -620,22 +583,6 @@ def test_settle_carries_the_credit_summary_and_the_link(client):
     assert data["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
     assert data["settlements"][0]["bank_credit"] == {"id": cid, "amount": 530.0,
                                                      "value_date": "2026-07-05"}
-
-
-def test_create_settlement_links_when_a_credit_fits(client):
-    """A batch created from the page is matched the same way the bot does it."""
-    cid = seed_credit(amount=540.0)
-    seed_ride("R1")
-    body = create_batch(client, ["R1"], confirmed=540).get_json()
-    assert body["bank_credit_id"] == cid
-    assert settle(client)["settlements"][0]["paid_on"] == "2026-07-05"
-
-
-def test_create_settlement_reports_no_link_when_nothing_fits(client):
-    seed_credit(amount=999.0)
-    seed_ride("R1")
-    assert create_batch(client, ["R1"], confirmed=540).get_json()["bank_credit_id"] is None
-    assert settle(client)["settlements"][0]["paid_on"] is None
 
 
 def test_fingerprint_tracks_the_credit_ledger(client):
@@ -661,28 +608,87 @@ def test_web_does_not_pull_in_telegram(tmp_path):
     assert done.returncode == 0, done.stderr
 
 
-def test_no_route_sets_a_batch_paid_by_hand(client):
-    """Paid means linked to a bank credit, so the only writes a batch accepts
-    are being created and being undone."""
+# ---- the credits view ----
+
+
+def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
+    from ride_dispatch.db import archive_credit, link_credit
+    seed_ride("R1", scheduled="2026-07-01 09:00:00", price=500.0, banner=40.0)
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    paid = create_batch(["R1"], confirmed=540)
+    part = create_batch(["R2"], confirmed=300, settled_on="2026-07-04")
+    done = seed_credit(amount=540.0, value_date="2026-07-05", ref="C1")
+    partial = seed_credit(amount=1000.0, value_date="2026-07-06", ref="C2")
+    seed_credit(amount=1200.0, value_date="2026-06-05", ref="C3")
+    gone = seed_credit(amount=99.0, value_date="2026-06-01", ref="C4")
+    link_credit(web.DB_PATH, done, paid)
+    link_credit(web.DB_PATH, partial, part)
+    archive_credit(web.DB_PATH, gone, "pre-system", "2026-07-06")
+
+    data = client.get("/api/credits?platform=ride").get_json()
+    assert data["platform"] == "ride"
+    assert data["counts"] == {"open": 1, "partial": 1, "done": 1, "archived": 1}
+    # open counts what is still owed, not what landed: a part-linked credit
+    # contributes only its remainder.
+    assert data["sums"] == {"open": 1900.0, "done": 540.0}
+    # Oldest value date first: the page groups them, the API does not.
+    assert [c["ref"] for c in data["credits"]] == ["C4", "C3", "C1", "C2"]
+    by_ref = {c["ref"]: c for c in data["credits"]}
+    assert [by_ref[r]["state"] for r in ("C1", "C2", "C3", "C4")] == [
+        "done", "partial", "open", "archived"]
+    assert by_ref["C2"]["remaining"] == 700.0 and by_ref["C2"]["linked"] == 300.0
+    assert by_ref["C4"]["archived_reason"] == "pre-system"
+    assert by_ref["C1"]["memo"] == "SUPPLIERPAY"
+    assert by_ref["C3"]["batches"] == []
+    assert by_ref["C1"]["batches"] == [{"id": paid, "confirmed_amount": 540.0,
+                                        "dates": ["2026-07-01"], "orders": 1,
+                                        "has_image": False}]
+
+
+def test_credits_endpoint_reports_the_batch_that_has_a_statement_image(client):
+    from ride_dispatch.db import create_settlement, link_credit
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                            now=datetime(2026, 7, 23, 9, 0), statement=STATEMENT_JSON,
+                            image=b"\xff\xd8x")
+    cid = seed_credit(amount=500.0, value_date="2026-07-24")
+    link_credit(web.DB_PATH, cid, sid)
+    batch = client.get("/api/credits").get_json()["credits"][0]["batches"][0]
+    assert batch["has_image"] is True and batch["orders"] == 1
+    assert batch["dates"] == ["2026-07-22"]
+
+
+def test_credits_endpoint_is_empty_and_platform_scoped(client):
+    seed_credit(amount=100.0, ref="U1", platform="uber")
+    data = client.get("/api/credits").get_json()
+    assert data["credits"] == [] and data["counts"]["open"] == 0
+    assert data["sums"] == {"open": 0.0, "done": 0.0}
+    assert [c["ref"] for c in client.get("/api/credits?platform=uber").get_json()["credits"]] == ["U1"]
+    assert client.get("/api/credits?platform=taxi").status_code == 400
+
+
+def test_the_only_write_a_batch_accepts_is_being_undone(client):
+    """Batches come from statements and paid means linked to a bank credit, so
+    neither creating one nor marking one paid is something the page can do."""
     writes = {(r.rule, m) for r in web.app.url_map.iter_rules()
               for m in r.methods - {"GET", "HEAD", "OPTIONS"}}
     assert {r for r, _ in writes if r.startswith("/api/settlements")} == {
-        "/api/settlements", "/api/settlements/<int:settlement_id>"}
+        "/api/settlements/<int:settlement_id>"}
 
 
 def test_settle_page_exposes_only_the_actions_that_remain(client):
-    """The button behind the manual mark left nothing behind: these attribute
-    names are the whole of what the page can still do, so a resurrected action
-    has to be added here deliberately."""
+    """Ticking legs into a batch left nothing behind: these attribute names are
+    the whole of what the page can still do, so a resurrected action has to be
+    added here deliberately."""
     page = client.get("/settle").get_data(as_text=True)
     assert set(re.findall(r"data-([a-z]+)=", page)) == {
-        "add", "back", "bl", "close", "copy", "d", "f", "o", "undo", "undogo"}
+        "arch", "back", "bl", "close", "copy", "credits", "d", "f", "undo", "undogo"}
 
 
 def test_linking_a_credit_pays_the_batch(client):
     from ride_dispatch.db import link_credit
     seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"], confirmed=530).get_json()["id"]
+    settlement_id = create_batch(["R1"], confirmed=530)
     link_credit(web.DB_PATH, seed_credit(amount=530.0), settlement_id)
     data = settle(client)
     assert data["settlements"][0]["paid_on"] == "2026-07-05"
@@ -691,7 +697,7 @@ def test_linking_a_credit_pays_the_batch(client):
 
 def test_delete_settlement_endpoint(client):
     seed_ride("R1")
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    settlement_id = create_batch(["R1"])
     assert client.delete(f"/api/settlements/{settlement_id}").status_code == 200
     data = settle(client)
     assert data["settlements"] == []
@@ -705,7 +711,7 @@ def test_delete_settlement_unknown_id(client):
 
 def test_patch_batched_order_rejected(client):
     seed_ride("R1")
-    create_batch(client, ["R1"])
+    create_batch(["R1"])
     res = client.patch("/api/orders/R1", json={"price": 600})
     assert res.status_code == 400
     assert res.get_json()["error"] == "已結算嘅單要先撤銷結算"
@@ -715,7 +721,7 @@ def test_patch_batched_order_rejected(client):
 
 def test_patch_batched_order_allows_parking(client):
     seed_ride("R1")
-    create_batch(client, ["R1"])
+    create_batch(["R1"])
     assert client.patch("/api/orders/R1", json={"parking_fee": 32}).status_code == 200
     assert get_order_by_id(web.DB_PATH, "R1")["parking_fee"] == 32
 
@@ -725,7 +731,7 @@ def test_api_orders_carry_settlement_columns(client):
     rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
     assert rows[0]["settlement_paid_on"] is None
     assert rows[0]["settlement_settled_on"] is None
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    settlement_id = create_batch(["R1"])
     from ride_dispatch.db import link_credit
     link_credit(web.DB_PATH, seed_credit(), settlement_id)
     rows = client.get("/api/orders?date=2026-07-01").get_json()["orders"]
@@ -736,7 +742,7 @@ def test_api_orders_carry_settlement_columns(client):
 def test_fingerprint_tracks_settlements(client):
     seed_ride("R1")
     before = web._fingerprint()
-    settlement_id = create_batch(client, ["R1"]).get_json()["id"]
+    settlement_id = create_batch(["R1"])
     created = web._fingerprint()
     assert created != before
     from ride_dispatch.db import link_credit
@@ -751,10 +757,10 @@ def test_fingerprint_distinguishes_a_resettle(client):
     """Undo empties the book back to its pre-settlement fingerprint, so the
     batch id is what keeps a re-settle from looking like no change at all."""
     seed_ride("R1")
-    first = create_batch(client, ["R1"]).get_json()["id"]
+    first = create_batch(["R1"])
     created = web._fingerprint()
     client.delete(f"/api/settlements/{first}")
-    create_batch(client, ["R1"])
+    create_batch(["R1"])
     assert web._fingerprint() != created
 
 

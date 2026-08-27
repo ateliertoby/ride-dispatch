@@ -942,6 +942,62 @@ def archive_credits_before(db_path: str, date: str, reason: str, on: str) -> lis
     return done
 
 
+def list_credits(db_path: str, platform: str) -> list[dict]:
+    """The whole ledger for one platform, oldest value date first.
+
+    Every credit, not only the queue and not only a month: the page's question
+    is how much money came in and how much of it a statement accounts for, and
+    an answer scoped to a month would leave the oldest ones invisible — which
+    is the reason they are still unaccounted for.
+    """
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            f"{_CREDIT_SQL} WHERE c.platform = ? ORDER BY c.value_date, c.id", (platform,)
+        ).fetchall()
+        credits = []
+        for row in rows:
+            c = dict(row)
+            c["linked"] = round(c["linked"], 2)
+            c["remaining"] = round(c["amount"] - c["linked"], 2)
+            if c["archived_reason"]:
+                c["state"] = "archived"
+            elif c["remaining"] <= CENT:
+                c["state"] = "done"
+            elif c["linked"] > CENT:
+                c["state"] = "partial"
+            else:
+                c["state"] = "open"
+            c["batches"] = []
+            credits.append(c)
+        by_credit = {c["id"]: c for c in credits}
+        batch_rows = conn.execute(
+            "SELECT id, bank_credit_id, confirmed_amount, statement_image FROM settlements "
+            "WHERE platform = ? AND bank_credit_id IS NOT NULL ORDER BY id", (platform,)
+        ).fetchall()
+        batches = {r["id"]: r for r in batch_rows}
+        dates: dict[int, set] = {sid: set() for sid in batches}
+        counts: dict[int, int] = {sid: 0 for sid in batches}
+        if batches:
+            for r in conn.execute(
+                "SELECT settlement_id, scheduled_time FROM orders WHERE settlement_id IN "
+                f"({', '.join('?' * len(batches))})", list(batches)
+            ):
+                dates[r["settlement_id"]].add((r["scheduled_time"] or "")[:10])
+                counts[r["settlement_id"]] += 1
+        for sid, r in batches.items():
+            # link_credit refuses a batch and a credit of different platforms,
+            # so both sides of this join are already scoped to one platform.
+            owner = by_credit.get(r["bank_credit_id"])
+            if owner is None:
+                continue
+            owner["batches"].append({
+                "id": sid, "confirmed_amount": r["confirmed_amount"],
+                "dates": sorted(d for d in dates[sid] if d), "orders": counts[sid],
+                "has_image": bool(r["statement_image"]),
+            })
+        return credits
+
+
 def get_settle_month(db_path: str, month: str, platform: str,
                      now: datetime | None = None) -> dict:
     """Everything the settle page draws for one month of one platform.
