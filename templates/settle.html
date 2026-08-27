@@ -227,7 +227,7 @@
 
 // ---- state ----
 // One month of one platform at a time, exactly what /api/settle returns.
-let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, now: '' };
+let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, credits: { unallocated: 0, unallocated_sum: 0 }, now: '' };
 let curPlat = 'ride';
 let curMonth = fmtDate(new Date()).slice(0, 7);
 // Settle-ability is decided against the server's clock, not the browser's, so
@@ -427,8 +427,10 @@ function renderHeader() {
   // Totals span the whole book, not the month on screen: old unsettled days
   // are exactly the ones the operator is here to clear. The server computes
   // them, so the chips and the calendar cannot disagree about the same money.
+  const c = data.credits || { unallocated: 0, unallocated_sum: 0 };
   document.getElementById('summary').innerHTML =
-    '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting);
+    '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
+    (c.unallocated ? ' · 入數未對 ' + c.unallocated + ' 筆 $' + $(c.unallocated_sum) : '');
 }
 
 function renderChips() {
@@ -690,11 +692,6 @@ function dayViewHtml(v) {
       esc(dateSpanLabel(batchDates(b))) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
       ' · ' + (b.paid_on ? paidLabel(b) : '等過數') + '</span>' +
       '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '') +
-    // Banking a transfer settles the whole batch, not the day, so the button
-    // names the batch it will close.
-    batches.filter(b => !b.paid_on).map(b =>
-      '<button class="primary-btn" data-p="' + b.id + '">已到帳 · 批次 ' +
-      esc(dateSpanLabel(batchDates(b))) + ' · $' + $(b.confirmed_amount) + '</button>').join('') +
     (settleable ? confirmHtml() : '');
 }
 function paintDiff() {
@@ -748,7 +745,7 @@ function batchViewHtml(v) {
   ];
   if (diff) sums.push(['差額', (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff))]);
   sums.push(['結算日', b.settled_on]);
-  sums.push(['到帳', b.paid_on || '等緊過數']);
+  sums.push(['到帳', b.bank_credit ? mdSlash(b.bank_credit.value_date) + ' · 入數 $' + $(b.bank_credit.amount) : '等緊過數']);
   if (b.statement) {
     extras.forEach(id => sums.push(['平台多出 ' + esc(groupId(id)), '$' + $(plat.get(id))]));
     if (b.statement_image) sums.push(['結算單', '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>']);
@@ -759,7 +756,6 @@ function batchViewHtml(v) {
     '<div class="sum-rows">' + sums.map(r =>
       '<div class="sum-row"><span class="k">' + r[0] +
       '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
-    (b.paid_on ? '' : '<button class="primary-btn" data-p="' + b.id + '">已到帳</button>') +
     '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
     '<button class="ghost-btn" data-back="1">收埋</button>';
 }
@@ -778,17 +774,6 @@ function undoViewHtml(v) {
 }
 
 // ---- actions ----
-async function markPaid(id) {
-  try {
-    await apiWrite('POST', '/api/settlements/' + id + '/paid', {});
-  } catch (e) {
-    toast(e.message);
-    return;
-  }
-  // Banking a transfer answers a question the operator asked on this day, so
-  // the sheet stays put and load() repaints it with the answer.
-  await load();
-}
 
 // Undo returns the legs to unsettled rather than flagging the batch: an
 // unbatched order is already the "not settled" state, so a mistake costs
@@ -879,8 +864,6 @@ document.getElementById('sheet').addEventListener('click', e => {
   // treat the tap as a toggle.
   const cp = e.target.closest('[data-copy]');
   if (cp) { copyId(cp.dataset.copy); return; }
-  const pay = e.target.closest('[data-p]');
-  if (pay) { markPaid(pay.dataset.p); return; }
   const undo = e.target.closest('[data-undo]');
   if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
   const undoGo = e.target.closest('[data-undogo]');

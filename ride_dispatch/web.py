@@ -19,7 +19,6 @@ from .db import (
     get_order_by_id,
     get_settle_month,
     get_settlement,
-    mark_settlement_paid,
     save_or_revive_order,
     save_quick_order,
     statements_dir,
@@ -28,6 +27,7 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
+from .credits import resolve_batch
 from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
@@ -311,18 +311,11 @@ def api_create_settlement():
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    return jsonify({"id": settlement_id}), 201
-
-
-@app.post("/api/settlements/<int:settlement_id>/paid")
-def api_mark_settlement_paid(settlement_id):
-    body = request.get_json(silent=True) or {}
-    paid_on, derr = _parse_day(body.get("paid_on") or date.today().isoformat(), "paid_on")
-    if derr:
-        return derr
-    if not mark_settlement_paid(DB_PATH, settlement_id, paid_on):
-        return jsonify({"error": "settlement not found"}), 404
-    return jsonify({"ok": True})
+    # A batch created here is matched against the ledger exactly as one created
+    # from a statement in the bot is: paid means linked, wherever the batch was
+    # born.
+    m = resolve_batch(DB_PATH, settlement_id)
+    return jsonify({"id": settlement_id, "bank_credit_id": m.linked[0] if m.linked else None}), 201
 
 
 @app.delete("/api/settlements/<int:settlement_id>")
@@ -365,10 +358,15 @@ def _fingerprint():
     # max(id) rather than count alone: ids are AUTOINCREMENT, so undoing a batch
     # and settling again is a visible change instead of a wash.
     settle_row = conn.execute(
-        "SELECT count(*), coalesce(max(id),0), count(paid_on) FROM settlements"
+        "SELECT count(*), coalesce(max(id),0), count(bank_credit_id) FROM settlements"
+    ).fetchone()
+    # The ledger changes without any order or batch moving — a credit lands, a
+    # credit is archived — and an open settle page has to repaint for both.
+    credit_row = conn.execute(
+        "SELECT count(*), count(archived_reason) FROM bank_credits"
     ).fetchone()
     conn.close()
-    return "-".join(str(v) for v in (*row, *settle_row))
+    return "-".join(str(v) for v in (*row, *settle_row, *credit_row))
 
 
 @app.route("/api/events")
