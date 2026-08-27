@@ -298,7 +298,7 @@ def api_credits():
         "platform": platform,
         "counts": counts,
         "sums": {k: round(v, 2) for k, v in sums.items()},
-        "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "linked",
+        "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "allocated",
                                        "remaining", "state", "archived_reason", "memo",
                                        "batches")} for c in credits],
     })
@@ -338,21 +338,25 @@ def _fingerprint():
         "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
         "count(case when status='cancelled' then 1 end), "
         "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0), coalesce(sum(banner_fee),0), "
-        "coalesce(sum(settlement_id),0), "
+        "coalesce(sum(settlement_id),0), count(case when unpaid = 1 then 1 end), "
         "coalesce(group_concat(coalesce(scheduled_time,'') || coalesce(flight_eta,'') || coalesce(flight_gate,'') || coalesce(flight_status,'')),'') FROM orders"
     ).fetchone()
     # max(id) rather than count alone: ids are AUTOINCREMENT, so undoing a batch
     # and settling again is a visible change instead of a wash.
     settle_row = conn.execute(
-        "SELECT count(*), coalesce(max(id),0), count(bank_credit_id) FROM settlements"
+        "SELECT count(*), coalesce(max(id),0), count(paid_on) FROM settlements"
     ).fetchone()
     # The ledger changes without any order or batch moving — a credit lands, a
-    # credit is archived — and an open settle page has to repaint for both.
+    # credit is archived, money is put against a batch — and an open settle
+    # page has to repaint for all of them.
     credit_row = conn.execute(
         "SELECT count(*), count(archived_reason) FROM bank_credits"
     ).fetchone()
+    alloc_row = conn.execute(
+        "SELECT count(*), coalesce(sum(amount),0) FROM credit_allocations"
+    ).fetchone()
     conn.close()
-    return "-".join(str(v) for v in (*row, *settle_row, *credit_row))
+    return "-".join(str(v) for v in (*row, *settle_row, *credit_row, *alloc_row))
 
 
 @app.route("/api/events")
