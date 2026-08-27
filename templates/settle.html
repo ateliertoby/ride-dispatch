@@ -31,7 +31,9 @@
 
   /* ---- month grid ---- */
   .cal { padding: 12px 14px 4px; }
-  .wk, .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  /* minmax(0, 1fr): WebKit lets a grid track grow past its share when an item
+     is wider than the column, which would push the seventh day off screen. */
+  .wk, .grid, .lane { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
   .wk { padding-bottom: 4px; }
   .wk span { text-align: center; font-size: 11px; color: var(--text-3); }
   .cell {
@@ -43,14 +45,12 @@
        with dead space underneath. */
     padding: 13px 3px 5px;
     display: flex; align-items: center; justify-content: center;
-    font-family: inherit; color: inherit;
+    font-family: inherit; color: inherit; min-width: 0; overflow: hidden;
   }
   .cell.pad { background: none; cursor: default; }
   /* A day with no orders carries no money and no decision, so it recedes to
      little more than a calendar coordinate. */
   .cell.none { opacity: .35; cursor: default; }
-  /* Explicit line-height: the mixed stack's top padding is set to clear this
-     band exactly, so its height must not drift with the platform font. */
   .cell .d {
     position: absolute; top: 4px; left: 6px;
     font-size: 11px; line-height: 13px; font-weight: 600; color: var(--text-3);
@@ -60,25 +60,53 @@
     font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
     letter-spacing: -.2px;
   }
-  /* The amount is the only mark in the cell, so its colour carries the state,
-     and the three colours are the three answers to "is this money in yet":
-     amber still to chase, plain text settled but not transferred, green
-     banked. A future day has no answer yet, so it is faint. */
+  /* One rule: amber is money no statement has claimed yet. Money already on a
+     statement is a record, so it recedes and the bar under the cell carries
+     its state instead. A future day has nothing to claim yet, so it is faint. */
   .cell .amt.unsettled { color: var(--amber); }
-  .cell .amt.awaiting { color: var(--text); }
-  .cell .amt.paid { color: var(--green); }
-  .cell .amt.future { color: var(--text-3); }
-  /* A part-settled day is two facts, not one: the remainder to chase and the
-     part already handed over. It stacks a line per state in the same tones,
-     and is free to grow -- a day carrying all three states at once is rare,
-     and a clipped cell would be worse than a taller grid row.
-     A filled column has no slack for centring to absorb, so unlike the single
-     amount it cannot rely on the cell's own padding to stay clear of the day
-     number: its top padding is the day-number band plus a 3px gap. */
-  .cell.mixed { flex-direction: column; gap: 1px; padding-top: 20px; }
+  .cell .amt.done { color: var(--text-3); }
+  .cell .amt.future { color: var(--text-3); opacity: .5; }
   .cell.today .d { color: var(--text); }
   .cell.today { box-shadow: inset 0 0 0 1px var(--text-3); }
   .cell:not(.none):not(.pad):active { background: var(--surface-press); }
+
+  /* ---- event lanes ----
+     Under each week's cells, one grid holding every batch segment and credit
+     chip of that week, each placed on the lane row the packer gave it. */
+  .wkblock { padding-bottom: 4px; }
+  .lane { padding-top: 3px; grid-auto-rows: 18px; row-gap: 3px; }
+  .bar {
+    height: 18px; border-radius: 5px; border: none; padding: 0 5px; min-width: 0;
+    font-family: inherit; font-size: 11px; font-weight: 650;
+    font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+    display: flex; align-items: center; cursor: pointer;
+    overflow: hidden; white-space: nowrap;
+  }
+  .bar.awaiting { background: var(--key-bg); color: var(--text); }
+  .bar.partial { background: var(--banner-bg); color: var(--banner-fg); }
+  .bar.paid { background: var(--paid-bg); color: var(--green); }
+  /* A batch cut by the week boundary squares off the cut end, so the two
+     segments read as one bar wrapping. */
+  .bar.cut-r { border-top-right-radius: 1px; border-bottom-right-radius: 1px; }
+  .bar.cut-l { border-top-left-radius: 1px; border-bottom-left-radius: 1px; }
+  /* A held-back day keeps the state colour but drops the fill, so it reads as
+     a pointer at the run carrying the amount rather than a batch of its own. */
+  .bar.makeup { background: none; border: 1px dashed currentColor; padding: 0 3px; }
+  .bar:active { filter: brightness(1.15); }
+  /* A credit is an outline, not a fill: money arriving from outside the batch
+     never reads as one of the bars. */
+  .cchip {
+    height: 18px; border-radius: 5px; background: none;
+    border: 1px solid var(--green); color: var(--green);
+    font-family: inherit; font-size: 10.5px; font-weight: 650;
+    font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+    padding: 0 2px; min-width: 0; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; white-space: nowrap;
+  }
+  .cchip.open { border-color: var(--amber); color: var(--amber); }
+  .cchip.gone { border-color: var(--text-3); color: var(--text-3); }
+  .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
   .oday {
@@ -223,7 +251,8 @@
     .cell { min-height: 76px; padding: 18px 5px 8px; }
     .cell .d { font-size: 12px; line-height: 14px; }
     .cell .amt { font-size: 15px; }
-    .cell.mixed { gap: 2px; padding-top: 21px; }
+    .bar, .cchip { height: 22px; font-size: 13px; }
+    .lane { grid-auto-rows: 22px; }
   }
 </style>
 </head>
@@ -240,8 +269,9 @@
 <div class="chips" id="chips"></div>
 <div class="cal">
   <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
-  <div class="grid" id="grid"></div>
+  <div class="weeks" id="grid"></div>
   <div id="calEmpty"></div>
+  <div class="legend">條 = 結算批次（灰 等過數 · 琥珀 差數 · 綠 已收 · 虛線 補結）· 框 = 銀行入數 · 琥珀數字 = 未結算</div>
 </div>
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet"></div>
@@ -300,15 +330,6 @@ function reindex() {
     for (const o of b.orders) BATCH_OF.set(o.order_id, b);
   }
 }
-// An order carries no settlement state of its own; its state is whatever its
-// batch says, and no batch means the money is still outstanding.
-function orderState(o) {
-  const b = batchOf(o.order_id);
-  if (!b) return 'unsettled';
-  // Part-paid counts as awaiting: money is still owed on the day, which is the
-  // whole reason the calendar marks it.
-  return b.state === 'paid' ? 'paid' : 'awaiting';
-}
 // Mirrors db.py's settleable predicate: finished, priced, not already batched.
 // Both other kinds of leg stay visible; neither can enter a batch.
 function isSettleable(o) {
@@ -317,29 +338,18 @@ function isSettleable(o) {
 function ordersOn(dateStr) {
   return data.orders.filter(o => orderDate(o) === dateStr);
 }
-function dayState(dateStr) {
+// Two numbers per day: what it earned, and how much of that no statement has
+// claimed. Amber is the second one; a day fully on statements shows its total
+// muted, because the bar under it carries the state.
+function dayInfo(dateStr) {
   const list = ordersOn(dateStr);
-  const r = { state: 'none', total: 0, unsettled: 0, awaitingAmt: 0, paidAmt: 0 };
-  if (!list.length) return r;
-  let batched = 0, loose = 0;
+  let total = 0, loose = 0;
   for (const o of list) {
     const amt = expectedOf(o);
-    r.total += amt;
-    const st = orderState(o);
-    if (st === 'unsettled') { loose++; r.unsettled += amt; }
-    else {
-      batched++;
-      if (st === 'awaiting') r.awaitingAmt += amt; else r.paidAmt += amt;
-    }
+    total += amt;
+    if (!batchOf(o.order_id)) loose += amt;
   }
-  // With nothing left unsettled, a day split across an awaiting batch and a
-  // paid one reads as awaiting: the outstanding half is the part still
-  // needing attention, and one marker has to speak for the whole day.
-  const settledTone = r.awaitingAmt ? 'awaiting' : 'paid';
-  if (!batched) r.state = 'unsettled';
-  else if (!loose) r.state = settledTone;
-  else r.state = 'mixed';
-  return r;
+  return { n: list.length, total, loose };
 }
 
 // ---- labels ----
@@ -410,6 +420,32 @@ function groupId(id) {
 function batchDates(b) {
   return [...new Set(b.orders.map(orderDate))].sort();
 }
+// A batch's dates are not assumed contiguous: the platform holds a problem leg
+// back and settles it with a later statement. The latest run is the statement's
+// own days; every earlier run is a leg it picked up.
+function runsOf(dates) {
+  const runs = [];
+  for (const d of [...dates].sort()) {
+    const last = runs[runs.length - 1];
+    if (last && d === addDays(last[last.length - 1], 1)) last.push(d);
+    else runs.push([d]);
+  }
+  return runs;
+}
+function primaryRunOf(dates) { const r = runsOf(dates); return r[r.length - 1] || []; }
+function spanLabelOf(dates) { return dateSpanLabel(primaryRunOf(dates)); }
+function batchLabel(b) { return spanLabelOf(batchDates(b)); }
+function runShortLabel(run) {
+  const a = run[0], z = run[run.length - 1];
+  if (a.slice(0, 7) !== z.slice(0, 7)) return dateSpanLabel(run);
+  return (+a.slice(8)) + (a === z ? '' : '–' + (+z.slice(8))) + '日';
+}
+function heldLabel(b) {
+  const runs = runsOf(batchDates(b)).slice(0, -1);
+  if (!runs.length) return '';
+  return '連 ' + runs.map(run =>
+    runShortLabel(run) + ' ' + b.orders.filter(o => run.includes(orderDate(o))).length + ' 程').join(' · ');
+}
 
 // ---- load ----
 async function load() {
@@ -475,40 +511,111 @@ function renderChips() {
 }
 
 function cellHtml(dateStr) {
+  if (!dateStr) return '<div class="cell pad"></div>';
   const day = +dateStr.slice(8);
-  const s = dayState(dateStr);
-  const future = dateStr > TODAY;
-  const cls = ['cell'];
-  if (dateStr === TODAY) cls.push('today');
-  if (s.state === 'none') cls.push('none');
-  if (s.state === 'mixed' && !future) cls.push('mixed');
-  const inner = ['<span class="d">' + day + '</span>'];
-  if (s.state !== 'none') {
-    if (future) {
-      inner.push('<span class="amt future">$' + $(s.total) + '</span>');
-    } else if (s.state === 'mixed') {
-      // Remainder first: it is the only part the operator can act on today.
-      const lines = [['unsettled', s.unsettled]];
-      if (s.awaitingAmt) lines.push(['awaiting', s.awaitingAmt]);
-      if (s.paidAmt) lines.push(['paid', s.paidAmt]);
-      inner.push(lines.map(l =>
-        '<span class="amt ' + l[0] + '">$' + $(l[1]) + '</span>').join(''));
-    } else {
-      inner.push('<span class="amt ' + s.state + '">$' + $(s.total) + '</span>');
-    }
-  }
+  const info = dayInfo(dateStr);
+  const today = dateStr === TODAY ? ' today' : '';
   // Only an empty day is inert; every day holding work opens, past or future.
-  return '<button class="' + cls.join(' ') + '" data-d="' + dateStr + '"' +
-    (s.state === 'none' ? ' disabled' : '') + '>' + inner.join('') + '</button>';
+  if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + day + '</span></button>';
+  const future = dateStr > TODAY;
+  const cls = future ? 'future' : (info.loose > 0 ? 'unsettled' : 'done');
+  const amt = future ? info.total : (info.loose > 0 ? info.loose : info.total);
+  return '<button class="cell' + today + '" data-d="' + dateStr + '">' +
+    '<span class="d">' + day + '</span><span class="amt ' + cls + '">$' + $(amt) + '</span></button>';
+}
+
+function monthWeeks() {
+  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
+  const lead = new Date(y, m - 1, 1).getDay();
+  const days = new Date(y, m, 0).getDate();
+  const weeks = [];
+  let w = new Array(lead).fill(null);
+  for (let d = 1; d <= days; d++) {
+    w.push(curMonth + '-' + pad2(d));
+    if (w.length === 7) { weeks.push(w); w = []; }
+  }
+  if (w.length) { while (w.length < 7) w.push(null); weeks.push(w); }
+  return weeks;
+}
+
+// Each run of a batch is laid out on its own and cut again at the week
+// boundary, so a segment is the unit both the grid and the lane packer see.
+// Batches come before credits so a bar is never pushed under a chip.
+function weekEvents(week) {
+  const idx = new Map();
+  week.forEach((d, i) => { if (d) idx.set(d, i); });
+  const out = [];
+  for (const b of data.settlements) {
+    const runs = runsOf(batchDates(b));
+    const point = runs[runs.length - 1][0];
+    runs.forEach((run, ri) => {
+      const cols = run.filter(d => idx.has(d)).map(d => idx.get(d));
+      if (!cols.length) return;
+      const start = Math.min(...cols), end = Math.max(...cols);
+      out.push({
+        type: 'bar', start, span: end - start + 1, batch: b,
+        makeup: ri < runs.length - 1, point, from: run[0],
+        // The label rides the run's first segment only, so a wrapped bar is
+        // not read as two batches of the same amount.
+        head: idx.get(run[0]) === start,
+        // Squared off whenever the run carries on past this segment: into the
+        // next week, or off the edge of the month on screen, which is where a
+        // batch straddling two months leaves its other half.
+        cutR: run[run.length - 1] > week[end],
+        cutL: run[0] < week[start],
+      });
+    });
+  }
+  for (const c of ledger.credits) {
+    if (!idx.has(c.value_date)) continue;
+    out.push({ type: 'chip', start: idx.get(c.value_date), span: 1, credit: c });
+  }
+  return out;
+}
+
+function packLanes(events) {
+  const lanes = [];
+  for (const e of events) {
+    let li = lanes.findIndex(lane => lane.every(x =>
+      e.start > x.start + x.span - 1 || e.start + e.span - 1 < x.start));
+    if (li < 0) { lanes.push([]); li = lanes.length - 1; }
+    lanes[li].push(e);
+  }
+  return lanes;
+}
+
+// A 補結 segment carries no amount: it points at the run that does.
+function makeupLabel(point, from) {
+  return '&rarr;' + (point.slice(0, 7) === from.slice(0, 7) ? (+point.slice(8)) + '日' : mdSlash(point));
+}
+
+function eventHtml(e, lane) {
+  // Both axes are explicit: grid auto-placement is sparse and never moves
+  // backwards, so an item whose column precedes its predecessor's would be
+  // pushed to a new row and the lane would silently stop being one row.
+  const pos = ' style="grid-column:' + (e.start + 1) + '/span ' + e.span + ';grid-row:' + (lane + 1) + '"';
+  if (e.type === 'bar') {
+    const b = e.batch;
+    const cls = ['bar', b.state];
+    if (e.makeup) cls.push('makeup');
+    if (e.cutR) cls.push('cut-r');
+    if (e.cutL) cls.push('cut-l');
+    const label = !e.head ? '' : e.makeup ? makeupLabel(e.point, e.from) : '$' + $(b.confirmed_amount);
+    return '<button class="' + cls.join(' ') + '"' + pos + ' data-bar="' + b.id + '">' + label + '</button>';
+  }
+  const c = e.credit;
+  const cls = 'cchip' + (c.state === 'done' ? '' : c.state === 'archived' ? ' gone' : ' open');
+  return '<button class="' + cls + '"' + pos + ' data-chip="' + c.id + '">入$' + $(c.amount) + '</button>';
 }
 
 function renderCalendar() {
-  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
-  const first = new Date(y, m - 1, 1);
-  const days = new Date(y, m, 0).getDate();
-  let html = '';
-  for (let i = 0; i < first.getDay(); i++) html += '<div class="cell pad"></div>';
-  for (let d = 1; d <= days; d++) html += cellHtml(curMonth + '-' + pad2(d));
+  const html = monthWeeks().map(week => {
+    const lanes = packLanes(weekEvents(week));
+    return '<div class="wkblock"><div class="grid">' + week.map(cellHtml).join('') + '</div>' +
+      (lanes.length ? '<div class="lane">' +
+        lanes.map((lane, li) => lane.map(e => eventHtml(e, li)).join('')).join('') + '</div>' : '') +
+      '</div>';
+  }).join('');
   document.getElementById('grid').innerHTML = html;
   document.getElementById('calEmpty').innerHTML =
     data.orders.length ? '' : '<div class="empty">呢個月冇紀錄</div>';
@@ -523,6 +630,10 @@ function viewHtml(v) {
   if (v.kind === 'day') return dayViewHtml(v);
   if (v.kind === 'undo') return undoViewHtml(v);
   if (v.kind === 'credits') return creditsViewHtml();
+  // Placeholder until the credit sheet and the 未對 queue land.
+  if (v.kind === 'credit' || v.kind === 'queue') {
+    return sheetHead('入數', '') + '<button class="ghost-btn" data-back="1">收埋</button>';
+  }
   return batchViewHtml(v);
 }
 function paintView() {
@@ -657,7 +768,7 @@ function batchViewHtml(v) {
     extras.forEach(id => sums.push(['平台多出 ' + esc(groupId(id)), '$' + $(plat.get(id))]));
     if (b.statement_image) sums.push(['結算單', '<a href="/api/settlements/' + b.id + '/image" target="_blank" rel="noopener">睇圖</a>']);
   }
-  return sheetHead('結算 ' + esc(dateSpanLabel(dates)),
+  return sheetHead('結算 ' + esc(batchLabel(b)),
       esc(platLabel(b.platform)) + ' · ' + b.orders.length + ' 程') +
     body +
     '<div class="sum-rows">' + sums.map(r =>
@@ -840,9 +951,12 @@ document.getElementById('summary').addEventListener('click', e => {
   if (e.target.closest('[data-credits]')) openView({ kind: 'credits' });
 });
 document.getElementById('grid').addEventListener('click', e => {
+  const bar = e.target.closest('[data-bar]');
+  if (bar) { openView({ kind: 'batch', id: +bar.dataset.bar }); return; }
+  const chip = e.target.closest('[data-chip]');
+  if (chip) { openView({ kind: 'credit', id: +chip.dataset.chip }); return; }
   const cell = e.target.closest('.cell');
-  if (!cell || !cell.dataset.d) return;
-  openDay(cell.dataset.d);
+  if (cell && cell.dataset.d) openDay(cell.dataset.d);
 });
 document.getElementById('scrim').addEventListener('click', closeSheet);
 document.getElementById('sheet').addEventListener('click', e => {
