@@ -606,6 +606,10 @@ function packLanes(events) {
 function makeupLabel(point, from) {
   return '&rarr;' + (point.slice(0, 7) === from.slice(0, 7) ? (+point.slice(8)) + '日' : mdSlash(point));
 }
+// Calendar labels are whole dollars: a one-column bar or chip has ~46px at
+// phone width and a figure with cents clips mid-digit, which reads as a
+// different number. The exact amount is one tap away in the sheet.
+function calAmt(n) { return '$' + $(Math.round(n)); }
 
 function eventHtml(e, lane) {
   // Both axes are explicit: grid auto-placement is sparse and never moves
@@ -618,12 +622,12 @@ function eventHtml(e, lane) {
     if (e.makeup) cls.push('makeup');
     if (e.cutR) cls.push('cut-r');
     if (e.cutL) cls.push('cut-l');
-    const label = !e.head ? '' : e.makeup ? makeupLabel(e.point, e.from) : '$' + $(b.confirmed_amount);
+    const label = !e.head ? '' : e.makeup ? makeupLabel(e.point, e.from) : calAmt(b.confirmed_amount);
     return '<button class="' + cls.join(' ') + '"' + pos + ' data-bar="' + b.id + '">' + label + '</button>';
   }
   const c = e.credit;
   const cls = 'cchip' + (c.state === 'done' ? '' : c.state === 'archived' ? ' gone' : ' open');
-  return '<button class="' + cls + '"' + pos + ' data-chip="' + c.id + '">入$' + $(c.amount) + '</button>';
+  return '<button class="' + cls + '"' + pos + ' data-chip="' + c.id + '">入' + calAmt(c.amount) + '</button>';
 }
 
 function renderCalendar() {
