@@ -569,29 +569,50 @@ async def handle_callback(update: Update, context):
         await query.message.edit_reply_markup(reply_markup=None)
         await query.answer("已略過")
 
+    elif query.data == "park:busy":
+        # The placeholder button shown while a link is being fetched.
+        await query.answer("攞緊，等陣")
+
     elif query.data.startswith("park:pay:"):
         session_id = int(query.data.rsplit(":", 1)[1])
+        # Every tap makes a new gateway order (a link's lifetime is unknown
+        # and a stale one fails silently at the gateway), so a tap that lands
+        # while the previous fetch is still out must not reach the gateway.
+        if session_id in _parking_pay_busy:
+            await query.answer("攞緊，等陣")
+            return
         session = get_parking_session(DB_PATH, session_id)
-        await query.answer()
         if not session or session.get("exit_time"):
+            await query.answer()
             await query.message.reply_text("搵唔到呢次泊車，或者已經出咗閘。")
             return
         client = _get_parking_client()
         if client is None:
+            await query.answer()
             await query.message.reply_text("未設定 CAR_PLATE。")
             return
-        now = datetime.now()
+        # The two gateway calls can take up to 15 s each, so the tapped
+        # message itself has to change before the first one goes out;
+        # otherwise the operator cannot tell the tap registered.
+        _parking_pay_busy.add(session_id)
         try:
-            status = await client.query()
-            if not status.inside:
-                await query.message.reply_text("架車已經唔喺停車場。")
-                return
-            # Every tap makes a new gateway order: a link's lifetime is
-            # unknown and a stale one fails silently at the gateway.
-            await _send_pay_link(context.application.bot, query.message.chat_id, session, status, now)
-        except ParkingError as e:
-            _parking_logger.warning("pay link failed: %s", e)
-            await query.message.reply_text("出唔到 link，再撳。")
+            await query.answer("攞緊 link，等幾秒")
+            await query.message.edit_reply_markup(reply_markup=_pay_busy_button())
+            now = datetime.now()
+            try:
+                status = await client.query()
+                if not status.inside:
+                    await query.message.reply_text("架車已經唔喺停車場。")
+                    return
+                await _send_pay_link(context.application.bot, query.message.chat_id, session, status, now)
+            except ParkingError as e:
+                _parking_logger.warning("pay link failed: %s", e)
+                await query.message.reply_text("出唔到 link，再撳。")
+        finally:
+            # Discard before the restoring edit: a failed edit must not leave
+            # the session stuck as busy.
+            _parking_pay_busy.discard(session_id)
+            await query.message.edit_reply_markup(reply_markup=_pay_button(session_id))
 
     elif query.data.startswith("waive:"):
         _, cost_type, order_id = query.data.split(":", 2)
@@ -1031,10 +1052,13 @@ _kick_server = None
 # schedule would make exit latency twice the flight interval, which ranges
 # from a minute to hours. _parking_running keeps a slow HKIA query from
 # overlapping the next tick.
+# _parking_pay_busy holds the session ids with a pay-link fetch in flight, so
+# a second tap on the same button cannot open a second gateway order.
 _parking_client: ParkingClient | None = None
 _parking_client_built = False
 _parking_miss_at: datetime | None = None
 _parking_running = False
+_parking_pay_busy: set[int] = set()
 _parking_logger = logging.getLogger("parking")
 
 
@@ -1379,6 +1403,10 @@ async def _send_pay_link(bot, chat_id: int, session: dict, status: ParkingStatus
 
 def _pay_button(session_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("出 payment link", callback_data=f"park:pay:{session_id}")]])
+
+
+def _pay_busy_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("攞緊 link…", callback_data="park:busy")]])
 
 
 async def _close_visit(bot, chat_id: int, session: dict, exit_at: datetime, now: datetime):
