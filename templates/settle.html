@@ -75,12 +75,17 @@
      chip of that week, each placed on the lane row the packer gave it. */
   .wkblock { padding-bottom: 4px; }
   .lane { padding-top: 3px; grid-auto-rows: 18px; row-gap: 3px; }
+  /* An event reserves however many columns its label needs, but the coloured
+     fill belongs to the days the batch actually covers, so the two are
+     separate boxes: the slot is the reservation and repeats the lane's own
+     column track, and the bar is placed on the days inside it. */
+  .slot { display: grid; gap: 4px; min-width: 0; }
   .bar {
     height: 18px; border-radius: 5px; border: none; padding: 0 5px; min-width: 0;
     font-family: inherit; font-size: 11px; font-weight: 650;
     font-variant-numeric: tabular-nums; letter-spacing: -.2px;
     display: flex; align-items: center; cursor: pointer;
-    overflow: hidden; white-space: nowrap;
+    overflow: visible; white-space: nowrap;
   }
   .bar.awaiting { background: var(--key-bg); color: var(--text); }
   .bar.partial { background: var(--banner-bg); color: var(--banner-fg); }
@@ -92,6 +97,9 @@
   /* A held-back day keeps the state colour but drops the fill, so it reads as
      a pointer at the run carrying the amount rather than a batch of its own. */
   .bar.makeup { background: none; border: 1px dashed currentColor; padding: 0 3px; }
+  /* An event sitting on the last column reserves its room to the left, so its
+     label has to leave the fill leftwards as well. */
+  .bar.spill-l { justify-content: flex-end; }
   .bar:active { filter: brightness(1.15); }
   /* A credit is an outline, not a fill: money arriving from outside the batch
      never reads as one of the bars. */
@@ -103,7 +111,11 @@
     padding: 0 2px; min-width: 0; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     overflow: hidden; white-space: nowrap;
+    /* The pill is exactly its figure wide and sits at the start of its
+       reservation, so its edge stays under the day it arrived on. */
+    width: max-content; max-width: 100%; justify-self: start;
   }
+  .cchip.spill-l { justify-self: end; }
   .cchip.open { border-color: var(--amber); color: var(--amber); }
   .cchip.gone { border-color: var(--text-3); color: var(--text-3); }
   .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
@@ -567,15 +579,17 @@ function weekEvents(week) {
     const runs = runsOf(batchDates(b));
     const point = runs[runs.length - 1][0];
     runs.forEach((run, ri) => {
-      const cols = run.filter(d => idx.has(d)).map(d => idx.get(d));
-      if (!cols.length) return;
-      const start = Math.min(...cols), end = Math.max(...cols);
+      const at = run.filter(d => idx.has(d)).map(d => idx.get(d));
+      if (!at.length) return;
+      const start = Math.min(...at), end = Math.max(...at);
+      const makeup = ri < runs.length - 1;
+      // The label rides the run's first segment only, so a wrapped bar is
+      // not read as two batches of the same amount.
+      const head = idx.get(run[0]) === start;
       out.push({
-        type: 'bar', start, span: end - start + 1, batch: b,
-        makeup: ri < runs.length - 1, point, from: run[0],
-        // The label rides the run's first segment only, so a wrapped bar is
-        // not read as two batches of the same amount.
-        head: idx.get(run[0]) === start,
+        type: 'bar', start, cols: end - start + 1, batch: b,
+        makeup, point, from: run[0], head,
+        label: !head ? '' : makeup ? makeupLabel(point, run[0]) : '$' + $(b.confirmed_amount),
         // Squared off whenever the run carries on past this segment: into the
         // next week, or off the edge of the month on screen, which is where a
         // batch straddling two months leaves its other half.
@@ -586,16 +600,73 @@ function weekEvents(week) {
   }
   for (const c of ledger.credits) {
     if (!idx.has(c.value_date)) continue;
-    out.push({ type: 'chip', start: idx.get(c.value_date), span: 1, credit: c });
+    out.push({ type: 'chip', start: idx.get(c.value_date), cols: 1, credit: c,
+               label: '入$' + $(c.amount) });
   }
   return out;
+}
+
+// ---- label geometry ----
+// A calendar label is a reconciliation figure, so it is never shortened to fit
+// the column: the layout yields to the number instead. Every event therefore
+// carries a reach -- the columns its label needs, never fewer than the columns
+// its days occupy -- and that has to be measured rather than guessed. The
+// desktop rule changes both the font size and the column width, so the metrics
+// are read off the live grid on every paint.
+let calCanvas = null;
+function textWidth(font, s) {
+  if (!calCanvas) calCanvas = document.createElement('canvas');
+  const ctx = calCanvas.getContext('2d');
+  ctx.font = font;
+  return ctx.measureText(s).width;
+}
+function calMetrics(grid) {
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden';
+  const font = {};
+  for (const k of ['bar', 'cchip']) {
+    probe.className = k;
+    grid.appendChild(probe);
+    const cs = getComputedStyle(probe);
+    font[k] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    grid.removeChild(probe);
+  }
+  // The grid divides its width the way the CSS does: seven columns and the six
+  // 4px gaps between them. A hidden page measures zero, and zero would reserve
+  // every label the whole week, so it falls back to the phone-width grid.
+  return { colW: ((grid.clientWidth || 362) - 6 * 4) / 7, font };
+}
+function reachOf(e, m) {
+  const chip = e.type === 'chip';
+  // The label sits inside the element's horizontal padding, and the chip has a
+  // border on top of that.
+  const pad = chip || e.makeup ? 6 : 10;
+  // letter-spacing is not part of the canvas metric; the browser applies it
+  // once between each pair of characters.
+  const w = textWidth(chip ? m.font.cchip : m.font.bar, e.label) +
+    (e.label.length - 1) * -0.2 + pad;
+  // n columns are n column widths plus the n - 1 gaps they span.
+  let n = e.cols;
+  while (n < 7 && n * m.colW + (n - 1) * 4 < w + 1) n++;
+  return n;
+}
+// The packer collides on the reservation, not on the days: two labels that
+// would print over each other belong on different lanes even when their bars
+// do not touch. A reservation that would run off the last column is anchored
+// to the right edge instead, and its label leaves the fill leftwards.
+function reserve(events, m) {
+  for (const e of events) {
+    e.reach = e.label ? reachOf(e, m) : e.cols;
+    e.spillL = e.start + e.reach > 7;
+    e.rs = e.spillL ? Math.max(0, 7 - e.reach) : e.start;
+  }
 }
 
 function packLanes(events) {
   const lanes = [];
   for (const e of events) {
     let li = lanes.findIndex(lane => lane.every(x =>
-      e.start > x.start + x.span - 1 || e.start + e.span - 1 < x.start));
+      e.rs >= x.rs + x.reach || e.rs + e.reach <= x.rs));
     if (li < 0) { lanes.push([]); li = lanes.length - 1; }
     lanes[li].push(e);
   }
@@ -604,41 +675,49 @@ function packLanes(events) {
 
 // A 補結 segment carries no amount: it points at the run that does.
 function makeupLabel(point, from) {
-  return '&rarr;' + (point.slice(0, 7) === from.slice(0, 7) ? (+point.slice(8)) + '日' : mdSlash(point));
+  return '→' + (point.slice(0, 7) === from.slice(0, 7) ? (+point.slice(8)) + '日' : mdSlash(point));
 }
-// Calendar labels are whole dollars: a one-column bar or chip has ~46px at
-// phone width and a figure with cents clips mid-digit, which reads as a
-// different number. The exact amount is one tap away in the sheet.
-function calAmt(n) { return '$' + $(Math.round(n)); }
 
 function eventHtml(e, lane) {
   // Both axes are explicit: grid auto-placement is sparse and never moves
   // backwards, so an item whose column precedes its predecessor's would be
   // pushed to a new row and the lane would silently stop being one row.
-  const pos = ' style="grid-column:' + (e.start + 1) + '/span ' + e.span + ';grid-row:' + (lane + 1) + '"';
+  const place = 'grid-column:' + (e.rs + 1) + '/span ' + e.reach + ';grid-row:' + (lane + 1);
   if (e.type === 'bar') {
     const b = e.batch;
     const cls = ['bar', b.state];
     if (e.makeup) cls.push('makeup');
     if (e.cutR) cls.push('cut-r');
     if (e.cutL) cls.push('cut-l');
-    const label = !e.head ? '' : e.makeup ? makeupLabel(e.point, e.from) : calAmt(b.confirmed_amount);
-    return '<button class="' + cls.join(' ') + '"' + pos + ' data-bar="' + b.id + '">' + label + '</button>';
+    if (e.spillL) cls.push('spill-l');
+    // Repeating the lane's track inside the reservation puts the fill's edges
+    // on the same column edges the cells above use.
+    const at = e.spillL ? e.reach - e.cols + 1 : 1;
+    return '<span class="slot" style="' + place +
+      ';grid-template-columns:repeat(' + e.reach + ',minmax(0,1fr))">' +
+      '<button class="' + cls.join(' ') + '" style="grid-column:' + at + '/span ' + e.cols +
+      '" data-bar="' + b.id + '">' + e.label + '</button></span>';
   }
   const c = e.credit;
-  const cls = 'cchip' + (c.state === 'done' ? '' : c.state === 'archived' ? ' gone' : ' open');
-  return '<button class="' + cls + '"' + pos + ' data-chip="' + c.id + '">入' + calAmt(c.amount) + '</button>';
+  const cls = 'cchip' + (c.state === 'done' ? '' : c.state === 'archived' ? ' gone' : ' open') +
+    (e.spillL ? ' spill-l' : '');
+  return '<button class="' + cls + '" style="' + place + '" data-chip="' + c.id + '">' +
+    e.label + '</button>';
 }
 
 function renderCalendar() {
+  const grid = document.getElementById('grid');
+  const m = calMetrics(grid);
   const html = monthWeeks().map(week => {
-    const lanes = packLanes(weekEvents(week));
+    const events = weekEvents(week);
+    reserve(events, m);
+    const lanes = packLanes(events);
     return '<div class="wkblock"><div class="grid">' + week.map(cellHtml).join('') + '</div>' +
       (lanes.length ? '<div class="lane">' +
         lanes.map((lane, li) => lane.map(e => eventHtml(e, li)).join('')).join('') + '</div>' : '') +
       '</div>';
   }).join('');
-  document.getElementById('grid').innerHTML = html;
+  grid.innerHTML = html;
   document.getElementById('calEmpty').innerHTML =
     data.orders.length ? '' : '<div class="empty">呢個月冇紀錄</div>';
 }
@@ -1011,6 +1090,13 @@ document.getElementById('grid').addEventListener('click', e => {
   if (chip) { openView({ kind: 'credit', id: +chip.dataset.chip }); return; }
   const cell = e.target.closest('.cell');
   if (cell && cell.dataset.d) openDay(cell.dataset.d);
+});
+// Column width and font size are measured, so a rotation or a resized window
+// has to re-reserve every label against the new geometry.
+let calResizeT = null;
+window.addEventListener('resize', () => {
+  clearTimeout(calResizeT);
+  calResizeT = setTimeout(renderCalendar, 150);
 });
 document.getElementById('scrim').addEventListener('click', closeSheet);
 document.getElementById('sheet').addEventListener('click', e => {
