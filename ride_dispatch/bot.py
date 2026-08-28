@@ -887,7 +887,7 @@ async def handle_statement_image(update: Update, context):
 
 CREDITS_USAGE = ("用法：/credits · /credits <id> · "
                  "/credits archive before YYYY-MM-DD · /credits archive <id> [note] · "
-                 "/credits unarchive <id> · /credits unlink <批次>")
+                 "/credits unarchive <id> · /credits unlink <批次> [入數]")
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -932,7 +932,16 @@ async def handle_credits(update: Update, context):
         await msg.reply_text(f"#{args[1]} 返返嚟" if ok else f"搵唔到入數 #{args[1]}")
         return
 
-    if args[0] == "unlink" and len(args) == 2 and args[1].isdigit():
+    if args[0] == "unlink" and len(args) in (2, 3) and all(a.isdigit() for a in args[1:]):
+        # Naming a credit takes back only that one: a batch paid by two
+        # transfers has to be correctable one line at a time, and what is left
+        # on it can still cover part of the total, so that form does not
+        # promise 等過數 the way taking all the money back does.
+        if len(args) == 3:
+            removed = deallocate(DB_PATH, int(args[1]), int(args[2]))
+            await msg.reply_text(f"批次 #{args[1]} 解除咗入數 #{args[2]}" if removed
+                                 else f"批次 #{args[1]} 冇對住入數 #{args[2]}")
+            return
         removed = deallocate(DB_PATH, int(args[1]))
         await msg.reply_text(f"批次 #{args[1]} 解除咗入數，返回等過數" if removed
                              else f"批次 #{args[1]} 冇對住入數")

@@ -979,7 +979,9 @@ def allocate(db_path: str, credit_id: int, settlement_id: int,
 
     paid_on is written here and nowhere else, at the moment the batch is whole,
     and it is the bank's own value date rather than when anybody noticed.  The
-    legs the platform said it had not paid stop being owed at the same moment.
+    unpaid flags are left alone: they name the legs the platform held back on
+    this statement, which stays true once the make-up payment lands, and are
+    what lets the day sheet say which legs that last allocation paid for.
     """
     with _conn(db_path) as conn:
         row = conn.execute(f"{_CREDIT_SQL} WHERE c.id = ?", (credit_id,)).fetchone()
@@ -1012,7 +1014,6 @@ def allocate(db_path: str, credit_id: int, settlement_id: int,
         if round(outstanding - amount, 2) <= CENT:
             conn.execute("UPDATE settlements SET paid_on = ? WHERE id = ?",
                          (credit["value_date"], settlement_id))
-            conn.execute("UPDATE orders SET unpaid = 0 WHERE settlement_id = ?", (settlement_id,))
         conn.commit()
         return _load_batch(conn, settlement_id)
 

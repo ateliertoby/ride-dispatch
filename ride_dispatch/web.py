@@ -11,24 +11,29 @@ from flask import Flask, Response, render_template, request, jsonify, send_file
 from .db import (
     init_db,
     resolve_db_path,
+    allocate,
     count_active_orders,
+    deallocate,
     delete_settlement,
     diff_order_against_row,
+    get_credit,
     get_orders_by_date,
     get_order_by_id,
     get_settle_month,
     get_settlement,
     list_credits,
     mark_unpaid,
+    open_batches,
     save_or_revive_order,
     save_quick_order,
     statements_dir,
+    unallocated_credits,
     update_order_fields,
     update_order_from_message,
     update_price,
     DIFF_LABELS,
 )
-from .credits import guess_unpaid
+from .credits import CENT, guess_unpaid, offer, propose_batch, propose_credit
 from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
@@ -262,6 +267,42 @@ def api_update_order(order_id):
 # ---- Settlement (埋數) ----
 
 
+def _decorate_batch(batch: dict) -> dict:
+    """The derived fields the settle page reads a batch by.
+
+    The platform's own figure per order so the page never re-derives it, and
+    the guesses at which legs a short payment left out.
+    """
+    for o in batch["orders"]:
+        o["platform_amount"] = leg_amount(batch, o)
+    batch["unpaid_guesses"] = guess_unpaid(batch)
+    return batch
+
+
+def _batch_proposals(batch: dict) -> list[dict]:
+    """The credits that could pay what a batch is still owed, best first.
+
+    Carried inside the batch rather than fetched per sheet: the whole ledger is
+    a few hundred rows a year, so one round trip answers every open batch.
+    """
+    if batch["outstanding"] <= CENT:
+        return []
+    m = propose_batch(DB_PATH, batch["id"])
+    return [{"id": c["id"], "amount": c["amount"], "value_date": c["value_date"],
+             "remaining": c["remaining"], "exact": c["id"] in m.exact}
+            for c in offer(m, unallocated_credits(DB_PATH, batch["platform"]))]
+
+
+def _credit_proposals(credit: dict, platform: str) -> list[dict]:
+    """The batches a credit could pay, best first.  The mirror of the above."""
+    m = propose_credit(DB_PATH, credit["id"])
+    return [{"id": b["id"], "outstanding": b["outstanding"],
+             "confirmed_amount": b["confirmed_amount"],
+             "dates": sorted({(o["scheduled_time"] or "")[:10] for o in b["orders"]}),
+             "orders": len(b["orders"]), "exact": b["id"] in m.exact}
+            for b in offer(m, open_batches(DB_PATH, platform))]
+
+
 @app.get("/api/settle")
 def api_settle():
     month = request.args.get("month", date.today().strftime("%Y-%m"))
@@ -275,10 +316,8 @@ def api_settle():
         # The page only asks whether a screenshot exists; the file name it is
         # stored under is not something the client can do anything with.
         batch["statement_image"] = bool(batch.get("statement_image"))
-        # The platform's own figure per order, so the page never re-derives it.
-        for o in batch["orders"]:
-            o["platform_amount"] = leg_amount(batch, o)
-        batch["unpaid_guesses"] = guess_unpaid(batch)
+        _decorate_batch(batch)
+        batch["proposals"] = _batch_proposals(batch)
     return jsonify({"month": month, "platform": platform, **data})
 
 
@@ -299,16 +338,55 @@ def api_credits():
         counts[c["state"]] += 1
         if c["state"] in ("open", "partial"):
             sums["open"] += c["remaining"]
-        elif c["state"] == "done":
-            sums["done"] += c["amount"]
+            c["proposals"] = _credit_proposals(c, platform)
+        else:
+            c["proposals"] = []
+            if c["state"] == "done":
+                sums["done"] += c["amount"]
     return jsonify({
         "platform": platform,
         "counts": counts,
         "sums": {k: round(v, 2) for k, v in sums.items()},
         "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "payer", "allocated",
                                        "remaining", "state", "archived_reason", "memo",
-                                       "batches")} for c in credits],
+                                       "batches", "proposals")} for c in credits],
     })
+
+
+@app.post("/api/credits/<int:credit_id>/allocate")
+def api_allocate_credit(credit_id):
+    """Put a credit against a batch from the settle page.
+
+    The amount is not the client's to choose: as much of the batch as the
+    credit can still pay, the same default the chat card allocates on.  An
+    unknown id is a 404 and every refusal a 400, because the refusals are
+    things the operator can act on and a missing row is not.
+    """
+    body = request.get_json(silent=True) or {}
+    settlement_id = body.get("settlement_id")
+    if not isinstance(settlement_id, int) or isinstance(settlement_id, bool):
+        return jsonify({"error": "settlement_id required"}), 400
+    if get_credit(DB_PATH, credit_id) is None:
+        return jsonify({"error": "credit not found"}), 404
+    if get_settlement(DB_PATH, settlement_id) is None:
+        return jsonify({"error": "settlement not found"}), 404
+    try:
+        batch = allocate(DB_PATH, credit_id, settlement_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    _decorate_batch(batch)
+    batch["proposals"] = _batch_proposals(batch)
+    batch["credit"] = get_credit(DB_PATH, credit_id)
+    return jsonify(batch)
+
+
+@app.delete("/api/settlements/<int:settlement_id>/allocations/<int:credit_id>")
+def api_deallocate_credit(settlement_id, credit_id):
+    """Take one credit's money back off a batch; the batch and the credit both
+    get their figures back from the allocations that are left."""
+    if not deallocate(DB_PATH, settlement_id, credit_id):
+        return jsonify({"error": "allocation not found"}), 404
+    return jsonify({"ok": True})
 
 
 @app.delete("/api/settlements/<int:settlement_id>")
@@ -335,10 +413,7 @@ def api_mark_unpaid(settlement_id):
         batch = mark_unpaid(DB_PATH, settlement_id, order_ids)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    for o in batch["orders"]:
-        o["platform_amount"] = leg_amount(batch, o)
-    batch["unpaid_guesses"] = guess_unpaid(batch)
-    return jsonify(batch)
+    return jsonify(_decorate_batch(batch))
 
 
 _IMAGE_MIMETYPES = {"jpg": "image/jpeg", "png": "image/png", "heic": "image/heic"}
