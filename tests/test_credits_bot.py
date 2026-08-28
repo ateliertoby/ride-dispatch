@@ -704,9 +704,12 @@ def _call_sites(name):
 def test_allocate_is_only_called_by_a_tapped_callback():
     """paid_on is written by allocate and by nothing else, and the operator's
     tap is the only thing allowed to call it: a matcher that moved money on its
-    own would put it against orders nobody had checked.  A new call site has to
-    be added here deliberately."""
-    assert _call_sites("allocate") == {("bot.py", "handle_callback")}
+    own would put it against orders nobody had checked.  The settle page is a
+    second tap, not a second decider — the endpoint allocates what the request
+    names and nothing else.  A new call site has to be added here deliberately.
+    """
+    assert _call_sites("allocate") == {("bot.py", "handle_callback"),
+                                       ("web.py", "api_allocate_credit")}
 
 
 def test_mark_unpaid_is_only_called_from_the_web_handler():
@@ -782,6 +785,11 @@ def confirm_short(db_path, monkeypatch):
     return sid, q
 
 
+def short_statement_ids(db_path, settlement_id):
+    """The batch's legs in service order: the big one, then the two held back."""
+    return [o["order_id"] for o in get_settlement(db_path, settlement_id)["orders"]]
+
+
 def tap(data, message_id):
     cb, q = callback_update(data, message_id=message_id)
     asyncio.run(bot.handle_callback(cb, MagicMock()))
@@ -817,7 +825,8 @@ def test_the_make_up_payment_closes_the_batch_and_names_the_legs(db_path, monkey
     leftover of a bigger transfer, and the batch closes naming the two legs."""
     from ride_dispatch.db import mark_unpaid
     sid, _q = confirm_short(db_path, monkeypatch)
-    mark_unpaid(db_path, sid, ["1128150000001704", "1128150000003137"])
+    held = short_statement_ids(db_path, sid)[1:]
+    mark_unpaid(db_path, sid, held)
     later = credit_row(db_path, "R2", 510.0, TODAY)
     q = tap(f"credit:link:{later}:{sid}", 900)
     said = replies(q.message)
@@ -825,7 +834,10 @@ def test_the_make_up_payment_closes_the_batch_and_names_the_legs(db_path, monkey
                        "到帳：…1704、…3137")
     batch_ = get_settlement(db_path, sid)
     assert batch_["state"] == "paid" and batch_["paid_on"] == TODAY
-    assert all(o["unpaid"] == 0 for o in batch_["orders"])
+    # The flags name the legs the platform held back on this statement, which
+    # stays true after the make-up payment: the day sheet reads them to say
+    # those legs were the ones this last transfer paid for.
+    assert [o["order_id"] for o in batch_["orders"] if o["unpaid"]] == held
 
 
 def test_a_part_payment_from_the_credit_card_ends_with_the_dashboard_line(db_path):
@@ -895,14 +907,17 @@ def test_credits_queue_truncates(db_path):
 def test_credits_detail_shows_links_and_offers_buttons(db_path):
     s1 = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
     batch(db_path, "A2", f"{TWO_DAYS} 09:00:00", 500.0)
+    # Dated against the seeded batches, not against a fixed day: money cannot
+    # arrive before the work it pays for, so a hard-coded date stops matching
+    # as soon as the calendar moves past it.
     cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2540.0,
-                                  "currency": "HKD", "value_date": "2026-08-26",
+                                  "currency": "HKD", "value_date": TODAY,
                                   "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
                                   "email_id": None, "received_at": None, "recorded_at": None})
     allocate(db_path, cid, s1)
     msg = run_credits("1")
     lines = reply_text(msg).split("\n")
-    assert lines[0] == "入數 #1 · $2,540 · 08-26 · SUPPLIERPAY"
+    assert lines[0] == f"入數 #1 · $2,540 · {credits.md(TODAY)} · SUPPLIERPAY"
     assert lines[1] == f"已對：批次 #{s1} $1,450"
     assert lines[2] == "剩 $1,090"
     assert [b.callback_data for b in reply_buttons(msg)] == ["credit:link:1:2"]
@@ -953,6 +968,26 @@ def test_credits_unlink_returns_a_batch_to_awaiting(db_path):
     assert get_settlement(db_path, sid)["paid_on"] is None
     assert get_credit(db_path, 1)["remaining"] == 2540.0
     assert reply_text(run_credits("unlink", str(sid))) == f"批次 #{sid} 冇對住入數"
+
+
+def test_credits_unlink_can_name_one_credit_of_several(db_path):
+    """A batch paid by two transfers is corrected one line at a time: the whole
+    batch form would take back money that was never in question."""
+    seed(db_path, "A1", f"{TWO_DAYS} 09:00:00", 2950.0)
+    seed(db_path, "A2", f"{TWO_DAYS} 10:00:00", 510.0)
+    sid = create_settlement(db_path, "ride", ["A1", "A2"], 3460.0, TODAY)
+    first = credit_row(db_path, "R1", 2950.0, YESTERDAY)
+    later = credit_row(db_path, "R2", 510.0, TODAY)
+    allocate(db_path, first, sid)
+    allocate(db_path, later, sid)
+    assert reply_text(run_credits("unlink", str(sid), str(later))) == \
+        f"批次 #{sid} 解除咗入數 #{later}"
+    batch_ = get_settlement(db_path, sid)
+    assert [a["credit_id"] for a in batch_["allocations"]] == [first]
+    assert batch_["state"] == "partial" and batch_["paid_on"] is None
+    assert get_credit(db_path, later)["remaining"] == 510.0
+    assert reply_text(run_credits("unlink", str(sid), str(later))) == \
+        f"批次 #{sid} 冇對住入數 #{later}"
 
 
 def test_credits_unknown_form_shows_the_usage(db_path):

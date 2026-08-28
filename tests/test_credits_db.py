@@ -103,7 +103,7 @@ def test_allocate_takes_an_explicit_amount_within_both_caps(db_path):
     assert allocate(db_path, other, sid, 600.0)["state"] == "paid"
 
 
-def test_completion_clears_the_unpaid_legs_and_deallocation_clears_paid_on(db_path):
+def test_the_unpaid_legs_survive_completion_and_deallocation_clears_paid_on(db_path):
     seed(db_path, "A1", "2026-08-22 09:00:00", price=2950.0)
     seed(db_path, "A2", "2026-08-22 10:00:00", price=210.0)
     seed(db_path, "A3", "2026-08-22 11:00:00", price=300.0)
@@ -124,12 +124,35 @@ def test_completion_clears_the_unpaid_legs_and_deallocation_clears_paid_on(db_pa
     later = insert_credit(db_path, credit(ref="R2", amount=510.0, value_date="2026-08-30"))
     out = allocate(db_path, later, sid)
     assert out["state"] == "paid" and out["paid_on"] == "2026-08-30"
-    assert [o["order_id"] for o in out["orders"] if o["unpaid"]] == []
+    # Completion does not erase which legs the platform held back: that is what
+    # the day sheet reads to say the make-up payment is what paid for them.
+    assert [o["order_id"] for o in out["orders"] if o["unpaid"]] == ["A2", "A3"]
     # The date is the bank's, and it goes when the batch is owed money again.
     assert deallocate(db_path, sid, later) == 1
     s = get_settlement(db_path, sid)
     assert s["paid_on"] is None and s["outstanding"] == 510.0
+    assert [o["order_id"] for o in s["orders"] if o["unpaid"]] == ["A2", "A3"]
     assert deallocate(db_path, sid) == 1
+
+
+def test_deallocate_named_a_credit_removes_that_allocation_only(db_path):
+    """A batch paid by two transfers is corrected one line at a time: naming a
+    credit takes back its money and leaves the other allocation standing."""
+    seed(db_path, "A1", "2026-08-22 09:00:00", price=2950.0)
+    seed(db_path, "A2", "2026-08-22 10:00:00", price=510.0)
+    sid = batch(db_path, "A1", "A2", confirmed=3460.0)
+    first = insert_credit(db_path, credit(amount=2950.0, value_date="2026-08-24"))
+    later = insert_credit(db_path, credit(ref="R2", amount=510.0, value_date="2026-08-30"))
+    allocate(db_path, first, sid)
+    allocate(db_path, later, sid)
+    assert deallocate(db_path, sid, later) == 1
+    s = get_settlement(db_path, sid)
+    assert [a["credit_id"] for a in s["allocations"]] == [first]
+    assert s["state"] == "partial" and s["outstanding"] == 510.0 and s["paid_on"] is None
+    assert get_credit(db_path, later)["remaining"] == 510.0
+    # A credit that is not on the batch takes nothing off it.
+    assert deallocate(db_path, sid, later) == 0
+    assert get_settlement(db_path, sid)["received"] == 2950.0
 
 
 def platform_statement(rows, date="2026-08-22", settle_date="2026-08-24"):

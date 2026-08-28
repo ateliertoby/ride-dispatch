@@ -88,7 +88,9 @@
     overflow: visible; white-space: nowrap;
   }
   .bar.awaiting { background: var(--key-bg); color: var(--text); }
-  .bar.partial { background: var(--banner-bg); color: var(--banner-fg); }
+  /* The label of a part-paid bar prints over both halves of its gradient, so
+     it takes the neutral text colour rather than the state's own. */
+  .bar.partial { background: var(--banner-bg); color: var(--text); }
   /* A collected batch is a record, not a task, so it holds its fill but stops
      shouting as loudly as the amber ones. */
   .bar.paid { background: var(--paid-bg); color: var(--green); font-weight: 600; opacity: .8; }
@@ -99,6 +101,9 @@
   /* A held-back day keeps the state colour but drops the fill, so it reads as
      a pointer at the run carrying the amount rather than a batch of its own. */
   .bar.makeup { background: none; border: 1px dashed currentColor; padding: 0 3px; }
+  /* A dashed pointer has no fill to print over, so it keeps the state colour
+     its border is drawn from. */
+  .bar.partial.makeup { color: var(--banner-fg); }
   /* An event sitting on the last column reserves its room to the left, so its
      label has to leave the fill leftwards as well. */
   .bar.spill-l { justify-content: flex-end; }
@@ -121,6 +126,10 @@
   .cchip.spill-l { justify-self: end; }
   .cchip.open { border-color: var(--blue); color: var(--blue); opacity: 1; }
   .cchip.gone { border-color: var(--text-3); color: var(--text-3); opacity: .5; }
+  /* Money that has been put against a batch which is still short: the credit
+     is done with but the account it paid into is not, so the chip wears the
+     colour of what is owed instead of dimming away as a record. */
+  .cchip.short { border-color: var(--amber); color: var(--amber); opacity: 1; }
   .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
@@ -177,6 +186,9 @@
     background: var(--banner-bg); color: var(--banner-fg);
   }
   .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
+  /* A leg the platform held back and paid later is a record, not a warning:
+     same shape as the 未過數 mark, the colour of money that has arrived. */
+  .omark.paid { background: var(--paid-bg); color: var(--green); }
   .sum-row a { color: var(--amber); text-decoration: none; }
   /* An allocation row hands the operator to the credit that paid it, so it is
      a button wearing the same shape as the rows around it. */
@@ -185,6 +197,16 @@
     cursor: pointer; text-align: left;
   }
   .sum-row.link:active { background: var(--surface-press); }
+  /* Taking money back off a batch cannot live inside the row that opens the
+     credit -- a control inside a control -- so the two sit side by side. */
+  .alloc { display: flex; align-items: center; gap: 6px; }
+  .alloc .sum-row.link { flex: 1; min-width: 0; }
+  .xbtn {
+    flex-shrink: 0; background: none; border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 9px; font-family: inherit; font-size: 12px;
+    color: var(--text-3); cursor: pointer;
+  }
+  .xbtn:active { background: var(--surface-press); }
   .sum-row .c { color: var(--text-3); margin-left: 6px; }
   /* In the day sheet the amount is never the answer on its own -- $500 already
      collected and $500 still owed are the same number -- so every leg carries
@@ -238,6 +260,38 @@
     background: none; border: none; padding: 0; font: inherit; color: var(--blue);
     cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
   }
+
+  /* ---- proposals ----
+     What the matcher believes could pay what is owed, in either direction. A
+     row states the other side and carries the one tap that would take it; the
+     belief leads without acting on itself, the way the chat card's buttons do. */
+  .prop-sec { padding: 12px 2px 0; }
+  .prop-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
+  .prow {
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line); padding: 10px 2px;
+    font-size: 14px; font-variant-numeric: tabular-nums;
+  }
+  .prow .t { flex: 1; min-width: 0; }
+  .ptag {
+    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    background: var(--paid-bg); color: var(--green);
+  }
+  .pbtn {
+    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; font-family: inherit; font-size: 13px;
+    font-weight: 650; color: var(--text); cursor: pointer;
+  }
+  .pbtn:active { background: var(--key-press); }
+  /* A queue row whose match is unambiguous answers itself, so the answer and
+     the tap that takes it hang under the row rather than inside its control. */
+  .qitem { border-bottom: 1px solid var(--line); }
+  .qitem .qrow { border-bottom: none; }
+  .qprop {
+    display: flex; align-items: center; gap: 8px; padding: 0 2px 10px;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .qprop .t { flex: 1; min-width: 0; color: var(--text-2); }
 
   /* ---- unpaid tick section ---- */
   .up-sec { padding: 12px 2px 0; }
@@ -299,7 +353,7 @@
   <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
   <div class="weeks" id="grid"></div>
   <div id="calEmpty"></div>
-  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結</div>
+  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結</div>
 </div>
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet"></div>
@@ -398,12 +452,34 @@ function mdLabel(dateStr) {
 function mdSlash(dateStr) { return (+dateStr.slice(5, 7)) + '/' + (+dateStr.slice(8, 10)); }
 function platLabel(key) { return PLATFORMS.find(p => p.key === key).label; }
 function paidLabel(b) { return '已收 ' + mdSlash(b.paid_on); }
+// Money to the cent, so the label carries both figures rather than the one the
+// column has room for: what the statement is worth, and what is still owed.
+function barLabel(b) {
+  return b.state === 'partial'
+    ? '$' + $(b.confirmed_amount) + ' · 差 $' + $(b.outstanding)
+    : '$' + $(b.confirmed_amount);
+}
+function round2(n) { return Math.round(n * 100) / 100; }
+// The last four characters, the way the platform's own message names a leg.
+function tailId(id) { return '…' + String(id).slice(-4); }
 // What a batch is owed, in one phrase: a part-paid batch is neither 已收 nor
 // simply 等過數 -- the outstanding half is what the operator is chasing.
 function batchTag(b) {
   if (b.state === 'paid') return paidLabel(b);
   if (b.state === 'partial') return '差 $' + $(b.outstanding);
   return '等過數';
+}
+// A batch is the account and a credit is one of its lines, so a chip's colour
+// is read off the batches it went into, not off how much of itself is left:
+// money already put against a batch that is still short is still open work.
+function chipState(c) {
+  if (c.state === 'archived') return ' gone';
+  // Money still unmatched is what the queue chases, so it keeps the queue's
+  // colour whatever else the credit has already paid; only a fully spent
+  // credit takes its colour from the batches it went to.
+  if (c.state === 'open' || c.state === 'partial') return ' open';
+  if ((c.batches || []).some(b => b.state === 'partial')) return ' short';
+  return '';
 }
 // Display-only shortening; the raw string stays on the order.
 function shortPlace(s) {
@@ -506,8 +582,15 @@ async function load() {
 // show the new state, and a batch that no longer exists cannot be shown at all.
 function repaintOpenView() {
   if (!views.length) return;
-  views = views.filter(v => ((v.kind !== 'batch' && v.kind !== 'undo') || batchById(v.id)) &&
-                            (v.kind !== 'credit' || creditById(v.id)));
+  views = views.filter(v => {
+    if (v.kind === 'credit') return !!creditById(v.id);
+    if (v.kind !== 'batch' && v.kind !== 'undo' && v.kind !== 'unlink') return true;
+    const b = batchById(v.id);
+    if (!b) return false;
+    // A confirm view for money already off the batch has nothing left to
+    // confirm: another device, or the bot, can have taken it back first.
+    return v.kind !== 'unlink' || b.allocations.some(a => a.credit_id === v.credit);
+  });
   if (!views.length) { closeSheet(); return; }
   paintView();
 }
@@ -593,7 +676,7 @@ function weekEvents(week) {
       out.push({
         type: 'bar', start, cols: end - start + 1, batch: b,
         makeup, point, from: run[0], head,
-        label: !head ? '' : makeup ? makeupLabel(point, run[0]) : '$' + $(b.confirmed_amount),
+        label: !head ? '' : makeup ? makeupLabel(point, run[0]) : barLabel(b),
         // Squared off whenever the run carries on past this segment: into the
         // next week, or off the edge of the month on screen, which is where a
         // batch straddling two months leaves its other half.
@@ -697,14 +780,22 @@ function eventHtml(e, lane) {
     // Repeating the lane's track inside the reservation puts the fill's edges
     // on the same column edges the cells above use.
     const at = e.spillL ? e.reach - e.cols + 1 : 1;
+    // A part-paid batch draws what has arrived against what is owed: the paid
+    // fraction on the left in the paid colour, the rest in the owed one. Not on
+    // a 補結 segment, which carries no fill at all.
+    let fill = '';
+    if (b.state === 'partial' && !e.makeup && b.confirmed_amount > 0) {
+      const pct = Math.max(0, Math.min(100, (b.received / b.confirmed_amount) * 100)).toFixed(2);
+      fill = ';background:linear-gradient(90deg,var(--paid-bg) 0 ' + pct + '%,var(--banner-bg) ' +
+        pct + '% 100%)';
+    }
     return '<span class="slot" style="' + place +
       ';grid-template-columns:repeat(' + e.reach + ',minmax(0,1fr))">' +
-      '<button class="' + cls.join(' ') + '" style="grid-column:' + at + '/span ' + e.cols +
+      '<button class="' + cls.join(' ') + '" style="grid-column:' + at + '/span ' + e.cols + fill +
       '" data-bar="' + b.id + '">' + e.label + '</button></span>';
   }
   const c = e.credit;
-  const cls = 'cchip' + (c.state === 'done' ? '' : c.state === 'archived' ? ' gone' : ' open') +
-    (e.spillL ? ' spill-l' : '');
+  const cls = 'cchip' + chipState(c) + (e.spillL ? ' spill-l' : '');
   return '<button class="' + cls + '" style="' + place + '" data-chip="' + c.id + '">' +
     e.label + '</button>';
 }
@@ -734,6 +825,7 @@ function curView() { return views[views.length - 1] || null; }
 function viewHtml(v) {
   if (v.kind === 'day') return dayViewHtml(v);
   if (v.kind === 'undo') return undoViewHtml(v);
+  if (v.kind === 'unlink') return unlinkViewHtml(v);
   if (v.kind === 'credit') return creditViewHtml(v);
   if (v.kind === 'queue') return queueViewHtml();
   return batchViewHtml(v);
@@ -798,6 +890,10 @@ function orderRowHtml(o, mode, opts) {
       ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
                  : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
+    // A leg the platform held back says when its money finally came, so the
+    // list keeps the record the flags were kept for.
+    if (opts && opts.madeUp) right = '<span class="omark paid">補收 ' + esc(opts.madeUp) +
+      '</span>' + right;
   }
   const chk = tick
     ? '<span class="up-chk' + (opts.ticked ? ' on' : '') + '">' + (opts.ticked ? '☑' : '☐') + '</span>' : '';
@@ -816,8 +912,13 @@ function orderListHtml(b, rows, tickSet) {
   const plat = new Map();
   (b.statement ? b.statement.days.flatMap(d => d.rows) : []).forEach(r =>
     plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
+  // Which allocation paid a held-back leg is the last one, the one that made
+  // the batch whole; a batch still short has not paid them at all.
+  const madeUp = b.state === 'paid' && b.allocations.length
+    ? mdSlash(b.allocations[b.allocations.length - 1].value_date) : '';
   const row = o => orderRowHtml(o, 'batch', tickSet
-    ? { tick: true, ticked: tickSet.has(o.order_id) } : { plat: plat.get(o.order_id) });
+    ? { tick: true, ticked: tickSet.has(o.order_id) }
+    : { plat: plat.get(o.order_id), madeUp: o.unpaid ? madeUp : '' });
   const dates = batchDates(b);
   if (dates.length === 1) return rows.map(row).join('');
   return dates.map(d => '<div class="oday">' + esc(mdLabel(d)) + ' 星期' + weekday(d) + '</div>' +
@@ -830,7 +931,15 @@ function orderListHtml(b, rows, tickSet) {
 function dayTag(o) {
   const b = batchOf(o.order_id);
   if (b) {
-    if (b.state === 'paid') return [paidLabel(b), 'paid'];
+    // The flags outlive the payment: they name the legs the platform held back
+    // on this statement, so in a batch that has since been collected they say
+    // which legs the make-up payment paid for and which the first transfer did.
+    if (b.state === 'paid') {
+      const at = b.allocations;
+      if (!at.length) return [paidLabel(b), 'paid'];
+      if (o.unpaid) return ['補收 ' + mdSlash(at[at.length - 1].value_date), 'paid'];
+      return ['已收 ' + mdSlash(at[0].value_date), 'paid'];
+    }
     // The tag states where this leg's money has got to, not the batch's: a
     // short-paid batch is short one leg, and the outstanding figure on every
     // leg of it would read as each leg being short that much. Once the ticks
@@ -887,6 +996,31 @@ function guessLabel(ids, b) {
   return legs.map(legLabel).join(' + ');
 }
 
+// A credit offered against a batch that is short. The button says what a tap
+// would actually do, the way the chat card's does: money that cannot cover the
+// shortfall names what would still be owed after it.
+function creditPropHtml(p, b) {
+  const gap = round2(b.outstanding - p.remaining);
+  const label = gap > 0.005 ? '對 $' + $(p.remaining) + '（差 $' + $(gap) + '）' : '對';
+  const left = p.remaining < p.amount - 0.005 ? ' · 剩 $' + $(p.remaining) : '';
+  return '<div class="prow"><span class="t">入數 ' + esc(mdSlash(p.value_date)) + ' · $' +
+    $(p.amount) + left + '</span>' +
+    (p.exact ? '<span class="ptag">啱數</span>' : '') +
+    '<button class="pbtn" data-alloc-credit="' + p.id + '" data-alloc-batch="' + b.id +
+    '">' + label + '</button></div>';
+}
+
+// The mirror: a batch offered against a credit that has money left.
+function batchPropHtml(p, c) {
+  const gap = round2(p.outstanding - c.remaining);
+  const label = gap > 0.005 ? '對 $' + $(c.remaining) + '（差 $' + $(gap) + '）' : '對';
+  return '<div class="prow"><span class="t">批次 ' + esc(spanLabelOf(p.dates)) + ' · ' +
+    p.orders + ' 程 · 差 $' + $(p.outstanding) + '</span>' +
+    (p.exact ? '<span class="ptag">啱數</span>' : '') +
+    '<button class="pbtn" data-alloc-credit="' + c.id + '" data-alloc-batch="' + p.id +
+    '">' + label + '</button></div>';
+}
+
 function batchViewHtml(v) {
   const b = batchById(v.id);
   if (!b) return '';
@@ -903,9 +1037,25 @@ function batchViewHtml(v) {
   const sums = ['<div class="sum-row"><span class="k">應收</span><span class="v">$' + $(b.expected_amount) + '</span></div>'];
   if (diff) sums.push('<div class="sum-row"><span class="k">差額</span><span class="v">' +
     (diff < 0 ? '&minus;' : '+') + '$' + $(Math.abs(diff)) + '</span></div>');
-  b.allocations.forEach(a => sums.push('<button class="sum-row link" data-credit="' + a.credit_id + '">' +
-    '<span class="k">入數 ' + mdSlash(a.value_date) + '</span>' +
-    '<span class="v">$' + $(a.amount) + '<span class="c">&rsaquo;</span></span></button>'));
+  // The flags outlive the payment, so a collected batch can still say which
+  // legs each transfer covered: the first allocation paid the rest of the
+  // statement, the one that made the batch whole paid the held-back legs.
+  const heldBack = b.orders.filter(o => o.unpaid);
+  b.allocations.forEach((a, i) => {
+    sums.push('<div class="alloc">' +
+      '<button class="sum-row link" data-credit="' + a.credit_id + '">' +
+      '<span class="k">入數 ' + mdSlash(a.value_date) + '</span>' +
+      '<span class="v">$' + $(a.amount) + '<span class="c">&rsaquo;</span></span></button>' +
+      '<button class="xbtn" data-unlink-batch="' + b.id + '" data-unlink-credit="' +
+      a.credit_id + '">解除</button></div>');
+    if (b.state !== 'paid' || !heldBack.length) return;
+    if (i === b.allocations.length - 1) {
+      sums.push('<div class="sub-note mute">補 ' +
+        heldBack.map(o => esc(tailId(o.order_id))).join(' · ') + '</div>');
+    } else if (i === 0) {
+      sums.push('<div class="sub-note mute">其餘 ' + (b.orders.length - heldBack.length) + ' 程</div>');
+    }
+  });
   if (b.statement) {
     // Platform amount per order id, 舉牌 lines folded in (same fold as reconcile()).
     const inBatch = new Set(b.orders.map(o => o.order_id));
@@ -932,7 +1082,13 @@ function batchViewHtml(v) {
     else note = '<div class="up-note">冇組合啱 $' + $(b.outstanding) + '，自己剔</div>';
     const tickedAmt = rows.reduce((sum, o) => ticked.has(o.order_id) ? sum + o.platform_amount : sum, 0);
     const match = Math.abs(tickedAmt - b.outstanding) < 0.005;
-    mid = '<div class="up-sec" data-upbatch="' + b.id + '">' +
+    // What could close the batch comes before what is missing from it: the
+    // money is the answer, the ticks only say which legs it is for.
+    const props = b.proposals || [];
+    mid = '<div class="prop-sec"><div class="prop-head">等緊補數 · 差 $' + $(b.outstanding) +
+      '</div>' + (props.length ? props.map(p => creditPropHtml(p, b)).join('')
+                               : '<div class="up-note">未收到補數</div>') + '</div>' +
+      '<div class="up-sec" data-upbatch="' + b.id + '">' +
       '<div class="up-head">邊張單未過？ · 差 $' + $(b.outstanding) + '</div>' + note +
       orderListHtml(b, rows, ticked) +
       '<div class="up-foot"><span class="up-sum' + (match ? '' : ' warn') + '">' +
@@ -970,11 +1126,18 @@ function creditViewHtml(v) {
   if (c.state === 'done') state = '<div class="hero-s paid">已對</div>';
   else if (c.state === 'partial') state = '<div class="hero-s blue">已對 $' + $(c.allocated) +
     ' · 剩 $' + $(c.remaining) + '</div>';
-  else if (c.state === 'open') {
-    state = '<div class="hero-s blue">未對</div>';
-    extra = '<div class="sub-note mute">冇 statement 對得上</div>';
-  } else state = '<div class="hero-s">收埋' +
+  else if (c.state === 'open') state = '<div class="hero-s blue">未對</div>';
+  else state = '<div class="hero-s">收埋' +
     (c.archived_reason ? '（' + esc(c.archived_reason) + '）' : '') + '</div>';
+  // Money still to be accounted for is offered against the batches that are
+  // owed it, so the sheet the operator is already reading is where he answers.
+  if (c.state === 'open' || c.state === 'partial') {
+    const props = c.proposals || [];
+    extra = props.length
+      ? '<div class="prop-sec"><div class="prop-head">可能對</div>' +
+        props.map(p => batchPropHtml(p, c)).join('') + '</div>'
+      : '<div class="sub-note mute">冇 statement 對得上</div>';
+  }
   // The label comes from the entry's own dates: the batch itself can sit in a
   // month the page has not loaded.
   const rows = c.batches.map(b =>
@@ -1003,11 +1166,42 @@ function queueViewHtml() {
   const open = openCredits();
   return sheetHead('入數未對', esc(platLabel(curPlat)) + ' · ' + open.length + ' 筆 $' + $(ledger.sums.open)) +
     (open.length ? '' : '<div class="empty">冇未對嘅入數</div>') +
-    open.map(c => '<button class="qrow" data-credit="' + c.id + '">' +
-      '<span class="t">' + esc(mdSlash(c.value_date)) + ' · $' + $(c.amount) + '</span>' +
-      '<span class="s">未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : '') + '</span>' +
-      '<span class="c">&rsaquo;</span></button>').join('') +
+    open.map(queueRowHtml).join('') +
     '<button class="ghost-btn" data-back="1">收埋</button>';
+}
+
+// A row whose match is not in question answers itself: the batch it agrees
+// with, and the tap that puts it there without leaving the queue. Anything
+// less certain stays a way into the credit's own sheet.
+function queueRowHtml(c) {
+  const row = '<button class="qrow" data-credit="' + c.id + '">' +
+    '<span class="t">' + esc(mdSlash(c.value_date)) + ' · $' + $(c.amount) + '</span>' +
+    '<span class="s">未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : '') + '</span>' +
+    '<span class="c">&rsaquo;</span></button>';
+  const exact = (c.proposals || []).filter(p => p.exact);
+  if (exact.length !== 1) return row;
+  const p = exact[0];
+  return '<div class="qitem">' + row +
+    '<div class="qprop"><span class="t">&rarr; 批次 ' + esc(spanLabelOf(p.dates)) +
+    ' 差 $' + $(p.outstanding) + '</span>' +
+    '<button class="pbtn" data-alloc-credit="' + c.id + '" data-alloc-batch="' + p.id +
+    '">對</button></div></div>';
+}
+
+// Taking money back off a batch is destructive the same way undo is, and is
+// confirmed the same way: a pushed view rather than an armed button, so a
+// repaint mid-decision cannot wipe the armed state.
+function unlinkViewHtml(v) {
+  const b = batchById(v.id);
+  if (!b) return '';
+  const a = b.allocations.find(x => x.credit_id === v.credit);
+  if (!a) return '';
+  return sheetHead('解除入數', esc(batchLabel(b)) + ' · 入數 ' + esc(mdSlash(a.value_date))) +
+    '<div class="undo-info">$' + $(a.amount) + ' 會由呢個批次拎返出嚟，' +
+      '批次變返差 $' + $(round2(b.outstanding + a.amount)) + '，錢返到入數度。</div>' +
+    '<button class="primary-btn danger" data-unlinkgo="1" data-unlink-batch="' + b.id +
+      '" data-unlink-credit="' + a.credit_id + '">確定解除</button>' +
+    '<button class="ghost-btn" data-back="1">返回</button>';
 }
 
 // Undo is destructive enough to confirm, and confirming in a pushed view
@@ -1040,6 +1234,38 @@ async function undoBatch(id) {
   while (views.length && (curView().kind === 'undo' || curView().kind === 'batch')) views.pop();
   await load();
   toast('已撤銷結算');
+}
+
+// The one write the page has that moves money: the matcher named a credit and
+// a batch, and this is the tap. The amount is the server's — as much of the
+// batch as the credit can still pay — so the page never proposes a figure.
+async function allocateCredit(creditId, batchId) {
+  let batch;
+  try {
+    batch = await apiWrite('POST', '/api/credits/' + creditId + '/allocate',
+                           { settlement_id: batchId });
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  const put = (batch.allocations.find(a => a.credit_id === +creditId) || {}).amount || 0;
+  await load();
+  toast(batch.state === 'paid'
+    ? '已對 $' + $(put) + ' · 批次收齊'
+    : '已對 $' + $(put) + ' · 仲差 $' + $(batch.outstanding));
+}
+
+async function unlinkCredit(batchId, creditId) {
+  try {
+    await apiWrite('DELETE', '/api/settlements/' + batchId + '/allocations/' + creditId);
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  // Back to the batch the money came off, which is where the operator was.
+  while (views.length && curView().kind === 'unlink') views.pop();
+  await load();
+  toast('已解除入數');
 }
 
 // A credit's batch can sit outside the month on screen, and the batch sheet
@@ -1114,6 +1340,21 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
   const undoGo = e.target.closest('[data-undogo]');
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
+  const alloc = e.target.closest('[data-alloc-credit]');
+  if (alloc) { allocateCredit(+alloc.dataset.allocCredit, +alloc.dataset.allocBatch); return; }
+  // The confirm button carries the same pair as the row that opened it, so it
+  // is matched first or the row handler below would reopen the confirm view.
+  const unlinkGo = e.target.closest('[data-unlinkgo]');
+  if (unlinkGo) {
+    unlinkCredit(+unlinkGo.dataset.unlinkBatch, +unlinkGo.dataset.unlinkCredit);
+    return;
+  }
+  const unlink = e.target.closest('[data-unlink-batch]');
+  if (unlink) {
+    pushView({ kind: 'unlink', id: +unlink.dataset.unlinkBatch,
+               credit: +unlink.dataset.unlinkCredit });
+    return;
+  }
   const tick = e.target.closest('[data-uptick]');
   if (tick) { toggleUnpaid(tick.dataset.uptick); return; }
   const guess = e.target.closest('[data-upguess]');

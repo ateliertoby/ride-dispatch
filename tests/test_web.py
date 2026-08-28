@@ -767,25 +767,31 @@ def test_credits_endpoint_is_empty_and_platform_scoped(client):
     assert client.get("/api/credits?platform=taxi").status_code == 400
 
 
-def test_the_writes_a_batch_accepts_are_undo_and_unpaid(client):
+def test_the_writes_a_batch_accepts_are_undo_unpaid_and_allocation(client):
     """Batches come from statements and paid means linked to a bank credit, so
     neither creating one nor marking one paid is something the page can do.
-    Naming the unpaid legs of a short-paid batch is the only other write."""
+    Naming the unpaid legs of a short-paid batch and moving money on or off it
+    are the writes that remain."""
     writes = {(r.rule, m) for r in web.app.url_map.iter_rules()
               for m in r.methods - {"GET", "HEAD", "OPTIONS"}}
     assert {r for r, _ in writes if r.startswith("/api/settlements")} == {
         "/api/settlements/<int:settlement_id>",
-        "/api/settlements/<int:settlement_id>/unpaid"}
+        "/api/settlements/<int:settlement_id>/unpaid",
+        "/api/settlements/<int:settlement_id>/allocations/<int:credit_id>"}
+    assert {r for r, _ in writes if r.startswith("/api/credits")} == {
+        "/api/credits/<int:credit_id>/allocate"}
 
 
 def test_settle_page_exposes_only_the_actions_that_remain(client):
     """These attribute names are the full set of what the page can do, so a
-    new action has to be added here deliberately."""
+    new action has to be added here deliberately.  Hyphens are part of a name:
+    an action hidden behind one would otherwise never be counted."""
     page = client.get("/settle").get_data(as_text=True)
-    assert set(re.findall(r"data-([a-z]+)=", page)) == {
+    assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
         "fold", "upbatch", "upguess", "uptick", "upsave",
-        "undo", "undogo"}
+        "undo", "undogo", "alloc-batch", "alloc-credit",
+        "unlink-batch", "unlink-credit", "unlinkgo"}
 
 
 def test_allocating_the_whole_batch_pays_it(client):
@@ -810,6 +816,137 @@ def test_a_credits_row_carries_what_it_paid_of_each_batch(client):
     assert batches == [{"id": settlement_id, "confirmed_amount": 3000.0, "amount": 2540.0,
                         "state": "partial", "dates": ["2026-07-01"], "orders": 1,
                         "has_image": False, "outstanding": 460.0}]
+
+
+# ---- a statement the platform paid short ----
+
+# The shape this round is for: a 14-leg statement the platform paid short
+# because two of the legs were never submitted, made up days later.  The order
+# numbers are invented; only the arithmetic is taken from the real case.
+SHORT_PAID = [260.0, 240.0, 300.0, 220.0, 280.0, 250.0, 230.0, 270.0, 205.0, 195.0, 250.0, 250.0]
+SHORT_HELD = {"8800000000000041": 210.0, "8800000000000092": 300.0}
+
+
+def seed_short_case(client):
+    """14 legs worth $3,460; returns (batch id, held-back order ids)."""
+    days = ["2026-07-20", "2026-07-21", "2026-07-22"]
+    ids = []
+    for i, price in enumerate(SHORT_PAID):
+        oid = f"88000000000000{i + 1:02d}"
+        seed_ride(oid, scheduled=f"{days[i % 3]} {9 + i // 3:02d}:00:00", price=price, banner=0.0)
+        ids.append(oid)
+    for i, (oid, price) in enumerate(SHORT_HELD.items()):
+        seed_ride(oid, scheduled=f"2026-07-22 1{i + 5}:00:00", price=price, banner=0.0)
+        ids.append(oid)
+    sid = create_batch(ids, confirmed=3460.0, settled_on="2026-07-23")
+    return sid, list(SHORT_HELD)
+
+
+def test_settle_proposes_the_credit_that_could_close_a_short_batch(client):
+    from ride_dispatch.db import allocate, mark_unpaid
+    sid, held = seed_short_case(client)
+    first = seed_credit(amount=2950.0, value_date="2026-07-24", ref="C1")
+    allocate(web.DB_PATH, first, sid)
+    mark_unpaid(web.DB_PATH, sid, held)
+    # Nothing has arrived for the shortfall yet, so there is nothing to offer.
+    assert settle(client)["settlements"][0]["proposals"] == []
+    later = seed_credit(amount=510.0, value_date="2026-07-27", ref="C2")
+    batch = settle(client)["settlements"][0]
+    assert batch["state"] == "partial" and batch["outstanding"] == 510.0
+    assert batch["proposals"] == [{"id": later, "amount": 510.0, "value_date": "2026-07-27",
+                                   "remaining": 510.0, "exact": True}]
+
+
+def test_settle_carries_no_proposals_once_a_batch_is_whole(client):
+    from ride_dispatch.db import allocate
+    seed_ride("R1")
+    sid = create_batch(["R1"], confirmed=540)
+    seed_credit(amount=540.0, ref="C1")
+    assert settle(client)["settlements"][0]["proposals"] != []
+    allocate(web.DB_PATH, seed_credit(amount=540.0, value_date="2026-07-06", ref="C2"), sid)
+    assert settle(client)["settlements"][0]["proposals"] == []
+
+
+def test_credits_carry_the_batches_they_could_pay(client):
+    from ride_dispatch.db import allocate, archive_credit
+    sid, held = seed_short_case(client)
+    first = seed_credit(amount=2950.0, value_date="2026-07-24", ref="C1")
+    allocate(web.DB_PATH, first, sid)
+    later = seed_credit(amount=510.0, value_date="2026-07-27", ref="C2")
+    gone = seed_credit(amount=99.0, value_date="2026-07-27", ref="C3")
+    archive_credit(web.DB_PATH, gone, "pre-system", "2026-07-28")
+    by_id = {c["id"]: c for c in client.get("/api/credits").get_json()["credits"]}
+    assert by_id[later]["proposals"] == [{
+        "id": sid, "outstanding": 510.0, "confirmed_amount": 3460.0,
+        "dates": ["2026-07-20", "2026-07-21", "2026-07-22"], "orders": 14, "exact": True}]
+    # A spent credit and an archived one have nothing left to offer.
+    assert by_id[first]["proposals"] == [] and by_id[gone]["proposals"] == []
+
+
+def test_allocate_endpoint_closes_the_batch_and_keeps_the_held_back_legs(client):
+    from ride_dispatch.db import allocate, mark_unpaid
+    sid, held = seed_short_case(client)
+    first = seed_credit(amount=2950.0, value_date="2026-07-24", ref="C1")
+    allocate(web.DB_PATH, first, sid)
+    mark_unpaid(web.DB_PATH, sid, held)
+    later = seed_credit(amount=510.0, value_date="2026-07-27", ref="C2")
+    res = client.post(f"/api/credits/{later}/allocate", json={"settlement_id": sid})
+    assert res.status_code == 200
+    batch = res.get_json()
+    assert batch["state"] == "paid" and batch["outstanding"] == 0.0
+    assert batch["paid_on"] == "2026-07-27"
+    assert [a["credit_id"] for a in batch["allocations"]] == [first, later]
+    # Which legs the platform held back survives the payment that closed them.
+    assert sorted(o["order_id"] for o in batch["orders"] if o["unpaid"]) == sorted(held)
+    assert all("platform_amount" in o for o in batch["orders"])
+    assert batch["unpaid_guesses"] == [] and batch["proposals"] == []
+    assert batch["credit"]["id"] == later and batch["credit"]["remaining"] == 0.0
+
+
+def test_allocate_endpoint_400_on_a_refusal(client):
+    from ride_dispatch.db import allocate
+    seed_ride("R1")
+    sid = create_batch(["R1"], confirmed=540)
+    cid = seed_credit(amount=540.0)
+    allocate(web.DB_PATH, cid, sid)
+    res = client.post(f"/api/credits/{cid}/allocate", json={"settlement_id": sid})
+    assert res.status_code == 400
+    assert res.get_json()["error"] == "已經對過呢筆入數"
+
+
+def test_allocate_endpoint_404_and_bad_body(client):
+    seed_ride("R1")
+    sid = create_batch(["R1"], confirmed=540)
+    cid = seed_credit(amount=540.0)
+    assert client.post(f"/api/credits/999/allocate", json={"settlement_id": sid}).status_code == 404
+    assert client.post(f"/api/credits/{cid}/allocate", json={"settlement_id": 999}).status_code == 404
+    assert client.post(f"/api/credits/{cid}/allocate", json={}).status_code == 400
+    assert client.post(f"/api/credits/{cid}/allocate",
+                       json={"settlement_id": "1"}).status_code == 400
+
+
+def test_unlink_endpoint_takes_one_credit_off_a_batch(client):
+    from ride_dispatch.db import allocate
+    sid, held = seed_short_case(client)
+    first = seed_credit(amount=2950.0, value_date="2026-07-24", ref="C1")
+    later = seed_credit(amount=510.0, value_date="2026-07-27", ref="C2")
+    allocate(web.DB_PATH, first, sid)
+    allocate(web.DB_PATH, later, sid)
+    assert client.delete(f"/api/settlements/{sid}/allocations/{later}").status_code == 200
+    batch = settle(client)["settlements"][0]
+    assert [a["credit_id"] for a in batch["allocations"]] == [first]
+    assert batch["state"] == "partial" and batch["paid_on"] is None
+    # Gone once: the same call again has nothing to remove.
+    assert client.delete(f"/api/settlements/{sid}/allocations/{later}").status_code == 404
+    assert client.delete(f"/api/settlements/999/allocations/{first}").status_code == 404
+
+
+def test_settle_page_carries_the_copy_for_a_short_batch(client):
+    """The sheets that close a short-paid batch are built from these phrases."""
+    page = client.get("/settle").get_data(as_text=True)
+    for phrase in ("等緊補數", "未收到補數", "可能對", "補收 ", "解除", "啱數",
+                   "琥珀框 = 入數已對但批次仍差"):
+        assert phrase in page
 
 
 def test_delete_settlement_endpoint(client):
