@@ -154,8 +154,11 @@ def init_db(db_path: str):
         # One row per car park visit. pv_nr is HKIA's own visit number, so a
         # bot restart mid-visit finds the open row again instead of opening
         # a second one. `free` is derived exactly once, at close, from paid
-        # and the stay length; storing it keeps the 24h allowance check a
-        # single indexed read.
+        # and HKIA's last fee reading; storing it keeps the 24h allowance
+        # check a single indexed read, and a manual `observed` verdict
+        # overwrites it so the allowance follows what the driver saw.
+        # last_* hold the most recent reply taken while the car was inside:
+        # HKIA's own clock and its price for leaving at that moment.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS parking_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,9 +176,22 @@ def init_db(db_path: str):
                 auto_link_sent INTEGER DEFAULT 0,
                 free INTEGER,
                 order_id TEXT,
+                last_seen_at TEXT,
+                last_park_minutes INTEGER,
+                last_fee REAL,
+                gone_at TEXT,
+                observed TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Databases created before the readings were kept; ALTER is the only
+        # migration mechanism this project has (see the orders loop above).
+        for col in ["last_seen_at TEXT", "last_park_minutes INTEGER", "last_fee REAL",
+                    "gone_at TEXT", "observed TEXT"]:
+            try:
+                conn.execute(f"ALTER TABLE parking_sessions ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parking_free ON parking_sessions(free, entry_time)")
         conn.commit()
 
@@ -1296,7 +1312,8 @@ def get_settleable_recent(db_path: str, days: int, now: datetime | None = None) 
 # --- car park visits ---
 
 PARKING_UPDATABLE = {"paid", "paid_amount", "scheduled_exit", "payment_ref",
-                     "link_sent_at", "auto_link_sent", "order_id"}
+                     "link_sent_at", "auto_link_sent", "order_id",
+                     "last_seen_at", "last_park_minutes", "last_fee"}
 
 
 def open_parking_session(db_path: str, *, pv_nr: int, plate: str, location: str | None,
@@ -1340,13 +1357,30 @@ def update_parking_session(db_path: str, session_id: int, **fields):
         conn.commit()
 
 
-def close_parking_session(db_path: str, session_id: int, exit_time: str, free: int):
+def close_parking_session(db_path: str, session_id: int, exit_time: str, free: int,
+                          gone_at: str | None = None):
     with _conn(db_path) as conn:
         conn.execute(
-            "UPDATE parking_sessions SET exit_time = ?, free = ? WHERE id = ?",
-            (exit_time, free, session_id),
+            "UPDATE parking_sessions SET exit_time = ?, free = ?, gone_at = ? WHERE id = ?",
+            (exit_time, free, gone_at, session_id),
         )
         conn.commit()
+
+
+def mark_parking_observed(db_path: str, session_id: int, observed: str) -> bool:
+    """Record what the driver actually saw at the gate, overriding the guess.
+
+    The 24h free allowance is read off `free`, so an observation that
+    contradicts the automatic verdict has to move that column with it or the
+    next visit is told the wrong thing.
+    """
+    with _conn(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE parking_sessions SET observed = ?, free = ? WHERE id = ?",
+            (observed, 1 if observed == "free" else 0, session_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def recent_parking_sessions(db_path: str, limit: int = 5) -> list[dict]:

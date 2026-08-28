@@ -9,7 +9,8 @@ import pytest
 
 from ride_dispatch.parking import (
     ParkingError, ParkingStatus, parse_status, api_time, from_api_time,
-    db_time, from_db_time, free_available, next_free_at, pay_plan, classify,
+    db_time, from_db_time, db_seconds, from_db_seconds,
+    free_available, next_free_at, pay_plan, classify,
     arming_orders, is_armed, pick_order, FREE_MINUTES,
     ParkingClient, callback_token, build_pay_url, BASE_URL,
 )
@@ -64,6 +65,15 @@ def test_parse_inside_paid_and_fee_reply():
     assert fee.fee == 32 and fee.scheduled_exit == "2026-08-23 19:48"
 
 
+def test_parse_missing_fee_is_none_not_zero():
+    # A missing fee means "HKIA did not say", which classify has to tell apart
+    # from a fee of zero, which means "leaving now is free".
+    body = {"resultCode": 200, "count": 1,
+            "infoList": [{k: v for k, v in INSIDE_UNPAID["infoList"][0].items() if k != "fee"}]}
+    assert parse_status(body).fee is None
+    assert parse_status(INSIDE_UNPAID).fee == 0
+
+
 def test_parse_not_inside_is_a_status_not_an_error():
     s = parse_status(NOT_INSIDE)
     assert s.inside is False and s.pv_nr is None
@@ -81,6 +91,9 @@ def test_time_conversions_round_trip():
     assert from_api_time("202608231848") == dt
     assert db_time(dt) == "2026-08-23 18:48"
     assert from_db_time("2026-08-23 18:48") == dt
+    seen = datetime(2026, 8, 23, 18, 48, 22)
+    assert db_seconds(seen) == "2026-08-23 18:48:22"
+    assert from_db_seconds("2026-08-23 18:48:22") == seen
 
 
 def test_free_available_rolling_24h():
@@ -105,12 +118,24 @@ def test_pay_plan_rounds_elapsed_time_up_to_whole_hours(minute, hours):
     assert exit_at == entry + timedelta(hours=hours)
 
 
-def test_classify():
-    entry = datetime(2026, 8, 23, 18, 48)
-    assert classify(False, entry, entry + timedelta(minutes=FREE_MINUTES)) == "free"
-    assert classify(False, entry, entry + timedelta(minutes=FREE_MINUTES + 1)) == "gate"
-    assert classify(True, entry, entry + timedelta(minutes=10)) == "paid"
-    assert classify(True, entry, entry + timedelta(minutes=90)) == "paid"
+def test_classify_paid_wins_over_every_reading():
+    assert classify(True, 10, 0) == "paid"
+    assert classify(True, 90, 32) == "paid"
+    assert classify(True, 90, None) == "paid"
+
+
+def test_classify_follows_hkia_fee_not_the_stay_length():
+    # A stay well past FREE_MINUTES that HKIA still prices at nothing is free;
+    # the 30-minute rule would have called it 閘口找數.
+    assert classify(False, 33, 0) == "free"
+    assert classify(False, 33, 0.0) == "free"
+    assert classify(False, 5, 32) == "gate"
+    assert classify(False, 200, 64) == "gate"
+
+
+def test_classify_falls_back_to_the_minute_rule_without_a_reading():
+    assert classify(False, FREE_MINUTES, None) == "free"
+    assert classify(False, FREE_MINUTES + 1, None) == "gate"
 
 
 def order(**kw):

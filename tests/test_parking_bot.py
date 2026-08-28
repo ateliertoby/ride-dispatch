@@ -41,9 +41,9 @@ def db_path(monkeypatch):
     os.unlink(path)
 
 
-def inside(minutes: int, paid: bool = False, pv_nr: int = 212022) -> ParkingStatus:
+def inside(minutes: int, paid: bool = False, pv_nr: int = 212022, fee: float | None = 0) -> ParkingStatus:
     return ParkingStatus(inside=True, pv_nr=pv_nr, location="P4O", location_name="Car Park 4",
-                         entry_time=ENTRY.strftime("%Y-%m-%d %H:%M"), park_minutes=minutes, paid=paid, fee=0)
+                         entry_time=ENTRY.strftime("%Y-%m-%d %H:%M"), park_minutes=minutes, paid=paid, fee=fee)
 
 
 OUT = ParkingStatus(inside=False)
@@ -124,17 +124,20 @@ def test_entry_when_allowance_used_says_so(db_path, tg, monkeypatch):
     assert "免費已用" in texts(tg)[0] and "$32" in texts(tg)[0] and "19:48" in texts(tg)[0]
 
 
-def test_one_miss_keeps_session_two_misses_close_at_first_miss(db_path, tg, monkeypatch):
+def test_one_miss_keeps_session_two_misses_close_on_hkia_clock(db_path, tg, monkeypatch):
     landed_order(db_path)
-    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1), OUT, OUT]))
-    run(tg, ENTRY + timedelta(minutes=1))
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(12), OUT, OUT]))
+    run(tg, ENTRY + timedelta(minutes=12))
     run(tg, ENTRY + timedelta(minutes=20))
     assert get_open_parking_session(db_path) is not None
     run(tg, ENTRY + timedelta(minutes=21))
     assert get_open_parking_session(db_path) is None
     row = recent_parking_sessions(db_path, 1)[0]
-    assert row["exit_time"] == "2026-08-23 19:08" and row["free"] == 1
-    assert "已出閘 19:08" in texts(tg)[-1] and "免費" in texts(tg)[-1]
+    # HKIA said 12 minutes at the last sighting; the tick 8 minutes later that
+    # missed the car only bounds the exit from above and is kept separately.
+    assert row["exit_time"] == "2026-08-23 19:00" and row["free"] == 1
+    assert row["gone_at"] == "2026-08-23 19:08:00"
+    assert "已出閘 19:00，泊 12 分鐘" in texts(tg)[-1] and "免費（HKIA 計 $0）" in texts(tg)[-1]
     assert get_order_by_id(db_path, "O1")["parking_fee"] == 0
 
 
@@ -151,7 +154,7 @@ def test_error_reply_changes_nothing(db_path, tg, monkeypatch):
 
 def test_open_session_polls_even_when_window_closed(db_path, tg, monkeypatch):
     landed_order(db_path)
-    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1), inside(200), OUT, OUT]))
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1), inside(200, fee=192), OUT, OUT]))
     run(tg, ENTRY + timedelta(minutes=1))
     late = ENTRY + timedelta(hours=5)   # far past landing + 2h
     run(tg, late)
@@ -258,7 +261,9 @@ def _callback(data, chat_id=123):
     q.message.chat_id = chat_id
     q.message.message_id = 7
     q.answer = AsyncMock()
+    q.message.text = "已出閘 19:21，泊 33 分鐘 | 閘口找數（HKIA 計 $32）"
     q.message.reply_text = AsyncMock()
+    q.message.edit_text = AsyncMock()
     q.message.edit_reply_markup = AsyncMock()
     upd = MagicMock()
     upd.callback_query = q
@@ -444,6 +449,208 @@ def test_landing_push_has_no_allowance_line_when_off(db_path, tg, monkeypatch):
     info = {"scheduled": "18:50", "eta": "18:48", "gate": None, "status": "landed", "hall": "A"}
     asyncio.run(bot._notify_status_change(tg, 123, "O1", info, "est", "landed"))
     assert "停車場" not in texts(tg)[0]
+
+
+# --- HKIA readings, exit time and the manual verdict ---
+
+
+def test_inside_tick_records_the_hkia_reading(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1), inside(12, fee=32)]))
+    run(tg, ENTRY + timedelta(minutes=1))
+    s = get_open_parking_session(db_path)
+    assert s["last_seen_at"] == "2026-08-23 18:49:00"
+    assert s["last_park_minutes"] == 1 and s["last_fee"] == 0
+    run(tg, ENTRY + timedelta(minutes=12))
+    s = get_open_parking_session(db_path)
+    assert s["last_seen_at"] == "2026-08-23 19:00:00"
+    assert s["last_park_minutes"] == 12 and s["last_fee"] == 32
+
+
+def test_close_falls_back_to_last_seen_when_park_minutes_is_missing(db_path, tg, monkeypatch):
+    from ride_dispatch.db import update_parking_session
+    sid = open_session(db_path)
+    update_parking_session(db_path, sid, last_seen_at="2026-08-23 19:05:40")
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([OUT, OUT]))
+    run(tg, ENTRY + timedelta(minutes=18))
+    run(tg, ENTRY + timedelta(minutes=19))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["exit_time"] == "2026-08-23 19:05"        # entry + 17 whole minutes
+    assert row["gone_at"] == "2026-08-23 19:06:00"
+    assert "冇 HKIA 讀數，按 30 分鐘估" in texts(tg)[-1]
+
+
+def test_close_uses_the_miss_tick_when_nothing_was_ever_read(db_path, tg, monkeypatch):
+    open_session(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([OUT, OUT]))
+    run(tg, ENTRY + timedelta(minutes=40))
+    run(tg, ENTRY + timedelta(minutes=41))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["exit_time"] == "2026-08-23 19:28" and row["gone_at"] == "2026-08-23 19:28:00"
+    assert row["free"] == 0                              # 40 min, no reading -> 30-minute rule
+
+
+def test_a_33_minute_visit_hkia_prices_at_zero_is_free(db_path, tg, monkeypatch):
+    """Entered 14:51, gate opened for nothing at 15:24 after 33 minutes.
+
+    The 30-minute rule called this 閘口找數 and told the next pickup the free
+    allowance was spent.
+    """
+    entry = datetime(2026, 8, 28, 14, 51)
+    save_order(db_path, make_order(scheduled_time="2026-08-28 15:30:00"),
+               telegram_msg_id=1, parking=32.0, source="携程")
+    update_flight_info(db_path, "O1", "14:50", "14:45", None, "landed")
+
+    def at(minutes):
+        return ParkingStatus(inside=True, pv_nr=414, location="P4O", location_name="Car Park 4",
+                             entry_time=entry.strftime("%Y-%m-%d %H:%M"),
+                             park_minutes=minutes, paid=False, fee=0)
+
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at(1), at(33), OUT, OUT]))
+    for m in (1, 33, 34, 35):
+        run(tg, entry + timedelta(minutes=m))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["exit_time"] == "2026-08-28 15:24" and row["free"] == 1
+    assert row["last_park_minutes"] == 33 and row["last_fee"] == 0
+    assert row["gone_at"] == "2026-08-28 15:25:00"
+    assert "已出閘 15:24，泊 33 分鐘 | 免費（HKIA 計 $0）" in texts(tg)[-1]
+    assert get_order_by_id(db_path, "O1")["parking_fee"] == 0
+
+
+def _gate_close(db_path, tg, monkeypatch) -> int:
+    """A visit HKIA priced at $32, closed and waiting to be corrected."""
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(33, fee=32), OUT, OUT]))
+    for m in (33, 34, 35):
+        run(tg, ENTRY + timedelta(minutes=m))
+    return recent_parking_sessions(db_path, 1)[0]["id"]
+
+
+def test_exit_message_offers_the_two_verdicts_it_did_not_pick(db_path, tg, monkeypatch):
+    sid = _gate_close(db_path, tg, monkeypatch)
+    assert "閘口找數（HKIA 計 $32）" in texts(tg)[-1]
+    row = tg.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in row] == ["其實免費", "其實俾咗錢"]
+    assert [b.callback_data for b in row] == [f"park:mark:{sid}:free", f"park:mark:{sid}:paid"]
+
+    tg.send_message.reset_mock()
+    monkeypatch.setattr(bot, "_parking_miss_at", None)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(20, pv_nr=2), OUT, OUT]))
+    for m in (20, 21, 22):
+        run(tg, ENTRY + timedelta(minutes=m))
+    row = tg.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in row] == ["其實俾咗錢", "其實閘口找數"]
+
+
+def test_a_payment_hkia_confirmed_offers_no_correction(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client",
+                        FakeClient([inside(20), inside(25, paid=True), OUT, OUT]))
+    for m in (20, 25, 26, 27):
+        run(tg, ENTRY + timedelta(minutes=m))
+    assert tg.send_message.call_args.kwargs["reply_markup"] is None
+
+
+def test_mark_callback_moves_the_allowance_and_zeroes_the_order(db_path, tg, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    sid = _gate_close(db_path, tg, monkeypatch)
+    assert recent_parking_sessions(db_path, 1)[0]["free"] == 0
+    assert get_order_by_id(db_path, "O1")["parking_fee"] == 32.0
+
+    upd, ctx, q = _callback(f"park:mark:{sid}:free")
+    asyncio.run(bot.handle_callback(upd, ctx))
+
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["observed"] == "free" and row["free"] == 1
+    assert get_order_by_id(db_path, "O1")["parking_fee"] == 0
+    edited = q.message.edit_text.call_args
+    assert edited.args[0] == f"{q.message.text}\n人手改：免費"
+    assert edited.kwargs["reply_markup"] is None
+    q.answer.assert_awaited_with("人手改：免費")
+
+
+def test_mark_callback_paid_leaves_the_order_cost_for_the_dashboard(db_path, tg, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    sid = _gate_close(db_path, tg, monkeypatch)
+    upd, ctx, q = _callback(f"park:mark:{sid}:paid")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["observed"] == "paid" and row["free"] == 0
+    # The amount is unknown to the system, so the ingested figure stands.
+    assert get_order_by_id(db_path, "O1")["parking_fee"] == 32.0
+    q.answer.assert_awaited_with("人手改：俾咗錢")
+
+
+def test_mark_callback_on_an_unknown_session(db_path, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx, q = _callback("park:mark:404:free")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    q.answer.assert_awaited_once_with("搵唔到呢次泊車")
+    q.message.edit_text.assert_not_awaited()
+
+
+def test_parking_mark_command_corrects_a_visit_whose_buttons_are_gone(db_path, tg, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    sid = _gate_close(db_path, tg, monkeypatch)
+    upd, ctx = _command()
+    ctx.args = ["mark", str(sid), "free"]
+    asyncio.run(bot.handle_parking(upd, ctx))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["observed"] == "free" and row["free"] == 1
+    assert get_order_by_id(db_path, "O1")["parking_fee"] == 0
+    assert upd.message.reply_text.call_args.args[0] == "08-23 18:48 泊 33 分鐘 閘口 HKIA$32 → 人手改 免費"
+
+    # A second, different verdict replaces the first.
+    upd, ctx = _command()
+    ctx.args = ["mark", str(sid), "gate"]
+    asyncio.run(bot.handle_parking(upd, ctx))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["observed"] == "gate" and row["free"] == 0
+    assert upd.message.reply_text.call_args.args[0] == "08-23 18:48 泊 33 分鐘 閘口 HKIA$32 ✓人手"
+
+
+def test_parking_mark_command_unknown_session(db_path, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx = _command()
+    ctx.args = ["mark", "404", "free"]
+    asyncio.run(bot.handle_parking(upd, ctx))
+    assert upd.message.reply_text.call_args.args[0] == "搵唔到泊車 #404"
+
+
+@pytest.mark.parametrize("args", [["mark"], ["mark", "1"], ["mark", "x", "free"],
+                                  ["mark", "1", "maybe"], ["mark", "1", "free", "extra"], ["nonsense"]])
+def test_parking_mark_bad_args_shows_usage(db_path, monkeypatch, args):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    upd, ctx = _command()
+    ctx.args = args
+    asyncio.run(bot.handle_parking(upd, ctx))
+    assert upd.message.reply_text.call_args.args[0] == bot.PARKING_MARK_USAGE
+
+
+def test_history_line_shows_the_reading_and_the_manual_verdict(db_path):
+    from ride_dispatch.db import (open_parking_session, update_parking_session,
+                                  close_parking_session, mark_parking_observed)
+    sid = open_parking_session(db_path, pv_nr=1, plate="YY3953", location="P4O",
+                               location_name="Car Park 4", entry_time="2026-08-28 14:51",
+                               order_id=None)
+    assert bot._history_line(get_parking_session(db_path, sid)) == "08-28 14:51 泊緊"
+    update_parking_session(db_path, sid, last_park_minutes=33, last_fee=32.0)
+    close_parking_session(db_path, sid, "2026-08-28 15:24", 0)
+    line = "08-28 14:51 泊 33 分鐘 閘口 HKIA$32"
+    assert bot._history_line(get_parking_session(db_path, sid)) == line
+    mark_parking_observed(db_path, sid, "free")
+    assert bot._history_line(get_parking_session(db_path, sid)) == f"{line} → 人手改 免費"
+    mark_parking_observed(db_path, sid, "gate")
+    assert bot._history_line(get_parking_session(db_path, sid)) == f"{line} ✓人手"
+
+
+def test_history_line_without_a_reading_keeps_the_old_shape(db_path):
+    from ride_dispatch.db import open_parking_session, close_parking_session
+    sid = open_parking_session(db_path, pv_nr=1, plate="YY3953", location="P4O",
+                               location_name="Car Park 4", entry_time="2026-08-23 18:48",
+                               order_id=None)
+    close_parking_session(db_path, sid, "2026-08-23 19:03", 1)
+    assert bot._history_line(get_parking_session(db_path, sid)) == "08-23 18:48 泊 15 分鐘 免費"
 
 
 # --- heartbeat integration ---

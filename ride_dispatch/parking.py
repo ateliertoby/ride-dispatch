@@ -23,7 +23,12 @@ from .service import is_flight_pickup
 # load_dotenv is idempotent and never overrides a real environment variable.
 load_dotenv()
 
-FREE_MINUTES = 30          # leave within this and the visit is free (once per 24h)
+# Guidance only, for the "leave before HH:MM" line shown on entry. HKIA's real
+# free allowance is longer than this and is not published, so a stay past it is
+# not necessarily chargeable; what a visit actually cost is decided at close
+# from the fee HKIA quotes while the car is still inside, and this figure is
+# the fallback for a visit that was never read.
+FREE_MINUTES = 30
 FREE_WINDOW_HOURS = 24     # rolling, from the free visit's entry time
 HOUR_MINUTES = 60
 # Published hourly tariff. Used only to preview a cost before any link is
@@ -36,6 +41,10 @@ ARM_AFTER_HOURS = 2        # ...until this long after; no entry by then = not co
 
 API_TIME = "%Y%m%d%H%M"
 DB_TIME = "%Y-%m-%d %H:%M"
+# Tick times are stored to the second: they are the bounds an exit time is
+# reconstructed between, and rounding them to the minute would throw away the
+# very difference they exist to record.
+DB_SECONDS = "%Y-%m-%d %H:%M:%S"
 
 
 class ParkingError(Exception):
@@ -69,6 +78,14 @@ def db_time(dt: datetime) -> str:
 
 def from_db_time(s: str) -> datetime:
     return datetime.strptime(s, DB_TIME)
+
+
+def db_seconds(dt: datetime) -> str:
+    return dt.strftime(DB_SECONDS)
+
+
+def from_db_seconds(s: str) -> datetime:
+    return datetime.strptime(s, DB_SECONDS)
 
 
 def parse_status(body) -> ParkingStatus:
@@ -119,10 +136,20 @@ def pay_plan(entry: datetime, now: datetime) -> tuple[int, datetime]:
     return hours, entry + timedelta(hours=hours)
 
 
-def classify(paid: bool, entry: datetime, exit: datetime) -> str:
+def classify(paid: bool, stayed: int, fee: float | None = None) -> str:
+    """What a finished visit cost, from HKIA's own answer where there is one.
+
+    While the car is inside, every status reply carries the fee for leaving at
+    that moment, computed by HKIA with the free allowance already applied. That
+    reading is the authority: a zero fee at the last sighting means the gate
+    opened for nothing, whatever the stay length was. FREE_MINUTES only decides
+    visits with no reading at all — a restart that lost it, or a reply without
+    the key.
+    """
     if paid:
         return "paid"
-    stayed = (exit - entry).total_seconds() / 60
+    if fee is not None:
+        return "free" if fee <= 0 else "gate"
     return "free" if stayed <= FREE_MINUTES else "gate"
 
 
