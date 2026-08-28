@@ -16,11 +16,12 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
+                      db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS, HOURLY_FEE)
 from .phone import format_phone_e164
 from .service import is_flight_pickup, label as service_label
@@ -523,6 +524,17 @@ async def handle_callback(update: Update, context):
         # The placeholder button shown while a link is being fetched.
         await query.answer("攞緊，等陣")
 
+    elif query.data.startswith("park:mark:"):
+        _, _, session_id, verdict = query.data.split(":")
+        session = get_parking_session(DB_PATH, int(session_id))
+        if session is None:
+            await query.answer("搵唔到呢次泊車")
+            return
+        _apply_observed(session, verdict)
+        word = f"人手改：{_VERDICT_WORDS[verdict]}"
+        await query.message.edit_text(f"{query.message.text}\n{word}", reply_markup=None)
+        await query.answer(word)
+
     elif query.data.startswith("park:pay:"):
         session_id = int(query.data.rsplit(":", 1)[1])
         # Every tap makes a new gateway order (a link's lifetime is unknown
@@ -742,9 +754,19 @@ async def handle_board(update: Update, context):
     await msg.reply_text("揀邊張生成舉牌相：", reply_markup=InlineKeyboardMarkup(buttons))
 
 
+PARKING_MARK_USAGE = "用法：/parking mark <session_id> free|paid|gate"
+
+
 async def handle_parking(update: Update, context):
     msg = update.message
     if ALLOWED_CHAT_IDS and msg.chat_id not in ALLOWED_CHAT_IDS:
+        return
+    args = context.args or []
+    if args:
+        # Correcting a past visit is a database edit and stays available even
+        # with the plate unset, which is what makes it the way to fix a visit
+        # whose message has already lost its buttons.
+        await _mark_parking_command(msg, args)
         return
     client = _get_parking_client()
     if client is None:
@@ -768,16 +790,20 @@ async def handle_parking(update: Update, context):
     history = recent_parking_sessions(DB_PATH, 5)
     if history:
         lines.append("")
-        for s in history:
-            entry = _session_entry(s)
-            if s.get("exit_time"):
-                exit_at = from_db_time(s["exit_time"])
-                stayed = int((exit_at - entry).total_seconds() // 60)
-                kind = "免費" if s.get("free") else ("已付" if s.get("paid") else "閘口")
-                lines.append(f"{entry.strftime('%m-%d %H:%M')} 泊 {stayed} 分鐘 {kind}")
-            else:
-                lines.append(f"{entry.strftime('%m-%d %H:%M')} 泊緊")
+        lines.extend(_history_line(s) for s in history)
     await msg.reply_text("\n".join(lines), reply_markup=_pay_button(session["id"]) if session and not session.get("paid") else None)
+
+
+async def _mark_parking_command(msg, args: list[str]):
+    if args[0] != "mark" or len(args) != 3 or not args[1].isdigit() or args[2] not in _VERDICTS:
+        await msg.reply_text(PARKING_MARK_USAGE)
+        return
+    session = get_parking_session(DB_PATH, int(args[1]))
+    if session is None:
+        await msg.reply_text(f"搵唔到泊車 #{args[1]}")
+        return
+    _apply_observed(session, args[2])
+    await msg.reply_text(_history_line(get_parking_session(DB_PATH, int(args[1]))))
 
 
 async def handle_statement_image(update: Update, context):
@@ -1323,17 +1349,106 @@ def _pay_busy_button() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("攞緊 link…", callback_data="park:busy")]])
 
 
-async def _close_visit(bot, chat_id: int, session: dict, exit_at: datetime, now: datetime):
+# The three outcomes a finished visit can have, in the operator's words.
+_VERDICTS = ("free", "paid", "gate")
+_VERDICT_WORDS = {"free": "免費", "paid": "俾咗錢", "gate": "閘口找數"}
+_KIND_WORDS = {"free": "免費", "paid": "已付", "gate": "閘口"}
+
+
+def _verdict_buttons(session_id: int, kind: str) -> InlineKeyboardMarkup | None:
+    """Offer the two verdicts the automatic classification did not pick.
+
+    HKIA's fee reading is an inference from a minute before the exit, not
+    proof; only the driver saw whether the gate opened. A wrong verdict
+    silently moves the 24h free allowance, so the correction is one tap away.
+    A payment HKIA itself confirmed needs no correcting.
+    """
+    if kind == "paid":
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"其實{_VERDICT_WORDS[v]}", callback_data=f"park:mark:{session_id}:{v}")
+        for v in _VERDICTS if v != kind
+    ]])
+
+
+def _apply_observed(session: dict, verdict: str):
+    mark_parking_observed(DB_PATH, session["id"], verdict)
+    # Only "免費" fixes an amount. What a gate or cash payment came to is a
+    # number nobody has told the system, so the order's cost is left for the
+    # dashboard rather than overwritten with a guess.
+    if verdict == "free" and session.get("order_id"):
+        update_cost(DB_PATH, session["order_id"], "parking", 0)
+
+
+def _history_line(s: dict) -> str:
+    entry = _session_entry(s)
+    stamp = entry.strftime("%m-%d %H:%M")
+    if not s.get("exit_time"):
+        return f"{stamp} 泊緊"
+    stayed = int((from_db_time(s["exit_time"]) - entry).total_seconds() // 60)
+    fee = s.get("last_fee")
+    # Re-derived rather than read off `free`, which a manual verdict overwrites:
+    # the line has to be able to show the two disagreeing.
+    derived = classify(bool(s.get("paid")), stayed, fee)
+    line = f"{stamp} 泊 {stayed} 分鐘 {_KIND_WORDS[derived]}"
+    if fee is not None:
+        line += f" HKIA${fee:g}"
+    observed = s.get("observed")
+    if observed:
+        line += " ✓人手" if observed == derived else f" → 人手改 {_VERDICT_WORDS[observed]}"
+    return line
+
+
+def _record_reading(session: dict, status: ParkingStatus, now: datetime):
+    """Keep HKIA's own clock and price from the latest reply seen inside.
+
+    Nothing else can date the exit: the ticks that miss the car are already
+    past it. The fee quoted here is what leaving at this moment would cost on
+    HKIA's own computation, allowance included, and is the only free/paid
+    answer available anywhere. The log line is the record from which HKIA's
+    unpublished free threshold can be learned.
+    """
+    update_parking_session(DB_PATH, session["id"], last_seen_at=db_seconds(now),
+                           last_park_minutes=status.park_minutes, last_fee=status.fee)
+    _parking_logger.info("inside pv=%s park=%s fee=%s paid=%s",
+                         status.pv_nr, status.park_minutes, status.fee, status.paid)
+
+
+def _stayed_minutes(session: dict, gone_at: datetime) -> int:
+    """How long the visit lasted, on the most authoritative clock available.
+
+    Ticks run once a minute, so the first one to miss the car is up to a
+    minute after the real exit and can only bound the stay from above. HKIA's
+    parkTime from the last sighting bounds it from below and is on the clock
+    that charges, so it wins; the miss tick is the last resort.
+    """
+    minutes = session.get("last_park_minutes")
+    if minutes is not None:
+        return int(minutes)
     entry = _session_entry(session)
-    kind = classify(bool(session.get("paid")), entry, exit_at)
-    close_parking_session(DB_PATH, session["id"], db_time(exit_at), 1 if kind == "free" else 0)
-    stayed = int((exit_at - entry).total_seconds() // 60)
-    if kind == "free":
-        tail = f"免費，下次 {_when(entry + timedelta(hours=FREE_WINDOW_HOURS), now, day_always=True)} 後"
-    elif kind == "paid":
+    seen = session.get("last_seen_at")
+    end = from_db_seconds(seen) if seen else gone_at
+    return max(0, int((end - entry).total_seconds() // 60))
+
+
+async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now: datetime):
+    entry = _session_entry(session)
+    stayed = _stayed_minutes(session, gone_at)
+    # Exit time and stay length are the same fact, so they are stored from the
+    # same number; gone_at keeps the upper bound the tick gave.
+    exit_at = entry + timedelta(minutes=stayed)
+    fee = session.get("last_fee")
+    kind = classify(bool(session.get("paid")), stayed, fee)
+    close_parking_session(DB_PATH, session["id"], db_time(exit_at), 1 if kind == "free" else 0,
+                          gone_at=db_seconds(gone_at))
+    if kind == "paid":
         tail = f"已付 ${(session.get('paid_amount') or 0):g}" if session.get("paid_amount") else "已付（網上）"
     else:
-        tail = "閘口找數"
+        note = f"（HKIA 計 ${fee:g}）" if fee is not None else "（冇 HKIA 讀數，按 30 分鐘估）"
+        if kind == "free":
+            tail = f"免費{note}，下次 {_when(entry + timedelta(hours=FREE_WINDOW_HOURS), now, day_always=True)} 後"
+        else:
+            tail = f"閘口找數{note}"
     msg = f"已出閘 {exit_at.strftime('%H:%M')}，泊 {stayed} 分鐘 | {tail}"
     order_id = session.get("order_id")
     if order_id and kind == "free":
@@ -1341,7 +1456,8 @@ async def _close_visit(bot, chat_id: int, session: dict, exit_at: datetime, now:
         msg += f"\n#{order_id[-4:]} 停車費已改 $0"
     elif order_id and kind == "paid" and session.get("paid_amount"):
         update_cost(DB_PATH, order_id, "parking", float(session["paid_amount"]))
-    await bot.send_message(chat_id=chat_id, text=msg)
+    await bot.send_message(chat_id=chat_id, text=msg,
+                           reply_markup=_verdict_buttons(session["id"], kind))
 
 
 async def _check_parking(bot, chat_id: int, now: datetime):
@@ -1369,9 +1485,9 @@ async def _check_parking(bot, chat_id: int, now: datetime):
         if _parking_miss_at is None:
             _parking_miss_at = now
             return
-        exit_at = _parking_miss_at
+        gone_at = _parking_miss_at
         _parking_miss_at = None
-        await _close_visit(bot, chat_id, session, exit_at, now)
+        await _close_visit(bot, chat_id, session, gone_at, now)
         return
 
     _parking_miss_at = None
@@ -1389,9 +1505,12 @@ async def _check_parking(bot, chat_id: int, now: datetime):
             order_id=linked["order_id"] if linked else None,
         )
         session = get_parking_session(DB_PATH, sid)
+        _record_reading(session, status, now)
         await bot.send_message(chat_id=chat_id, text=_entry_message(session, status, now),
                                reply_markup=_pay_button(sid))
         return
+
+    _record_reading(session, status, now)
 
     if status.paid and not session.get("paid"):
         update_parking_session(DB_PATH, session["id"], paid=1)
