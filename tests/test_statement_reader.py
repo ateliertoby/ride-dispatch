@@ -164,3 +164,63 @@ def test_ocr_available_false_when_the_package_is_installed_but_broken(monkeypatc
         assert len(caplog.records) == 1
         assert statement.ocr_available() is False
         assert len(caplog.records) == 1  # once, not once per forwarded screenshot
+
+
+# ---- detector aspect ratio ----
+
+def test_pad_widens_a_short_wide_frame_downwards_only():
+    import numpy as np
+    img = np.full((221, 1842, 3), 17, dtype=np.uint8)
+    out = statement._pad_for_detection(img)
+    assert out.shape[1] == 1842
+    assert out.shape[1] / out.shape[0] <= statement._MAX_ASPECT
+    assert (out[:221] == 17).all()
+    assert (out[221:] == 255).all()
+
+
+def test_pad_leaves_a_frame_under_the_cap_untouched():
+    import numpy as np
+    img = np.full((220, 1280, 3), 17, dtype=np.uint8)
+    assert statement._pad_for_detection(img).shape == img.shape
+
+
+def test_engine_turns_off_the_detector_aspect_threshold(monkeypatch):
+    """Past the engine's own width/height threshold no detection runs at all
+    and the whole frame comes back as one recognised line."""
+    import sys
+    import types
+    built = []
+
+    class FakeRapidOCR:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+    module = types.ModuleType("rapidocr_onnxruntime")
+    module.RapidOCR = FakeRapidOCR
+    monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", module)
+    monkeypatch.setattr(statement, "_ocr", None)
+    engine = statement._engine()
+    assert built == [{"width_height_ratio": -1}]
+    assert statement._engine() is engine
+
+
+def test_a_short_wide_statement_is_read():
+    """The regression: a statement day with few rows makes a frame wide enough
+    that the detector was skipped, so the reader saw no boxes to parse."""
+    pytest.importorskip("rapidocr_onnxruntime")
+    import cv2
+    import numpy as np
+    f = cv2.FONT_HERSHEY_SIMPLEX
+    img = np.full((221, 1842, 3), 255, dtype=np.uint8)
+    cv2.putText(img, "2026-01-01", (20, 70), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "1", (700, 70), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "210.00", (1560, 70), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "2026-01-01 09:00", (20, 170), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "1128000000000001", (600, 170), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "2026-01-03", (1150, 170), f, 1.2, (0, 0, 0), 3)
+    cv2.putText(img, "210.00", (1560, 170), f, 1.2, (0, 0, 0), 3)
+    assert img.shape[1] / img.shape[0] > 8
+    stmt = statement.read_image(bytes(cv2.imencode(".png", img)[1]))
+    assert [d.date for d in stmt.days] == ["2026-01-01"]
+    rows = stmt.days[0].rows
+    assert [(r.time, r.order_id, r.amount) for r in rows] == [("09:00", "1128000000000001", 210.0)]
