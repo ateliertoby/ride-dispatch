@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, create_settlement, settlement_candidates, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, statements_dir, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -806,6 +806,50 @@ async def _mark_parking_command(msg, args: list[str]):
     await msg.reply_text(_history_line(get_parking_session(DB_PATH, int(args[1]))))
 
 
+def _image_meta(msg, file_id: str | None = None, data: bytes | None = None) -> str:
+    """What the log needs to tell one forwarded screenshot from another.
+
+    A reader failure is diagnosed from the frame's shape and the file itself,
+    so both go in the line.  Whatever the failure happened too early to know is
+    left out rather than guessed.
+    """
+    photo = msg.photo[-1] if msg.photo else None
+    parts = [f"chat={msg.chat_id}"]
+    if photo is not None:
+        parts.append(f"source=photo {photo.width}x{photo.height}")
+    else:
+        doc = msg.document
+        parts.append(f"source=document mime={getattr(doc, 'mime_type', None)} "
+                     f"name={getattr(doc, 'file_name', None)}")
+    if file_id:
+        parts.append(f"file_id={file_id}")
+    if data is not None:
+        parts.append(f"bytes={len(data)} ext={image_extension(data)}")
+        size = statement.image_size(data)
+        if size:
+            parts.append(f"decoded={size[0]}x{size[1]}")
+    return " ".join(parts)
+
+
+def _keep_unread_image(file_id: str | None, data: bytes) -> None:
+    """Keep a screenshot the reader could not read.
+
+    The operator's copy scrolls away in a chat, and a reader bug can only be
+    reproduced from the exact bytes.  Nothing here may cost the operator their
+    reply, so a failure to write is logged and swallowed.
+    """
+    try:
+        d = os.path.join(statements_dir(DB_PATH), "failed")
+        os.makedirs(d, exist_ok=True)
+        # The id comes from Telegram and is about to be part of a path.
+        stem = re.sub(r"[^A-Za-z0-9_-]", "_", (file_id or "")[:12])
+        name = f"{datetime.now():%Y%m%d-%H%M%S}-{stem}.{image_extension(data)}"
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(data)
+    except Exception:
+        logging.getLogger("bot").exception("could not keep unreadable statement image")
+
+
 async def handle_statement_image(update: Update, context):
     msg = update.message
     if not msg:
@@ -818,6 +862,10 @@ async def handle_statement_image(update: Update, context):
     # exception would leave the operator staring at a bot that simply said
     # nothing, so each failure comes back as a message naming the type and
     # asking for the original file, which is the one thing that often fixes it.
+    # Bound before the try so the failure log can name whatever was already
+    # known when it broke, however early that was.
+    file_id = None
+    data = None
     try:
         if not statement.ocr_available():
             await msg.reply_text(statement.fallback_report(get_settleable_recent(DB_PATH, days=14)))
@@ -827,9 +875,15 @@ async def handle_statement_image(update: Update, context):
         data = bytes(await tg_file.download_as_bytearray())
         # CPU-bound and ~2 s: off the event loop so the heartbeat keeps ticking.
         stmt = await asyncio.to_thread(statement.read_image, data)
+        meta = _image_meta(msg, file_id, data)
         if not stmt.days:
+            logging.getLogger("bot").warning("statement unreadable: %s warnings=%s",
+                                             meta, stmt.warnings)
+            _keep_unread_image(file_id, data)
             await msg.reply_text("讀唔到張圖（" + "；".join(stmt.warnings or ["冇日期 / 訂單行"]) + "）— 再 send 一次，或者用「Send as file」send 原檔")
             return
+        logging.getLogger("bot").info("statement read: %d days %d rows · %s", len(stmt.days),
+                                      sum(len(d.rows) for d in stmt.days), meta)
         dates = statement.dates_of(stmt)
         orders = settlement_candidates(DB_PATH, dates)
         rec = statement.reconcile(stmt, orders, datetime.now())
@@ -881,7 +935,8 @@ async def handle_statement_image(update: Update, context):
         pending_statements[sent.message_id] = (msg.chat_id, rec, stmt_json, data,
                                                chosen["id"] if chosen else None)
     except Exception as e:
-        logging.getLogger("bot").exception("statement image failed")
+        logging.getLogger("bot").exception("statement image failed: %s",
+                                           _image_meta(msg, file_id, data))
         await msg.reply_text(f"讀圖出錯（{type(e).__name__}）— 再 send 一次，或者用「Send as file」send 原檔")
 
 
