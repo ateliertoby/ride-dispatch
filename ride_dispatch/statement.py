@@ -380,8 +380,9 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
 
 # Thousands separator may be read as "." on a compressed photo ("2.540.00");
 # lookarounds keep a dotted date ("2026.08.25") and sub-runs of a longer
-# number from matching.
-_MONEY_RE = re.compile(r"(?<![\d.])\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])")
+# number from matching.  A figure carrying a "%" is a rate (派單風險率 prints
+# "0.00%"), never money, so it must not be able to stand in for an amount.
+_MONEY_RE = re.compile(r"(?<![\d.])\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])(?!\s*%)")
 _DATE_RE = re.compile(r"20\d\d-\d\d-\d\d")
 _TIME_RE = re.compile(r"(?<!\d)\d\d:\d\d(?!\d)")
 # Three shapes of order number reach this reader, and one pattern has to know
@@ -417,6 +418,24 @@ _REAL_LETTER_RE = re.compile(r"[AC-HJ-NP-RT-Z]")
 # then binds exactly (_prefix) or within MAX_EDITS (_prefix_near), because
 # photo compression rewrites letters the digit fixes are not allowed to touch.
 MIN_PREFIX = 10
+
+
+# The amount (司機應結算金額) is the table's rightmost column, and the figure
+# ends its box; whatever precedes it is a neighbouring cell OCR merged in, or
+# noise.  A decimal point drawn at ~7 px comes back as ":", so both separators
+# are accepted, and a thousands comma read as "." ("2.540.00") is still a
+# thousands group.  Nothing else in the row may stand in for this cell: the other
+# columns hold figures that are not the amount (an estimate, a rate), so taking
+# one of those would settle a wrong sum with nothing to show for it, whereas
+# reporting the row unreadable is visible to the operator.
+_ROW_END_AMOUNT_RE = re.compile(r"(\d{1,3}(?:[,.]\d{3})+|\d+)[.:](\d{2})\s*$")
+
+
+def _amount_at_row_end(text: str) -> float | None:
+    m = _ROW_END_AMOUNT_RE.search(text)
+    if m is None:
+        return None
+    return float(m.group(1).replace(",", "").replace(".", "") + "." + m.group(2))
 
 
 def _money(text: str) -> float:
@@ -484,15 +503,21 @@ def parse_boxes(boxes: list, width: int) -> Statement:
         # known to be a prefix if that ellipsis is still beside it.
         ids = _ids_in(text)
         dates = [(x, m) for x, _, t in row for m in _DATE_RE.findall(t)]
-        leading_date = dates and dates[0][0] < width * 0.15 and row and _DATE_RE.match(row[0][2].strip()) is not None
+        # A day header opens with its date at the left edge, but not always in
+        # the row's first box: the ▾ expand caret beside it can be recognised
+        # as a box of its own.  Anything left of the date is that noise, so the
+        # 记录数 scan starts after the date box rather than after box zero.
+        heads = [(i, m.group()) for i, (x, _, t) in enumerate(row)
+                 if x < width * 0.15 and (m := _DATE_RE.match(t.strip()))]
         if account:
             stmt.account = account.group(1).strip()
             if rightmost is not None:
                 stmt.total = rightmost
-        elif leading_date and not ids:
-            current = StatementDay(date=dates[0][1], rows=[], sum=rightmost)
+        elif heads and not ids:
+            head_i, head_date = heads[0]
+            current = StatementDay(date=head_date, rows=[], sum=rightmost)
             first_money_x = min((x for x, _ in moneys), default=width)
-            for x, _, t in row[1:]:
+            for x, _, t in row[head_i + 1:]:
                 if x >= first_money_x:
                     break
                 m = _COUNT_RE.search(t.strip())
@@ -504,14 +529,15 @@ def parse_boxes(boxes: list, width: int) -> Statement:
             if current is None:
                 stmt.warnings.append(f"row before any day header: {text[:40]}")
                 continue
-            if rightmost is None:
+            amount = _amount_at_row_end(row[-1][2])
+            if amount is None:
                 stmt.warnings.append(f"row without amount: {text[:40]}")
                 continue
             times = _TIME_RE.findall(text)
             right_dates = [m for x, m in dates if x > width * 0.5]
             order_id, truncated = ids[0]
             current.rows.append(StatementRow(
-                date=current.date, order_id=order_id, amount=rightmost,
+                date=current.date, order_id=order_id, amount=amount,
                 time=times[0] if times else None,
                 settle_date=right_dates[-1] if right_dates else None,
                 truncated=truncated,

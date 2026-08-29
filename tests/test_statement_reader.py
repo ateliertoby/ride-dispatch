@@ -122,6 +122,77 @@ def test_ids_do_not_swallow_amounts_dates_or_times():
     assert statement._ID_RE.findall("2026-08-22 09:30 1,330.00") == []
 
 
+# ---- the amount column ----
+
+def box(x, text, y, w=90):
+    return [[[x, y], [x + w, y], [x + w, y + 12], [x, y + 12]], text, 0.9]
+
+
+def wide_row(amount_text, y):
+    """A data line off the wide table: the 司機應結算金額 cell is the rightmost
+    box, with a 司機預估收入 figure and a 派單風險率 percentage in columns to its
+    left, either of which is money-shaped but is not the amount."""
+    return [box(39, "2026-08-16", y),
+            box(138, "2026-08-16 09:00", y),
+            box(300, "1128000000000001", y, w=170),
+            box(560, "200.00", y),
+            box(900, "0.00%", y),
+            box(1100, "2026-08-18", y),
+            box(1240, amount_text, y, w=40)]
+
+
+def test_a_percentage_is_not_money():
+    assert statement._MONEY_RE.findall("0.00%") == []
+    assert statement._MONEY_RE.findall("210.00 合格 0.90%") == ["210.00"]
+
+
+def test_amount_is_read_off_the_end_of_the_rightmost_box():
+    """Junk OCR merges into the amount cell is ignored; a decimal point drawn
+    at ~7 px comes back as ":"; one decimal digit is not an amount."""
+    f = statement._amount_at_row_end
+    assert f("正常 210.00") == 210.0
+    assert f("#fo 830.00") == 830.0
+    assert f("1,234.00") == 1234.0
+    assert f("2.540.00") == 2540.0
+    assert f("200:00") == 200.0
+    assert f("0.00%") is None
+    assert f("HKD") is None
+    assert f("210.0") is None
+
+
+def test_amount_comes_from_the_rightmost_cell_not_the_percentage_column():
+    boxes = [box(39, "2026-08-16", 10), box(300, "1", 10), box(1240, "200.00", 10, w=40)]
+    boxes += wide_row("200:00", y=40)
+    stmt = parse_boxes(boxes, 1280)
+    assert [r.amount for r in stmt.days[0].rows] == [200.0]
+    assert stmt.warnings == []
+
+
+def test_an_unreadable_amount_cell_drops_the_row_rather_than_guessing():
+    """Reading the amount off whichever other column happens to be
+    money-shaped would settle a wrong sum with nothing to show for it."""
+    boxes = [box(39, "2026-08-16", 10), box(300, "1", 10), box(1240, "200.00", 10, w=40)]
+    boxes += wide_row("HKD", y=40)
+    stmt = parse_boxes(boxes, 1280)
+    assert stmt.days[0].rows == []
+    assert any("row without amount" in w for w in stmt.warnings)
+
+
+def test_a_stray_box_left_of_the_date_still_opens_the_day():
+    """The ▾ expand caret is recognised as a box of its own, so the header's
+    date is no longer its first box — and the 记录数 scan must start after the
+    date rather than read the date's own trailing digits as a count."""
+    boxes = [box(27, "4", 10, w=14), box(53, "2026-08-16", 10), box(300, "2", 10),
+             box(1240, "400.00", 10, w=40)]
+    boxes += wide_row("200:00", y=40)
+    boxes += wide_row("200.00", y=70)
+    stmt = parse_boxes(boxes, 1280)
+    assert [d.date for d in stmt.days] == ["2026-08-16"]
+    assert [r.amount for r in stmt.days[0].rows] == [200.0, 200.0]
+    assert stmt.days[0].count == 2
+    assert stmt.warnings == []
+
+
 def test_undecodable_input_is_reported_without_starting_the_engine(monkeypatch):
     def boom():
         raise AssertionError("OCR engine must not be built for undecodable input")
