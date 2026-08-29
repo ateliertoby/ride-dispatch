@@ -528,7 +528,11 @@ def _engine():
     global _ocr
     if _ocr is None:
         from rapidocr_onnxruntime import RapidOCR
-        _ocr = RapidOCR()
+        # Above a width/height ratio of its own (8 by default) the engine skips
+        # detection and recognises the whole frame as a single line, so a wide
+        # screenshot comes back with no boxes at all.  A statement day with few
+        # rows is that wide.  -1 turns the threshold off.
+        _ocr = RapidOCR(width_height_ratio=-1)
     return _ocr
 
 
@@ -566,22 +570,57 @@ def _undecodable() -> Statement:
     return stmt
 
 
+def _decode(data: bytes):
+    """The screenshot as a BGR array, or None for anything that is not one."""
+    import cv2
+    import numpy as np
+    if not data:
+        return None
+    try:
+        return cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except cv2.error:
+        return None
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) of an encoded screenshot, None when it will not decode."""
+    img = _decode(data)
+    return None if img is None else (img.shape[1], img.shape[0])
+
+
+# The widest frame handed to the engine, as a multiple of its height: a margin
+# below the ratio at which the engine stops detecting.
+_MAX_ASPECT = 6.0
+
+
+def _pad_for_detection(img):
+    """Extend a very wide frame downwards with white rows until it is no wider
+    than `_MAX_ASPECT` times its height.
+
+    A guard against the detector's width/height threshold that does not depend
+    on the engine's settings: past that threshold nothing is detected and the
+    whole frame is recognised as one line.  Only rows are added, below the
+    content, so the width and every original pixel stay as they were and the
+    blank rows contribute no boxes of their own.
+    """
+    import numpy as np
+    h, w = img.shape[:2]
+    if h <= 0 or w <= _MAX_ASPECT * h:
+        return img
+    rows = int(np.ceil(w / _MAX_ASPECT)) - h
+    return np.vstack([img, np.full((rows, w) + img.shape[2:], 255, dtype=img.dtype)])
+
+
 def read_image(data: bytes) -> Statement:
     """Decode and OCR one screenshot.  CPU-bound (~2 s on the server) and
     serialised: callers run it in a worker thread."""
-    import cv2
-    import numpy as np
     # Whatever the operator sent, this returns a Statement: empty input and a
     # non-image both reach the warning path, which Telegram callers report as
     # an unreadable screenshot rather than a crash.
-    if not data:
-        return _undecodable()
-    try:
-        img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-    except cv2.error:
-        return _undecodable()
+    img = _decode(data)
     if img is None:
         return _undecodable()
+    img = _pad_for_detection(img)
     with _ocr_lock:
         result, _elapse = _engine()(img)
     stmt = parse_boxes(result or [], img.shape[1])
