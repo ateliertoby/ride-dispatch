@@ -11,7 +11,7 @@ import ride_dispatch.bot as bot
 from ride_dispatch import statement
 from ride_dispatch.db import (
     init_db, save_order, update_price, get_settlement, get_order_by_id, create_settlement,
-    open_batches, statement_image_path,
+    open_batches, statement_image_path, statements_dir,
 )
 from ride_dispatch.parser import Order
 from ride_dispatch.statement import Statement, StatementDay, StatementRow, format_report, date_span_label
@@ -273,6 +273,31 @@ def test_unreadable_image(db_path, monkeypatch):
     upd, msg = photo_update()
     asyncio.run(bot.handle_statement_image(upd, context_with_file()))
     assert "讀唔到" in sent_text(msg) and buttons_of(msg) == []
+
+
+def test_unreadable_image_is_kept_and_logged(db_path, monkeypatch, caplog):
+    """A screenshot the reader cannot read is the only evidence of the bug that
+    stopped it, and the operator's copy scrolls away."""
+    use_statement(monkeypatch, Statement(days=[], warnings=["冇日期 / 訂單行"]))
+    upd, msg = photo_update()
+    with caplog.at_level("WARNING", logger="bot"):
+        asyncio.run(bot.handle_statement_image(upd, context_with_file()))
+    assert "讀唔到" in sent_text(msg)
+    kept = os.listdir(os.path.join(statements_dir(db_path), "failed"))
+    assert len(kept) == 1 and kept[0].endswith("-big.jpg")
+    with open(os.path.join(statements_dir(db_path), "failed", kept[0]), "rb") as f:
+        assert f.read() == b"\xff\xd8img"
+    assert "statement unreadable" in caplog.text
+    assert "chat=123" in caplog.text and "file_id=big" in caplog.text
+    assert "冇日期 / 訂單行" in caplog.text
+
+
+def test_a_readable_image_keeps_nothing(db_path, monkeypatch):
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    use_statement(monkeypatch, stmt_for({YESTERDAY: [("A1", 280.0)]}, 280.0))
+    upd, msg = photo_update()
+    asyncio.run(bot.handle_statement_image(upd, context_with_file()))
+    assert not os.path.isdir(os.path.join(statements_dir(db_path), "failed"))
 
 
 def test_download_failure_is_reported_not_raised(db_path, monkeypatch, caplog):
