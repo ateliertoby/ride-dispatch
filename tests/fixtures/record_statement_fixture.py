@@ -5,8 +5,9 @@ Usage: STATEMENT_FIXTURE_SALT=<private> python tests/fixtures/record_statement_f
 Order numbers and the account name are real data and must not enter the
 repository.  Every token the reader would treat as an id keeps its first four
 digits (the platform prefix shape) and has its tail replaced by digits of
-sha256(salt + id); the account label is replaced wholesale.  Amounts, dates and
-layout are kept — they are what the reader is tested on.
+sha256(salt + id); the account label, name included, is replaced wholesale.
+Amounts, dates and layout are kept — they are what the reader is tested on, and
+so are the bracket tokens that hold no account code (see _ACCOUNT_BRACKET_RE).
 
 The salt is read from the environment and must never be committed.  A fixed
 permutation was tried first and is unusable: the key sits in this file, so
@@ -56,9 +57,16 @@ def _anonymise_match(m: re.Match) -> str:
     return anonymise_id(token)
 
 
+# An account code is alphanumeric, and the name printed before it belongs to the
+# same person, so both go.  A bracket holding only CJK is not an account label
+# but one of the platform's category chips, which OCR renders with 【】 often
+# enough that the reader is tested against them: those must survive verbatim.
+_ACCOUNT_BRACKET_RE = re.compile(r"[^【]*【[^】]*[0-9A-Za-z][^】]*】")
+
+
 def anonymise_text(text: str) -> str:
     text = _ID_RE.sub(_anonymise_match, text)
-    return re.sub(r"[^【]*【[^】]*】", "測試人【YY0000】", text)
+    return _ACCOUNT_BRACKET_RE.sub("測試人【YY0000】", text)
 
 
 def main(src: str, dst: str) -> None:
