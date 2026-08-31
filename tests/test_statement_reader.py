@@ -18,6 +18,11 @@ DAY1 = [("09:00", "1128441073982467", 280.0), ("12:30", "1128654265046668", 210.
 DAY2 = [("10:00", "1128777147862551", 210.0), ("17:15", "1128184195410622", 210.0),
         ("18:13", "1385660587571823", 210.0), ("12:50", "5127189103823435851", 210.0),
         ("12:55", "3316573881430636069", 280.0), ("10:40", "SPACE202640159248", 210.0)]
+# A third recording, of a statement whose category chips OCR drew with 【】 —
+# one of them a matched pair, inside the last data row of the last day.
+DAY3 = [("11:47", "1578701224818578", 200.0), ("14:00", "1539272630110852", 210.0),
+        ("15:25", "1128100382197280", 310.0), ("11:47", "1578701224818578", 40.0),
+        ("17:40", "3316196058926202002", 280.0)]
 
 
 def load(name):
@@ -53,6 +58,20 @@ def test_counts_read_from_original_and_tolerated_on_compressed():
     assert [d.count for d in orig.days] == [6, 6]
     small = parse_boxes(*load("statement_1280.json"))
     assert all(c in (6, None) for c in (d.count for d in small.days))
+
+
+def test_a_bracketed_chip_costs_neither_a_row_nor_the_totals():
+    """A statement whose 【】 category chips OCR happened to close: the chip
+    lands in a data row, which must still be read as one, and must not be able
+    to restate the account and grand total the top row already carried."""
+    stmt = parse_boxes(*load("statement_bracketed_chip.json"))
+    assert stmt.account == "YY0000"
+    assert stmt.total == 3060.0
+    assert [d.date for d in stmt.days] == ["2026-08-27", "2026-08-28", "2026-08-29"]
+    assert [d.count for d in stmt.days] == [4, 6, 5]
+    assert [d.sum for d in stmt.days] == [940.0, 1080.0, 1040.0]
+    assert [len(d.rows) for d in stmt.days] == [4, 6, 5]
+    assert [(r.time, r.order_id, r.amount) for r in stmt.days[2].rows] == DAY3
 
 
 def test_data_row_before_any_header_is_dropped_with_warning():
@@ -191,6 +210,43 @@ def test_a_stray_box_left_of_the_date_still_opens_the_day():
     assert [r.amount for r in stmt.days[0].rows] == [200.0, 200.0]
     assert stmt.days[0].count == 2
     assert stmt.warnings == []
+
+
+# ---- bracketed cells ----
+
+def test_the_top_row_carries_the_account_and_grand_total():
+    boxes = [box(39, "測試人【YY0000】", 10), box(1240, "3060.00", 10, w=40)]
+    stmt = parse_boxes(boxes, 1280)
+    assert stmt.account == "YY0000"
+    assert stmt.total == 3060.0
+
+
+def test_a_row_holding_an_order_id_is_data_however_it_is_bracketed():
+    """OCR renders the platform's category chips with 【】, and a matched pair
+    lands in a data row, where the account pattern must not claim it."""
+    boxes = [box(39, "測試人【YY0000】", 10), box(1240, "3060.00", 10, w=40)]
+    boxes += [box(39, "2026-08-29", 40), box(300, "1", 40), box(1240, "280.00", 40, w=40)]
+    boxes += [box(39, "2026-08-29", 70), box(138, "2026-08-29 17:40", 70),
+              box(298, "【送机】", 70, w=50), box(357, "3316000000000000001", 70, w=170),
+              box(1100, "2026-08-31", 70), box(1240, "280.00", 70, w=40)]
+    stmt = parse_boxes(boxes, 1280)
+    assert stmt.account == "YY0000"
+    assert stmt.total == 3060.0
+    assert [(r.time, r.order_id, r.amount) for r in stmt.days[0].rows] == [
+        ("17:40", "3316000000000000001", 280.0)]
+
+
+def test_a_bracket_below_a_day_header_cannot_restate_the_totals():
+    """The account and grand total sit above every day header, so a bracket
+    met after a day has opened is chip noise even when nothing else in the row
+    says what it is."""
+    boxes = [box(39, "測試人【YY0000】", 10), box(1240, "3060.00", 10, w=40)]
+    boxes += [box(39, "2026-08-29", 40), box(300, "1", 40), box(1240, "280.00", 40, w=40)]
+    boxes += [box(298, "【合格】", 70, w=50), box(1240, "40.00", 70, w=40)]
+    stmt = parse_boxes(boxes, 1280)
+    assert stmt.account == "YY0000"
+    assert stmt.total == 3060.0
+    assert stmt.days[0].rows == []
 
 
 def test_undecodable_input_is_reported_without_starting_the_engine(monkeypatch):

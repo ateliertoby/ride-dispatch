@@ -509,23 +509,11 @@ def parse_boxes(boxes: list, width: int) -> Statement:
         # 记录数 scan starts after the date box rather than after box zero.
         heads = [(i, m.group()) for i, (x, _, t) in enumerate(row)
                  if x < width * 0.15 and (m := _DATE_RE.match(t.strip()))]
-        if account:
-            stmt.account = account.group(1).strip()
-            if rightmost is not None:
-                stmt.total = rightmost
-        elif heads and not ids:
-            head_i, head_date = heads[0]
-            current = StatementDay(date=head_date, rows=[], sum=rightmost)
-            first_money_x = min((x for x, _ in moneys), default=width)
-            for x, _, t in row[head_i + 1:]:
-                if x >= first_money_x:
-                    break
-                m = _COUNT_RE.search(t.strip())
-                if m:
-                    current.count = int(m.group(1))
-                    break
-            stmt.days.append(current)
-        elif ids:
+        # A row carrying an order id is a data row whatever else it holds: OCR
+        # renders the platform's category chips with 【】, and a matched pair
+        # does land in a data row, which the account pattern must not be able
+        # to claim.  The account row carries no id, so nothing is lost.
+        if ids:
             if current is None:
                 stmt.warnings.append(f"row before any day header: {text[:40]}")
                 continue
@@ -542,6 +530,25 @@ def parse_boxes(boxes: list, width: int) -> Statement:
                 settle_date=right_dates[-1] if right_dates else None,
                 truncated=truncated,
             ))
+        # The account code and the grand total print above every day header, so
+        # a bracket met once a day has opened is chip noise and must not be
+        # allowed to overwrite them.
+        elif account and current is None:
+            stmt.account = account.group(1).strip()
+            if rightmost is not None:
+                stmt.total = rightmost
+        elif heads:
+            head_i, head_date = heads[0]
+            current = StatementDay(date=head_date, rows=[], sum=rightmost)
+            first_money_x = min((x for x, _ in moneys), default=width)
+            for x, _, t in row[head_i + 1:]:
+                if x >= first_money_x:
+                    break
+                m = _COUNT_RE.search(t.strip())
+                if m:
+                    current.count = int(m.group(1))
+                    break
+            stmt.days.append(current)
     return stmt
 
 
