@@ -572,7 +572,7 @@ def test_statement_card_names_the_credit_its_total_agrees_with(db_path, monkeypa
     msg = card_for(monkeypatch, stmt_for({YESTERDAY: [("A1", 2540.0)]}, 2540.0))
     assert reply_text(msg).endswith(f"\n對到入數 {credits.md(TODAY)} $2,540")
     assert [b.text for b in reply_buttons(msg)] == ["確認結算 + 對入數 · 1 程 · $2,540", "唔確認"]
-    assert bot.pending_statements[777][4] == cid
+    assert bot.pending_statements[777][1].credit_id == cid
 
 
 def test_statement_card_says_when_the_platform_figure_disagrees_too(db_path, monkeypatch):
@@ -593,7 +593,7 @@ def test_statement_card_lists_the_credits_that_could_contain_it(db_path, monkeyp
     assert lines[-2] == "入數可能係："
     assert lines[-1] == f"入數 $2,950 · {credits.md(TODAY)}"
     assert [b.text for b in reply_buttons(msg)] == ["確認結算 · 1 程 · $1,450", "唔確認"]
-    assert bot.pending_statements[777][4] is None
+    assert bot.pending_statements[777][1].credit_id is None
 
 
 def test_statement_card_says_the_money_has_not_arrived(db_path, monkeypatch):
@@ -602,7 +602,7 @@ def test_statement_card_says_the_money_has_not_arrived(db_path, monkeypatch):
     msg = card_for(monkeypatch, stmt_for({YESTERDAY: [("A1", 1450.0)]}, 1450.0))
     assert reply_text(msg).endswith("\n未收到呢筆數")
     assert [b.text for b in reply_buttons(msg)] == ["確認結算 · 1 程 · $1,450", "唔確認"]
-    assert bot.pending_statements[777][4] is None
+    assert bot.pending_statements[777][1].credit_id is None
 
 
 def test_statement_card_will_not_offer_a_credit_older_than_the_service(db_path, monkeypatch):
@@ -613,7 +613,7 @@ def test_statement_card_will_not_offer_a_credit_older_than_the_service(db_path, 
     credit_row(db_path, "R1", 1450.0, MONTHS_AGO)
     msg = card_for(monkeypatch, stmt_for({YESTERDAY: [("A1", 1450.0)]}, 1450.0))
     assert reply_text(msg).endswith("\n未收到呢筆數")
-    assert bot.pending_statements[777][4] is None
+    assert bot.pending_statements[777][1].credit_id is None
 
 
 def test_statement_with_no_orders_offers_to_archive_the_credit(db_path, monkeypatch):
@@ -706,9 +706,12 @@ def test_allocate_is_only_called_by_a_tapped_callback():
     tap is the only thing allowed to call it: a matcher that moved money on its
     own would put it against orders nobody had checked.  The settle page is a
     second tap, not a second decider — the endpoint allocates what the request
-    names and nothing else.  A new call site has to be added here deliberately.
+    names and nothing else.  statement_flow.confirm is that same tap arriving
+    from either frontend: the credit it spends is the one its card named.
+    A new call site has to be added here deliberately.
     """
     assert _call_sites("allocate") == {("bot.py", "handle_callback"),
+                                       ("statement_flow.py", "confirm"),
                                        ("web.py", "api_allocate_credit")}
 
 
@@ -763,7 +766,7 @@ def test_statement_card_offers_the_credit_that_pays_it_short(db_path, monkeypatc
     assert reply_text(msg).endswith(f"\n對到入數 {credits.md(YESTERDAY)} $2,950，差 $510")
     assert [b.text for b in reply_buttons(msg)] == [
         "確認結算 + 對入數 $2,950（差 $510）", "唔確認"]
-    assert bot.pending_statements[777][4] == 1
+    assert bot.pending_statements[777][1].credit_id == 1
 
 
 def test_an_exact_credit_beats_a_short_one(db_path, monkeypatch):
@@ -772,7 +775,7 @@ def test_an_exact_credit_beats_a_short_one(db_path, monkeypatch):
     exact = credit_row(db_path, "R2", 1450.0, YESTERDAY)
     msg = card_for(monkeypatch, stmt_for({TWO_DAYS: [("A1", 1450.0)]}, 1450.0))
     assert reply_text(msg).endswith(f"\n對到入數 {credits.md(YESTERDAY)} $1,450")
-    assert bot.pending_statements[777][4] == exact
+    assert bot.pending_statements[777][1].credit_id == exact
 
 
 def confirm_short(db_path, monkeypatch):
