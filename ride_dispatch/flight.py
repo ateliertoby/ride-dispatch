@@ -16,6 +16,10 @@ MATCH_WINDOW_HOURS = 12
 DRIVE_MINUTES = 40
 EXIT_URGENT_MAX = 20
 EXIT_TIGHT_MAX = 30
+# How long a past ETA is tolerated before the plane is assumed to be down.
+# HKIA revises Est with jitter, so a short grace absorbs normal wobble while
+# still beating the feed's own lag between touchdown and "Landed".
+ETA_PASSED_GRACE = 300
 
 _TIME_RE = re.compile(r"(\d{2}:\d{2})")
 # Booking sources and the HKIA feed disagree on zero-padding (HKIA pads the
@@ -356,6 +360,33 @@ def depart_reminder_due(order: dict, now: datetime) -> str | None:
     return hhmm
 
 
+def eta_passed_advisory_due(order: dict, now: datetime) -> str | None:
+    """Return the ETA HH:MM when a still-'est' flight is past its own ETA.
+
+    Advisory only: the feed stays the sole authority on flight_status, so this
+    never promotes the order and never stands in for the landed/gate pushes.
+    'est' is the only status a past ETA says anything about — the terminal
+    states carry their own pushes, and no status at all means no ETA to pass.
+    """
+    if not is_flight_pickup(order.get('service_type') or ''):
+        return None
+    if order.get('flight_status') != 'est':
+        return None
+    sent = set(filter(None, (order.get('reminders_sent') or '').split(',')))
+    if 'etapass' in sent:
+        return None
+    eta = _valid_hhmm(order.get('flight_eta'))
+    if not eta:
+        return None
+    sched = datetime.strptime(order['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+    due = _attach_date(eta, sched) + timedelta(seconds=ETA_PASSED_GRACE)
+    if now < due:
+        return None
+    if (now - due).total_seconds() >= 7200:
+        return None  # staleness guard
+    return eta
+
+
 def departure_milestones_due(order: dict, now: datetime) -> list[str]:
     """Return list of milestone tags (dep30, dep10) that should fire now."""
     if not needs_departure_reminder(order.get('service_type') or ''):
@@ -395,6 +426,15 @@ def pending_reminder_times(orders: list[dict], now: datetime) -> list[datetime]:
                 if hhmm:
                     sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
                     due = _attach_date(hhmm, sched)
+                    if due > now:
+                        times.append(due)
+        # eta-passed advisory (接机, est only)
+        if is_flight_pickup(o.get('service_type') or '') and o.get('flight_status') == 'est':
+            if 'etapass' not in sent:
+                eta = _valid_hhmm(o.get('flight_eta'))
+                if eta:
+                    sched = datetime.strptime(o['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+                    due = _attach_date(eta, sched) + timedelta(seconds=ETA_PASSED_GRACE)
                     if due > now:
                         times.append(due)
         # departure milestones

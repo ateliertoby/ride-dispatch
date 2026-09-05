@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 from .ingest import parse_any, parking_fee, banner_fee
 from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
-from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, predicted_landing_hhmm
+from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
@@ -1254,6 +1254,33 @@ async def _check_depart_reminders(bot, chat_id: int, now: datetime):
             logger.exception("depart reminder failed for %s", order.get('order_id', '?')[-4:])
 
 
+async def _check_eta_passed_advisories(bot, chat_id: int, now: datetime):
+    """Say the plane is probably down while the feed still says it is inbound.
+
+    Advisory only: nothing here writes flight_status, so the svc/depart chain
+    and the whiteboard prompt still wait for the feed to confirm the landing.
+    """
+    dates = get_tracking_dates(DB_PATH, now=now)
+    if not dates:
+        return
+    for order in _orders_in(dates):
+        try:
+            eta = eta_passed_advisory_due(order, now)
+            if not eta:
+                continue
+            msg = f"預計已落地 {eta}（HKIA 未確認）"
+            msg += _order_lines(order, eta)
+            # Same decision the landing push puts to the driver: wait outside
+            # for the free half hour, or go in.
+            if _get_parking_client() is not None:
+                msg += "\n" + _allowance_line(now)
+            await bot.send_message(chat_id=chat_id, text=msg)
+            mark_reminder_sent(DB_PATH, order['order_id'], 'etapass')
+            logger.info("eta-passed advisory sent for %s", order['order_id'][-4:])
+        except Exception:
+            logger.exception("eta-passed advisory failed for %s", order.get('order_id', '?')[-4:])
+
+
 async def _check_departure_reminders(bot, chat_id: int, now: datetime):
     for order in get_departure_reminders(DB_PATH, now):
         try:
@@ -1579,6 +1606,10 @@ async def _poll_and_notify(context) -> int:
         await _check_depart_reminders(bot, chat_id, now)
     except Exception:
         logger.exception("depart reminder check error")
+    try:
+        await _check_eta_passed_advisories(bot, chat_id, now)
+    except Exception:
+        logger.exception("eta-passed advisory check error")
     try:
         await _check_departure_reminders(bot, chat_id, now)
     except Exception:
