@@ -235,6 +235,26 @@ def test_expected_missing_columns():
     assert expected_of({'service_type': '接机'}) == 0.0
 
 
+def test_expected_nets_a_penalty_on_every_platform():
+    """A 判罰賠款 is money the platform takes back out of whatever it pays, so
+    it comes off the fare and the reimbursed fee alike."""
+    assert expected_of(order(penalty_fee=97.38)) == 442.62
+    assert expected_of(order(service_type='滴滴', penalty_fee=30.0)) == 500.0
+    assert expected_of(order(service_type='Uber', penalty_fee=30.0)) == 500.0
+    assert expected_of(order(service_type='foodpanda', penalty_fee=100.0)) == 400.0
+
+
+def test_expected_null_penalty_counts_as_zero():
+    assert expected_of(order(penalty_fee=None)) == 540.0
+    assert expected_of(order()) == 540.0
+
+
+def test_expected_can_go_negative_when_the_penalty_exceeds_the_fare():
+    """Nothing caps the fine at the fare; an order that cost more than it
+    earned has to say so rather than clamp to zero."""
+    assert expected_of(order(price=100.0, banner_fee=0.0, penalty_fee=250.0)) == -150.0
+
+
 # orders.service_type is a nullable TEXT column, so every predicate has to
 # take None the same way it takes an empty string.
 def test_predicates_accept_none():

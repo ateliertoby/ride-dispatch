@@ -83,8 +83,12 @@ def expected_of(order: dict) -> float:
     """What the platform owes for one order.
 
     Each platform reimburses a different fee on top of the fare; the fee
-    columns are nullable, so a missing fee counts as 0.
-    JS twin: expectedOf() in the settle page — keep in sync.
+    columns are nullable, so a missing fee counts as 0.  A recorded 判罰賠款 is
+    a cost of the order that the platform deducts from whatever it pays, so it
+    is netted off for every platform.  Netting it here is also what makes a
+    statement idempotent: once the fine is stored, re-reading the same image
+    agrees with the platform's own figure.
+    JS twin: expectedOf() in templates/_shared.js — keep in sync.
     """
     platform = platform_of(order.get('service_type'))
     price = order.get('price') or 0
@@ -94,7 +98,7 @@ def expected_of(order: dict) -> float:
         extra = 0
     else:
         extra = order.get('tunnel_fee') or 0
-    return float(price + extra)
+    return float(price + extra - (order.get('penalty_fee') or 0))
 
 
 def label(service_type: str | None) -> str:

@@ -103,6 +103,15 @@
     font-variant-numeric: tabular-nums;
   }
   .price.unset { color: var(--amber); }
+  /* A 判罰賠款 sits under the gross fare rather than replacing it: the day
+     total is gross, and a row that quietly showed net would not add up to it.
+     Exact to the cent — the layout gives way to the number, never the other
+     way round. */
+  .price .pen {
+    display: block; margin-top: 2px;
+    font-size: 11px; font-weight: 650; padding: 1px 5px; border-radius: 5px;
+    background: var(--urgent-bg); color: var(--red);
+  }
 
   /* Quick orders are filler between legs, so they get a lighter one-line row. */
   .row.quick { min-height: 44px; align-items: center; padding: 4px 14px; }
@@ -669,10 +678,14 @@ function tagsHtml(o) {
 }
 
 // Gross, matching the day total: the banner fee is money in, and the deductions
-// that follow it are only visible in the detail sheet's breakdown.
+// that follow it are only visible in the detail sheet's breakdown. A 判罰賠款 is
+// the exception: the platform has already taken that money, so the row carries
+// it as a badge while the figure above it stays the gross the day sums.
 function priceHtml(o) {
   if (!o.price) return '<div class="price unset">未入價</div>';
-  return '<div class="price">$' + $(o.price + (o.banner_fee || 0)) + '</div>';
+  const pen = o.penalty_fee > 0
+    ? '<span class="pen">' + money(-o.penalty_fee) + '</span>' : '';
+  return '<div class="price">$' + $(o.price + (o.banner_fee || 0)) + pen + '</div>';
 }
 
 // One canonical row time drives the server's sort, the rail display and the NOW
@@ -828,6 +841,12 @@ function detailView(sheet) {
     if (o.vehicle_type) rows.push(['車型', esc(o.vehicle_type)]);
     if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span style="color:var(--text-3)">&rarr;</span> ' + esc(o.dropoff)]);
     if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
+  }
+  // What the platform took back, and what the trip is worth after it.  The row
+  // above shows the gross, so without this the sheet would not explain why the
+  // settlement figure is smaller.
+  if (o.penalty_fee > 0) {
+    rows.push(['判罰', esc(money(-o.penalty_fee) + '（淨收 ' + money(expectedOf(o)) + '）')]);
   }
   rows.push(['結算', esc(settleLabel(o))]);
   info = '<div class="info">' + rows.map(r =>

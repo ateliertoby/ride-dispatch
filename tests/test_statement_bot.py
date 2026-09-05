@@ -350,6 +350,91 @@ def test_fallback_when_ocr_missing(db_path, monkeypatch):
     assert buttons_of(msg) == []
 
 
+# ---- 判罰賠款 ----
+
+def penalty_stmt():
+    """One clean leg plus a trip the platform fined: the fine is a second row
+    under the trip's own order id, so the day nets to 482.62."""
+    day1 = StatementDay(date=TWO_DAYS, count=1, sum=300.0,
+                        rows=[StatementRow(date=TWO_DAYS, order_id="A1", amount=300.0, time="09:00")])
+    day2 = StatementDay(date=YESTERDAY, count=2, sum=182.62, rows=[
+        StatementRow(date=YESTERDAY, order_id="B1", amount=280.0, time="13:00"),
+        StatementRow(date=YESTERDAY, order_id="B1", amount=-97.38, time="13:00"),
+    ])
+    return Statement(days=[day1, day2], account="YY0000", total=482.62, reader="test")
+
+
+def test_penalty_card_names_the_fine_and_confirms_it(db_path, monkeypatch):
+    seed(db_path, "A1", f"{TWO_DAYS} 09:00:00", 300.0)
+    seed(db_path, "B1", f"{YESTERDAY} 13:00:00", 280.0)
+    use_statement(monkeypatch, penalty_stmt())
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    text = sent_text(msg)
+    assert "判罰  #…B1  −$97.38 · 該程 $280 → 淨 $182.62" in text
+    assert "差額 $0" in text
+    assert buttons_of(msg) == ["確認結算 + 記判罰 · 2 程 · $482.62", "唔確認"]
+
+    cb, q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+    b = open_batches(db_path, "ride")[0]
+    assert get_order_by_id(db_path, "B1")["penalty_fee"] == 97.38
+    assert get_order_by_id(db_path, "A1")["penalty_fee"] is None
+    # The frozen figure is net: the batch is owed what the transfer will carry.
+    assert b["expected_amount"] == 482.62 and b["confirmed_amount"] == 482.62
+    assert "已記判罰 −$97.38" in q.message.reply_text.call_args.args[0]
+
+
+def test_resending_a_confirmed_penalty_statement_settles_nothing(db_path, monkeypatch):
+    """Idempotency: the recorded fine nets into what the system expects, so the
+    second read agrees with the platform instead of chasing a shortfall."""
+    seed(db_path, "A1", f"{TWO_DAYS} 09:00:00", 300.0)
+    seed(db_path, "B1", f"{YESTERDAY} 13:00:00", 280.0)
+    use_statement(monkeypatch, penalty_stmt())
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    cb, q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+
+    upd2, msg2 = photo_update(message_id=501)
+    asyncio.run(bot.handle_statement_image(upd2, context_with_file()))
+    text = sent_text(msg2)
+    assert "已結算" in text and "冇單可以入 batch" in text
+    assert "判罰" not in text
+    assert buttons_of(msg2) == []
+    assert get_order_by_id(db_path, "B1")["penalty_fee"] == 97.38
+
+
+def test_a_late_penalty_on_a_settled_order_writes_nothing(db_path, monkeypatch):
+    seed(db_path, "B1", f"{YESTERDAY} 13:00:00", 280.0)
+    sid = create_settlement(db_path, "ride", ["B1"], 280.0, YESTERDAY)
+    day = StatementDay(date=YESTERDAY, count=1, sum=-97.38,
+                       rows=[StatementRow(date=YESTERDAY, order_id="B1", amount=-97.38, time="13:00")])
+    use_statement(monkeypatch, Statement(days=[day], account="YY0000", total=-97.38, reader="test"))
+    upd, msg = photo_update()
+    asyncio.run(bot.handle_statement_image(upd, context_with_file()))
+    text = sent_text(msg)
+    assert f"判罰  #…B1  −$97.38（單已喺批次 #{sid}）— 要人手處理" in text
+    assert buttons_of(msg) == []
+    assert get_order_by_id(db_path, "B1")["penalty_fee"] is None
+
+
+def test_the_order_card_shows_the_fine_and_the_net(db_path):
+    seed(db_path, "B1", f"{YESTERDAY} 13:00:00", 280.0)
+    create_settlement(db_path, "ride", ["B1"], 182.62, YESTERDAY, penalties={"B1": 97.38})
+    msg = MagicMock()
+    msg.chat_id = CHAT
+    msg.reply_text = AsyncMock()
+    ctx = MagicMock()
+    ctx.args = ["order_B1"]
+    asyncio.run(bot.handle_start(MagicMock(message=msg), ctx))
+    lines = msg.reply_text.call_args.args[0].split("\n")
+    assert "收入: $280" in lines
+    assert lines[lines.index("收入: $280") + 1] == "判罰: −$97.38（淨收 $182.62）"
+
+
 # ---- the manual paid mark is gone ----
 
 def test_no_handler_marks_a_batch_paid_by_hand(db_path):
@@ -378,3 +463,24 @@ def test_date_span_label():
     assert date_span_label(["2026-08-23", "2026-08-24"]) == "8月23–24日"
     assert date_span_label(["2026-08-30", "2026-09-01"]) == "8月30日、9月1日"
     assert date_span_label(["2026-08-30", "2026-08-31", "2026-09-01"]) == "8月30日–9月1日"
+
+
+def test_money_str_puts_the_minus_outside_the_dollar_sign():
+    """Reconciliation money is exact to the cent, and a negative amount reads
+    as a deduction rather than as a mangled figure."""
+    assert statement.money_str(97.38) == "$97.38"
+    assert statement.money_str(-97.38) == "−$97.38"
+    assert statement.money_str(-280.0) == "−$280"
+    assert statement.money_str(-1234.5) == "−$1,234.50"
+    assert statement.money_str(0.0) == "$0"
+
+
+def test_confirmation_line_survives_a_negative_total():
+    """The line is quoted back to the platform as the amount agreed, so a
+    statement worth less than nothing must not lose its sign to the $ strip."""
+    rec = statement.reconcile(
+        Statement(days=[StatementDay(date="2026-08-23", count=1, sum=-97.38,
+                                     rows=[StatementRow(date="2026-08-23", order_id="A1", amount=-97.38)])],
+                  account="YY0000", total=-97.38),
+        [], datetime(2026, 8, 26, 12, 0))
+    assert statement.confirmation_line(rec, ["2026-08-23"]) == "8月23日 共0程 HKD −97.38 確認無誤"

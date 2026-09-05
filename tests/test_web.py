@@ -491,10 +491,10 @@ def settle(client, month="2026-07", platform="ride"):
 # A batch is born from a statement image in the bot and nowhere else, so these
 # tests create one the way that flow does rather than through an endpoint.
 def create_batch(order_ids, platform="ride", confirmed=540, settled_on="2026-07-03",
-                 statement=None):
+                 statement=None, penalties=None):
     from ride_dispatch.db import create_settlement
     return create_settlement(web.DB_PATH, platform, order_ids, confirmed, settled_on,
-                             statement=statement)
+                             statement=statement, penalties=penalties)
 
 
 def test_settle_shape(client):
@@ -510,6 +510,20 @@ def test_settle_shape(client):
     assert data["settlements"] == []
     assert data["counts"] == {"ride": 1, "didi": 1, "uber": 0, "foodpanda": 0}
     assert data["totals"] == {"unsettled": 540.0, "awaiting": 0}
+
+
+def test_settle_carries_the_penalty_so_the_page_can_net_it(client):
+    """expectedOf() in the browser is the twin of service.py:expected_of, which
+    nets a 判罰賠款: without the column the two would disagree on every fined
+    leg, and the page draws the batch totals."""
+    seed_ride("R1")
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    create_batch(["R1"], confirmed=442.62, penalties={"R1": 97.38})
+    data = settle(client)
+    assert data["orders"][0]["penalty_fee"] == 97.38
+    assert data["orders"][1]["penalty_fee"] is None
+    assert data["settlements"][0]["orders"][0]["penalty_fee"] == 97.38
+    assert data["settlements"][0]["expected_amount"] == 442.62
 
 
 def test_settle_totals_follow_the_batch(client):

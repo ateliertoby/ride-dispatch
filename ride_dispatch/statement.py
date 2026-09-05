@@ -84,6 +84,7 @@ class Entry:
     settlement_id: int | None = None
     fuzzy: bool = False
     reason: str | None = None   # for not_ready: 未入價 / 未完成
+    penalty: float = 0.0        # ≤ 0: the 判罰賠款 rows folded into this order
 
 
 @dataclass
@@ -108,7 +109,27 @@ class Reconciliation:
 
     @property
     def clean(self) -> bool:
-        return self.can_settle and not self.missing and all(e.kind == "matched" for e in self.entries)
+        # A statement fully explained by penalties settles for exactly what
+        # arrived, so it reads as clean: nothing on it is the operator's to chase.
+        return (self.can_settle and not self.missing
+                and all(e.kind in ("matched", "penalty") for e in self.entries))
+
+
+# The entry kinds whose negative rows a confirm records against their order.
+# An already_settled order's fine is deliberately absent: writing it would have
+# to reopen a batch whose expected_amount is frozen, so it stays display-only
+# until that shape is actually worth building for.
+PENALTY_KINDS = ("penalty", "amount_diff")
+
+
+def penalties_of(rec: "Reconciliation") -> dict[str, float]:
+    """The fines a confirm would record: positive amounts by order id.
+
+    One definition, because the button's label has to promise exactly what the
+    confirm writes.
+    """
+    return {e.order_id: -e.penalty for e in rec.entries
+            if e.penalty < 0 and e.kind in PENALTY_KINDS}
 
 
 # A near miss is allowed the same two edits wherever it is measured — over a
@@ -319,13 +340,19 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
     by_id = {o["order_id"]: o for o in orders}
 
     # Fold the statement to one line per order id, keeping first-seen order
-    # (a 舉牌 line sits under the same id as its trip).
+    # (a 舉牌 line sits under the same id as its trip).  The negative rows are
+    # summed apart as well: a 判罰賠款 also shares its trip's id, and telling a
+    # fine from an underpayment is the difference between recording a cost and
+    # reporting a discrepancy.
     merged: dict[str, tuple[str, float]] = {}
+    negatives: dict[str, float] = {}
     truncated: set[str] = set()
     for day in stmt.days:
         for r in day.rows:
             date, amt = merged.get(r.order_id, (r.date, 0.0))
             merged[r.order_id] = (date, round(amt + r.amount, 2))
+            if r.amount < 0:
+                negatives[r.order_id] = round(negatives.get(r.order_id, 0.0) + r.amount, 2)
             if r.truncated:
                 truncated.add(r.order_id)
 
@@ -336,16 +363,17 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
     settle_ids: list[str] = []
     expected_total = 0.0
     for sid, (date, amount) in merged.items():
+        neg = negatives.get(sid, 0.0)
         if sid not in bound:
             entries.append(Entry(kind="unknown", statement_id=sid, order_id=sid, date=date,
-                                 platform_amount=amount, expected=None, order=None))
+                                 platform_amount=amount, expected=None, order=None, penalty=neg))
             continue
         order, fuzzy = bound[sid]
         oid = order["order_id"]
         matched_ids.add(oid)
         exp = expected_of(order)
         base = dict(statement_id=sid, order_id=oid, date=date, platform_amount=amount,
-                    expected=exp, order=order, fuzzy=fuzzy)
+                    expected=exp, order=order, fuzzy=fuzzy, penalty=neg)
         if (order.get("status") or "active") != "active":
             entries.append(Entry("cancelled", **base))
         elif order.get("settlement_id") is not None:
@@ -353,9 +381,23 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
         elif (reason := _settleable(order, now)) is not None:
             entries.append(Entry("not_ready", reason=reason, **base))
         else:
-            entries.append(Entry("matched" if _same(amount, exp) else "amount_diff", **base))
+            if _same(amount, exp):
+                # Covers both "no penalty" and "the fine is already recorded":
+                # expected_of nets a stored penalty_fee, so re-reading the same
+                # image after a confirm agrees rather than settling twice.
+                kind = "matched"
+            elif neg < 0 and _same(round(amount - neg, 2), exp):
+                kind = "penalty"
+            else:
+                kind = "amount_diff"
+            entries.append(Entry(kind, **base))
             settle_ids.append(oid)
-            expected_total += exp
+            # Net of the fine this confirm is about to record, because the same
+            # transaction freezes the batch's expected_amount from the stored
+            # rows: the card and the batch have to name the same figure.  A
+            # `matched` line adds nothing — either there is no fine, or one is
+            # already stored and expected_of has already taken it off.
+            expected_total += exp + (neg if kind in PENALTY_KINDS else 0.0)
 
     dates = set(dates_of(stmt))
     missing = sorted(
@@ -679,6 +721,7 @@ _KIND_LABEL = {
     "already_settled": "已結算",
     "cancelled": "已取消",
     "not_ready": "未可結算",
+    "penalty": "判罰",
     "unknown": "唔喺系統",
 }
 
@@ -741,8 +784,24 @@ def format_report(rec: Reconciliation) -> str:
         lines.append(f"{_md(day.date)} · {len(day.rows)} 行 · {money_str(day_sum)}{mark}")
         for e in problems:
             label = _KIND_LABEL[e.kind]
-            if e.kind == "amount_diff":
+            if e.kind == "penalty":
+                gross = round(e.platform_amount - e.penalty, 2)
+                detail = (f"{_signed(e.penalty)} · 該程 {money_str(gross)} → "
+                          f"淨 {money_str(e.platform_amount)}")
+            elif e.kind == "amount_diff":
                 detail = f"平台 {money_str(e.platform_amount)} · 系統 {money_str(e.expected)}"
+                if e.penalty < 0:
+                    detail += f"（內含判罰 {_signed(e.penalty)}）"
+            elif (e.kind == "already_settled" and e.penalty < 0
+                  and not _same(e.platform_amount, e.expected)):
+                # A fine on an order whose batch is already frozen, and the
+                # platform's figure says it is not one this system has taken
+                # off yet — re-reading a statement that was confirmed lands in
+                # the plain branch below, because there the two figures agree.
+                # Nothing can be written here, so the line names the batch that
+                # holds the order and stops.
+                label = _KIND_LABEL["penalty"]
+                detail = f"{_signed(e.penalty)}（單已喺批次 #{e.settlement_id}）— 要人手處理"
             elif e.kind == "already_settled":
                 detail = f"批次 #{e.settlement_id}"
             elif e.kind == "not_ready":
@@ -796,15 +855,19 @@ def confirm_label(rec: Reconciliation, credit: bool = False,
                   short: tuple[float, float] | None = None) -> str:
     """The button that writes the batch, stating the scale of what it writes.
 
-    `credit` when a bank credit matched the statement's total: the same tap
-    allocates it, and the label has to say so before it is pressed.  `short` is
-    (what would be allocated, what would still be owed) when the credit does
-    not cover the statement — the amounts replace the batch's own figures
-    because agreeing to a part payment is the decision being taken.
+    The same tap also records every 判罰賠款 the statement carries, so the verb
+    names that too: money leaving an order is not something to discover after
+    the fact.  `credit` when a bank credit matched the statement's total: the
+    same tap allocates it, and the label has to say so before it is pressed.
+    `short` is (what would be allocated, what would still be owed) when the
+    credit does not cover the statement — the amounts replace the batch's own
+    figures because agreeing to a part payment is the decision being taken.
     """
     n = len(rec.settle_ids)
     amount = money_str(rec.confirmed or 0.0)
-    verb = ("確認結算" if rec.clean else "照平台數確認") + (" + 對入數" if credit else "")
+    verb = (("確認結算" if rec.clean else "照平台數確認")
+            + (" + 記判罰" if penalties_of(rec) else "")
+            + (" + 對入數" if credit else ""))
     if short is not None:
         return f"{verb} {money_str(short[0])}（差 {money_str(short[1])}）"
     if rec.clean:
@@ -813,8 +876,14 @@ def confirm_label(rec: Reconciliation, credit: bool = False,
 
 
 def settled_reply(settlement_id: int, rec: Reconciliation, dates: list[str]) -> str:
-    return (f"已結算 批次 #{settlement_id} · {date_span_label(dates)} · {len(rec.settle_ids)} 程 · "
-            f"{money_str(rec.confirmed or 0.0)}\n\n{confirmation_line(rec, dates)}")
+    head = (f"已結算 批次 #{settlement_id} · {date_span_label(dates)} · {len(rec.settle_ids)} 程 · "
+            f"{money_str(rec.confirmed or 0.0)}")
+    # A fine is written by the same tap that writes the batch, so the receipt
+    # for that tap has to name it.
+    fines = penalties_of(rec)
+    if fines:
+        head += f"\n已記判罰 {_signed(-round(sum(fines.values()), 2))}"
+    return f"{head}\n\n{confirmation_line(rec, dates)}"
 
 
 def confirmation_line(rec: Reconciliation, dates: list[str]) -> str:
