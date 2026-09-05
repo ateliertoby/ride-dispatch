@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import ride_dispatch.bot as bot
-from ride_dispatch import statement
+from ride_dispatch import statement, statement_flow
 from ride_dispatch.db import (
     init_db, save_order, update_price, get_settlement, get_order_by_id, create_settlement,
     open_batches, statement_image_path, statements_dir,
@@ -235,7 +235,7 @@ def test_confirm_reports_create_settlement_error(db_path, monkeypatch):
     def refuse(*a, **k):
         raise ValueError("A1: 已經結算咗")
 
-    monkeypatch.setattr(bot, "create_settlement", refuse)
+    monkeypatch.setattr(statement_flow, "create_settlement", refuse)
     cb, q = callback_update("stmt:confirm")
     asyncio.run(bot.handle_callback(cb, MagicMock()))
     q.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)

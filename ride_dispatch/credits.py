@@ -461,6 +461,17 @@ def completed_text(batch: dict, cleared: list[str]) -> str:
     return line
 
 
+def allocation_line(batch: dict, cleared: list[str]) -> str:
+    """One line saying what money put against a batch did to it.
+
+    Every frontend that moves money says this, so which of the two lines above
+    applies is decided once rather than per caller.
+    """
+    if batch["state"] == "paid":
+        return completed_text(batch, cleared)
+    return part_paid_line(batch)
+
+
 def leftover_text(credit: dict) -> str:
     """The change left on a credit, offered against whatever else is owed.
 
