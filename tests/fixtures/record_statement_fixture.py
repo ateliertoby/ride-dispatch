@@ -1,6 +1,7 @@
 """Record RapidOCR output for a statement screenshot as a test fixture.
 
-Usage: STATEMENT_FIXTURE_SALT=<private> python tests/fixtures/record_statement_fixture.py <image> <out.json>
+Usage: STATEMENT_FIXTURE_SALT=<private> [STATEMENT_FIXTURE_NAMES=<frag>,<frag>]
+       python tests/fixtures/record_statement_fixture.py <image> <out.json>
 
 Order numbers and the account name are real data and must not enter the
 repository.  Every token the reader would treat as an id keeps its first four
@@ -13,6 +14,13 @@ The salt is read from the environment and must never be committed.  A fixed
 permutation was tried first and is unusable: the key sits in this file, so
 anyone holding the repository can invert it and recover every real order
 number.  A keyed hash is one-way without the salt.
+
+The account holder's name also prints in the 收款人 column of every data row,
+outside any bracket, and OCR renders it differently in each cell, so no pattern
+can find it: STATEMENT_FIXTURE_NAMES carries the fragments that survive the
+mis-reads (a surname character is usually enough) and any box containing one is
+replaced wholesale.  Like the salt it is supplied per run and never committed.
+Geometry is untouched, so scrubbed cells still group into their rows.
 
 Ids are stable for whoever holds the salt, so re-recording the same screenshot
 reproduces the same fixture.  Recording with a different salt changes every id,
@@ -63,10 +71,20 @@ def _anonymise_match(m: re.Match) -> str:
 # enough that the reader is tested against them: those must survive verbatim.
 _ACCOUNT_BRACKET_RE = re.compile(r"[^【]*【[^】]*[0-9A-Za-z][^】]*】")
 
+_PLACEHOLDER_NAME = "測試人"
+
+
+def _name_fragments() -> list[str]:
+    raw = os.environ.get("STATEMENT_FIXTURE_NAMES", "")
+    return [f for f in (part.strip() for part in raw.split(",")) if f]
+
 
 def anonymise_text(text: str) -> str:
     text = _ID_RE.sub(_anonymise_match, text)
-    return _ACCOUNT_BRACKET_RE.sub("測試人【YY0000】", text)
+    text = _ACCOUNT_BRACKET_RE.sub(f"{_PLACEHOLDER_NAME}【YY0000】", text)
+    if any(fragment in text for fragment in _name_fragments()):
+        return _PLACEHOLDER_NAME
+    return text
 
 
 def main(src: str, dst: str) -> None:
