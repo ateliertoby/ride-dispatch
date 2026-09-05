@@ -1006,6 +1006,11 @@ logger = logging.getLogger("flight_poller")
 # only: work whose latency must not scale with the flight interval runs on
 # every tick instead.
 POLL_ERROR_BACKOFF = 300
+# Subtracted from every computed interval so the gate opens just before the
+# heartbeat that should carry the poll. Intervals are pacing estimates, not
+# deadlines, and the heartbeat itself is what stops the poll running more
+# often than once a minute.
+POLL_TICK_TOLERANCE = 3
 _JOB_KWARGS = {"misfire_grace_time": None, "coalesce": True}
 _next_poll_at: datetime | None = None
 _poll_running = False
@@ -1190,12 +1195,16 @@ async def _poll_tick(context):
     if _next_poll_at and datetime.now() < _next_poll_at:
         return
     _poll_running = True
+    # Anchored to the start of the tick, never its end: the poll's own HTTP
+    # time would otherwise push the gate past the next heartbeat, so every
+    # interval would take one extra heartbeat to clear.
+    tick_start = datetime.now()
     try:
         interval = await _poll_and_notify(context)
-        _next_poll_at = datetime.now() + timedelta(seconds=interval)
+        _next_poll_at = tick_start + timedelta(seconds=max(0, interval - POLL_TICK_TOLERANCE))
     except Exception:
         logger.exception("Flight poll error")
-        _next_poll_at = datetime.now() + timedelta(seconds=POLL_ERROR_BACKOFF)
+        _next_poll_at = tick_start + timedelta(seconds=POLL_ERROR_BACKOFF - POLL_TICK_TOLERANCE)
     finally:
         _poll_running = False
 
