@@ -23,6 +23,10 @@ DAY2 = [("10:00", "1128777147862551", 210.0), ("17:15", "1128184195410622", 210.
 DAY3 = [("11:47", "1578701224818578", 200.0), ("14:00", "1539272630110852", 210.0),
         ("15:25", "1128100382197280", 310.0), ("11:47", "1578701224818578", 40.0),
         ("17:40", "3316196058926202002", 280.0)]
+# A fourth recording, of a statement carrying a 判罰賠款 row: a second line under
+# the trip's own order id whose 司機應結算金額 is negative.
+PENALTY_DAY1 = [("11:17", "1128296513125016", 300.0)]
+PENALTY_DAY2 = [("13:00", "1128106371423384", 280.0), ("13:00", "1128106371423384", -97.38)]
 
 
 def load(name):
@@ -74,6 +78,29 @@ def test_a_bracketed_chip_costs_neither_a_row_nor_the_totals():
     assert [(r.time, r.order_id, r.amount) for r in stmt.days[2].rows] == DAY3
 
 
+def test_a_penalty_row_is_read_with_its_minus_sign():
+    """A 判罰賠款 line repeats its trip's order id and carries a negative
+    司機應結算金額.  Dropping the sign turns the day into 280 + 97.38 and fails
+    a checksum the statement itself passes."""
+    stmt = parse_boxes(*load("statement_penalty.json"))
+    assert stmt.account == "YY0000"
+    assert stmt.total == 482.62
+    assert [d.date for d in stmt.days] == ["2026-08-15", "2026-08-19"]
+    assert [d.count for d in stmt.days] == [1, 2]
+    assert [d.sum for d in stmt.days] == [300.0, 182.62]
+    assert [(r.time, r.order_id, r.amount) for r in stmt.days[0].rows] == PENALTY_DAY1
+    assert [(r.time, r.order_id, r.amount) for r in stmt.days[1].rows] == PENALTY_DAY2
+    assert stmt.warnings == []
+
+
+def test_the_penalty_statement_agrees_with_itself():
+    """The rows of the penalty day add up to the day's own 求和 only once the
+    sign is kept, so the checksum is what proves the sign was read."""
+    from ride_dispatch.statement import _checksum
+    stmt = parse_boxes(*load("statement_penalty.json"))
+    assert _checksum(stmt) == ("ok", [])
+
+
 def test_data_row_before_any_header_is_dropped_with_warning():
     boxes = [[[[10, 10], [200, 10], [200, 20], [10, 20]], "99", 0.9],
              [[[50, 10], [180, 10], [180, 20], [50, 20]], "2026-08-23 09:00", 0.9],
@@ -89,6 +116,28 @@ def test_money_normalisation():
     assert statement._money("1,330.00") == 1330.0
     assert statement._money("0.00") == 0.0
     assert statement._MONEY_RE.findall("#sc2.540.00 x 2026-08-25 1170.00") == ["2.540.00", "1170.00"]
+
+
+def test_money_keeps_a_minus_sign_in_either_glyph():
+    """A day whose only line is a 判罰賠款 prints a negative 求和, and the
+    platform's minus comes back as a hyphen or as U+2212 depending on the
+    render."""
+    assert statement._MONEY_RE.findall("求和-97.38") == ["-97.38"]
+    assert statement._MONEY_RE.findall("求和−97.38") == ["−97.38"]
+    assert statement._money("-97.38") == -97.38
+    assert statement._money("−97.38") == -97.38
+    assert statement._money("-2.540.00") == -2540.0
+
+
+def test_a_signed_amount_does_not_let_a_date_or_a_cut_off_box_pass_as_money():
+    """The lookarounds have to keep holding with a sign in front: the platform
+    truncates its own 求和 cell ("求和-97...."), and a dotted date is the shape
+    the sign was most likely to open up."""
+    assert statement._MONEY_RE.findall("求和-97....") == []
+    assert statement._MONEY_RE.findall("求和-97.") == []
+    assert statement._MONEY_RE.findall("2026-08-25") == []
+    assert statement._MONEY_RE.findall("2026.08.25") == []
+    assert statement._MONEY_RE.findall("-0.00%") == []
 
 
 def test_id_needs_digits_not_just_lookalike_letters():
@@ -177,6 +226,19 @@ def test_amount_is_read_off_the_end_of_the_rightmost_box():
     assert f("0.00%") is None
     assert f("HKD") is None
     assert f("210.0") is None
+
+
+def test_a_negative_amount_at_the_row_end_keeps_its_sign():
+    """The sign is the whole signature of a 判罰賠款 row — the category chip is
+    unreadable — so it must survive the amount cell in either glyph."""
+    f = statement._amount_at_row_end
+    assert f("-97.38") == -97.38
+    assert f("−97.38") == -97.38
+    assert f("不适用 -97.38") == -97.38
+    assert f("-1,234.00") == -1234.0
+    assert f("-97:38") == -97.38
+    # A hyphen belonging to a date must not be read as the amount's sign.
+    assert f("2026-08-19 13:00") == 13.0
 
 
 def test_amount_comes_from_the_rightmost_cell_not_the_percentage_column():

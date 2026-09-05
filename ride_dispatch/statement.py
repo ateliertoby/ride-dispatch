@@ -382,7 +382,10 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
 # lookarounds keep a dotted date ("2026.08.25") and sub-runs of a longer
 # number from matching.  A figure carrying a "%" is a rate (派單風險率 prints
 # "0.00%"), never money, so it must not be able to stand in for an amount.
-_MONEY_RE = re.compile(r"(?<![\d.])\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])(?!\s*%)")
+# The sign is optional because a 判罰賠款 makes money negative — a day of
+# nothing but penalties prints a negative 求和 — and the platform's minus
+# arrives as a hyphen or as U+2212 depending on the render.
+_MONEY_RE = re.compile(r"(?<![\d.])[-−]?\d+(?:[,.]\d{3})*\.\d{2}(?![\d.])(?!\s*%)")
 _DATE_RE = re.compile(r"20\d\d-\d\d-\d\d")
 _TIME_RE = re.compile(r"(?<!\d)\d\d:\d\d(?!\d)")
 # Three shapes of order number reach this reader, and one pattern has to know
@@ -428,18 +431,26 @@ MIN_PREFIX = 10
 # columns hold figures that are not the amount (an estimate, a rate), so taking
 # one of those would settle a wrong sum with nothing to show for it, whereas
 # reporting the row unreadable is visible to the operator.
-_ROW_END_AMOUNT_RE = re.compile(r"(\d{1,3}(?:[,.]\d{3})+|\d+)[.:](\d{2})\s*$")
+# A 判罰賠款 row is a negative 司機應結算金額 under its trip's own order id, and
+# the sign is the only reliable sign of it: OCR renders the category chip as
+# garbage.  Dropping it turns a fine into income, which fails the day's own 求和
+# and leaves the operator resending an image that can never reconcile.
+_ROW_END_AMOUNT_RE = re.compile(
+    r"(?P<sign>[-−])?(?P<whole>\d{1,3}(?:[,.]\d{3})+|\d+)[.:](?P<cents>\d{2})\s*$")
 
 
 def _amount_at_row_end(text: str) -> float | None:
     m = _ROW_END_AMOUNT_RE.search(text)
     if m is None:
         return None
-    return float(m.group(1).replace(",", "").replace(".", "") + "." + m.group(2))
+    value = float(m["whole"].replace(",", "").replace(".", "") + "." + m["cents"])
+    return -value if m["sign"] else value
 
 
 def _money(text: str) -> float:
-    s = text.replace(",", "")
+    # float() knows the ASCII hyphen only, so the platform's other minus glyph
+    # is normalised before the thousands separators are collapsed.
+    s = text.replace(",", "").replace("−", "-")
     if s.count(".") > 1:
         head, tail = s.rsplit(".", 1)
         s = head.replace(".", "") + "." + tail
@@ -677,7 +688,13 @@ def short_id(order_id: str) -> str:
 
 
 def money_str(v: float) -> str:
-    return f"${v:,.0f}" if float(v).is_integer() else f"${v:,.2f}"
+    """An amount, exact to the cent, sign outside the currency symbol.
+
+    "$-97.38" reads as a corrupted figure; "−$97.38" reads as money taken off.
+    """
+    sign = "−" if v < 0 else ""
+    v = abs(v)
+    return f"{sign}${v:,.0f}" if float(v).is_integer() else f"{sign}${v:,.2f}"
 
 
 def date_span_label(dates: list[str]) -> str:
@@ -805,9 +822,10 @@ def confirmation_line(rec: Reconciliation, dates: list[str]) -> str:
 
     The figure keeps its cents: this line is quoted back as the amount agreed,
     so it must equal the statement's total to the cent, not a rounded version
-    of it."""
+    of it.  Only the currency symbol is dropped — a statement whose penalties
+    outweigh its fares is negative, and its sign is part of the figure."""
     return (f"{date_span_label(dates)} 共{len(rec.settle_ids)}程 "
-            f"HKD {money_str(rec.confirmed or 0.0)[1:]} 確認無誤")
+            f"HKD {money_str(rec.confirmed or 0.0).replace('$', '')} 確認無誤")
 
 
 def batch_head(batch: dict) -> str:
