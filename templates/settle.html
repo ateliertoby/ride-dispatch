@@ -154,9 +154,9 @@
     font-size: 12px; font-weight: 650; color: var(--text-3);
     padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
   }
-  /* Every leg row is a read: a batch is created from a statement image in the
-     bot, so there is nothing here to tick. The order number inside stays
-     tappable -- that is the one thing the page is read for. */
+  /* A leg row. In a batch it is a read -- a batch is created from a statement
+     image in the bot, so there is nothing there to tick -- and the order
+     number inside it is the tap that copies. */
   .orow {
     display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid var(--line); padding: 11px 2px;
@@ -165,14 +165,20 @@
      was not paid, so the whole row is the target, not just the box. */
   .orow.tick { cursor: pointer; }
   .orow.tick:active { background: var(--surface-press); }
+  /* In the day sheet the row is the way into the order it stands for, so the
+     row is the target and the number inside it is not a second one. */
+  .orow.tap { cursor: pointer; }
+  .orow.tap:active { background: var(--surface-press); }
+  .orow.tap .oid { cursor: inherit; }
   .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .ol { flex: 1; min-width: 0; }
   /* Reconciling is done number by number against the platform's statement, so
      the order number is the line the row is read by; the label under it only
-     jogs the memory of which leg that was. Tapping the number copies it.
+     jogs the memory of which leg that was.
      Negative margins keep the digits flush with the label while the padding
      gives the tap something to land on, and wrapping anywhere keeps a
-     19-digit number inside the row instead of widening the sheet. */
+     19-digit number inside the row instead of widening the sheet. Tapping the
+     number copies it wherever it carries the copy target. */
   .oid {
     display: inline-block; margin: 0 -6px; padding: 2px 6px 1px;
     font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums;
@@ -238,6 +244,19 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
+
+  /* ---- order sheet ----
+     The leg read as itself, so most values are the platform's own free text
+     rather than a figure: the label keeps its width and the value takes the
+     wrapping, or one long address widens the whole sheet. */
+  .order-rows .k { flex-shrink: 0; padding-right: 12px; }
+  .order-rows .v { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  /* A fine is money going out of what the leg earns. */
+  .order-rows .v.fine { color: var(--red); }
+  .oarrow { color: var(--text-3); }
+  /* The order is fetched per open, so a fetch that did not land leaves the
+     sheet with the reason rather than an empty body. */
+  .order-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
 
   /* ---- credit and queue sheets ---- */
   /* A note qualifies the summary row above it rather than stating a figure of
@@ -868,6 +887,7 @@ function viewHtml(v) {
   if (v.kind === 'undo') return undoViewHtml(v);
   if (v.kind === 'unlink') return unlinkViewHtml(v);
   if (v.kind === 'credit') return creditViewHtml(v);
+  if (v.kind === 'order') return orderViewHtml(v);
   if (v.kind === 'queue') return queueViewHtml();
   if (v.kind === 'stmt') return stmtViewHtml(v);
   return batchViewHtml(v);
@@ -943,10 +963,18 @@ function orderRowHtml(o, mode, opts) {
   }
   const chk = tick
     ? '<span class="up-chk' + (opts.ticked ? ' on' : '') + '">' + (opts.ticked ? '☑' : '☐') + '</span>' : '';
-  return '<div class="orow' + (tick ? ' tick" data-uptick="' + esc(o.order_id) + '"' : '"') + '>' + chk +
+  // What the row itself is: the tick answer in a short-paid batch, the way
+  // into the order in the day sheet, and nothing at all in a batch read.
+  const rowAttrs = tick ? ' tick" data-uptick="' + esc(o.order_id) + '"'
+    : mode === 'day' ? ' tap" data-od="' + esc(o.order_id) + '"'
+    : '"';
+  // A copy target inside a row that is itself the target would swallow the
+  // tap, so in the day sheet the copy lives in the sheet the row opens.
+  const idAttrs = mode === 'day' ? '' : ' data-copy="' + esc(o.order_id) + '"';
+  return '<div class="orow' + rowAttrs + '>' + chk +
     '<span class="ot">' + esc(orderTime(o)) + '</span>' +
     '<span class="ol">' +
-      '<span class="oid" data-copy="' + esc(o.order_id) + '">' + esc(groupId(o.order_id)) + '</span>' +
+      '<span class="oid"' + idAttrs + '>' + esc(groupId(o.order_id)) + '</span>' +
       '<span class="oll">' + esc(orderLabel(o)) + '</span></span>' +
     right + '</div>';
 }
@@ -1024,6 +1052,77 @@ function dayViewHtml(v) {
       esc(batchLabel(b)) + ' · ' + b.orders.length + ' 程 · $' + $(b.confirmed_amount) +
       ' · ' + batchTag(b) + (heldLabel(b) ? ' · ' + esc(heldLabel(b)) : '') + '</span>' +
       '<span class="blink-c">&rsaquo;</span></button>').join('') + '</div>' : '');
+}
+
+// ---- order sheet ----
+// The leg read as itself: who and where, and the money in the terms the
+// platform pays it. The month payload carries settle columns only, so the
+// order is fetched per open and kept on the view; the fetch is what the sheet
+// waits on, and a repaint must not fire it again.
+async function openOrder(orderId) {
+  const v = { kind: 'order', id: orderId, order: null, err: '' };
+  pushView(v);
+  try {
+    const res = await fetch('/api/orders/' + encodeURIComponent(orderId));
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) v.order = body;
+    else v.err = body.error || ('HTTP ' + res.status);
+  } catch (e) {
+    v.err = '讀唔到';
+  }
+  // The operator can have moved on while the fetch was in flight.
+  if (curView() === v) paintView();
+}
+
+function orderViewHtml(v) {
+  const o = v.order;
+  if (!o) {
+    return sheetHead('單 ' + esc(tailId(v.id)), '') +
+      (v.err ? '<div class="order-err">' + esc(v.err) + '</div>'
+             : '<div class="empty">讀緊…</div>');
+  }
+  const d = orderDate(o);
+  // Labels are escaped where they come from the order: a contact's own label
+  // is the platform's free text, the rest are this page's own words.
+  const rows = [['單號', '<span class="oid" data-copy="' + esc(o.order_id) + '">' +
+    esc(groupId(o.order_id)) + '</span>']];
+  rows.push(['時間', esc([orderTime(o), svcLabel(o.service_type), o.flight_number]
+    .filter(Boolean).join(' · '))]);
+  if (o.pickup) rows.push(['路線', esc(o.pickup) +
+    '<br><span class="oarrow">&rarr;</span> ' + esc(o.dropoff)]);
+  if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
+  for (const [cl, cv] of collectContactLines(o)) {
+    rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
+  }
+  if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
+  if (o.price) rows.push(['價錢', money(o.price)]);
+  // Only the fees this order carries, and the net under them: with no fee or
+  // fine to move the figure, the net would only repeat the fare.
+  const fees = [];
+  if (o.banner_fee) fees.push(['橫額', money(o.banner_fee)]);
+  if (o.tunnel_fee) fees.push(['隧道', money(o.tunnel_fee)]);
+  if (o.parking_fee) fees.push(['停車', money(o.parking_fee)]);
+  if (o.penalty_fee) fees.push(['判罰', money(-o.penalty_fee), 'fine']);
+  if (fees.length) fees.push(['淨收', money(expectedOf(o))]);
+  const html = rows.concat(fees).map(r =>
+    '<div class="sum-row"><span class="k">' + r[0] + '</span>' +
+    '<span class="v' + (r[2] ? ' ' + r[2] : '') + '">' + r[1] + '</span></div>').join('');
+
+  // Where this leg's money has got to. A batched leg hands the operator on to
+  // the batch, which is the only place the rest of that answer is.
+  const b = batchOf(o.order_id);
+  const settle = b
+    ? '<button class="sum-row link" data-bl="' + b.id + '"><span class="k">結算</span>' +
+      '<span class="v">批次 ' + esc(batchLabel(b)) + ' · ' + esc(batchTag(b)) +
+      '<span class="c">&rsaquo;</span></span></button>' +
+      (o.unpaid ? '<div class="sub-note warn">未過數</div>' : '')
+    : '<div class="sum-row"><span class="k">結算</span><span class="v">' +
+      esc(dayTag(o)[0]) + '</span></div>';
+
+  return sheetHead(esc(orderLabel(o)),
+      esc(mdLabel(d)) + ' 星期' + weekday(d) + ' · ' + esc(platLabel(platform(o)))) +
+    '<div class="sum-rows order-rows">' + html + settle + '</div>' +
+    '<button class="ghost-btn" data-back="1">收埋</button>';
 }
 
 // ---- batch sheet ----
@@ -1526,6 +1625,8 @@ document.getElementById('sheet').addEventListener('click', e => {
   }
   const cr = e.target.closest('[data-credit]');
   if (cr) { pushView({ kind: 'credit', id: +cr.dataset.credit }); return; }
+  const od = e.target.closest('[data-od]');
+  if (od) { openOrder(od.dataset.od); return; }
   const link = e.target.closest('[data-bl]');
   if (link) { openBatch(+link.dataset.bl); return; }
 });

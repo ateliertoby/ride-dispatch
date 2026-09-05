@@ -136,6 +136,34 @@ def test_patch_unknown_order_404(client):
     assert client.patch("/api/orders/NOPE", json={"time": "10:00"}).status_code == 404
 
 
+# ---- one order ----
+
+
+def test_one_order_carries_the_columns_the_settle_payload_leaves_out(client):
+    """The settle month payload is settle columns only, so the detail sheet on
+    that page has to fetch the order itself: the whole row, because the fields
+    it reads (passenger, phones, notes) are exactly the omitted ones."""
+    client.post("/api/orders", json={"type": "paste", "text": PASTE_MSG, "price": 500})
+    res = client.get("/api/orders/1128000000000099")
+    assert res.status_code == 200
+    order = res.get_json()
+    assert order["order_id"] == "1128000000000099"
+    assert order["passenger_name"] == "WONG/SIUMING"
+    assert order["passenger_phone"] == "86 13800000003"
+    assert order["price"] == 500
+    for col in ("overseas_phone", "third_party_contact", "more_contacts", "driver_notes",
+                "parking_fee", "banner_fee", "tunnel_fee", "penalty_fee", "source",
+                "status", "unpaid", "settlement_id", "pickup", "dropoff", "flight_number",
+                "service_type", "scheduled_time", "vehicle_type"):
+        assert col in order
+
+
+def test_one_order_unknown_id_404(client):
+    res = client.get("/api/orders/NOPE")
+    assert res.status_code == 404
+    assert res.get_json() == {"error": "搵唔到單"}
+
+
 PASTE_MSG = """服务类型: 接机
 接单车型: 经济5座
 乘客姓名: WONG/SIUMING
@@ -799,11 +827,14 @@ def test_the_writes_a_batch_accepts_are_undo_unpaid_and_allocation(client):
 def test_settle_page_exposes_only_the_actions_that_remain(client):
     """These attribute names are the full set of what the page can do, so a
     new action has to be added here deliberately.  Hyphens are part of a name:
-    an action hidden behind one would otherwise never be counted."""
+    an action hidden behind one would otherwise never be counted.
+
+    'od' is the day row opening the order it stands for: the row carries the
+    reconciliation view, the sheet behind it carries the order."""
     page = client.get("/settle").get_data(as_text=True)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
-        "fold", "upbatch", "upguess", "uptick", "upsave",
+        "fold", "od", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 

@@ -235,6 +235,17 @@ def _kick_bot():
         pass
 
 
+@app.get("/api/orders/<order_id>")
+def api_order(order_id):
+    """One order, whole.  The settle month payload carries settle columns only,
+    so its detail sheet reads the order itself from here; a trimmed field list
+    would have to grow with every field that sheet learns to show."""
+    order = get_order_by_id(DB_PATH, order_id)
+    if not order:
+        return jsonify({"error": "搵唔到單"}), 404
+    return jsonify(order)
+
+
 @app.patch("/api/orders/<order_id>")
 def api_update_order(order_id):
     body = request.get_json(silent=True) or {}
