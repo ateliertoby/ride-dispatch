@@ -1,8 +1,10 @@
+import logging
 import os
 import re
 import secrets
 import socket
 import sqlite3
+import threading
 import time
 from dataclasses import asdict
 from datetime import date, datetime
@@ -21,6 +23,7 @@ from .db import (
     get_order_by_id,
     get_settle_month,
     get_settlement,
+    image_extension,
     list_credits,
     mark_unpaid,
     open_batches,
@@ -38,6 +41,8 @@ from .flight import depart_hhmm, exit_urgency, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
+from . import statement
+from . import statement_flow
 from .statement import leg_amount
 
 load_dotenv()
@@ -321,9 +326,111 @@ def api_settle():
     return jsonify({"month": month, "platform": platform, **data})
 
 
-# A batch is created by the bot's statement flow and nowhere else: every batch
-# has to trace back to the statement image it was read from, and on to the
-# orders that statement lists.  The page can still undo one.
+# ---- reading a statement (讀結算圖) ----
+
+# A batch is created from a statement image and nowhere else: every batch has
+# to trace back to what the platform said, and on to the orders that statement
+# lists.  The page can still undo one.
+
+MAX_STATEMENT_BYTES = 10 * 1024 * 1024
+PENDING_TTL = 30 * 60
+
+# Statements read but not yet confirmed, by token.  In memory like the bot's
+# own pending cards: a restart forgets them and costs one re-upload, and
+# create_settlement revalidates every leg, so a stale token can only fail
+# rather than write a wrong batch.  SSE responses run on their own threads,
+# so the dict is only ever touched under the lock.
+_pending_statements: dict[str, tuple[float, statement_flow.Prepared, bytes]] = {}
+_pending_lock = threading.Lock()
+
+
+def _sweep_pending(now: float) -> None:
+    for token in [t for t, (at, _p, _i) in _pending_statements.items()
+                  if now - at > PENDING_TTL]:
+        del _pending_statements[token]
+
+
+def _upload_meta(filename: str | None, data: bytes) -> str:
+    """What a statement read is logged by: enough to find the file again, and
+    the decoded size, because a reader failure is usually about the pixels."""
+    parts = [f"source=upload name={filename}",
+             f"bytes={len(data)} ext={image_extension(data)}"]
+    size = statement.image_size(data)
+    if size:
+        parts.append(f"decoded={size[0]}x{size[1]}")
+    return " ".join(parts)
+
+
+@app.post("/api/statements/read")
+def api_read_statement():
+    """Read a statement screenshot and say what confirming it would write.
+
+    The browser hands over the platform's own file byte for byte; the same
+    screenshot forwarded as a chat photo has been recompressed first, which is
+    what the reader mis-reads.  Nothing is written here — the token is the
+    promise that a confirm can follow, and a statement no batch can come out
+    of gets none.
+    """
+    upload = request.files.get("file")
+    data = upload.read(MAX_STATEMENT_BYTES + 1) if upload is not None else b""
+    if not data:
+        return jsonify({"error": "冇揀到圖"}), 400
+    if len(data) > MAX_STATEMENT_BYTES:
+        return jsonify({"error": "張圖大過 10 MB"}), 413
+    if not statement.ocr_available():
+        return jsonify({"error": "OCR 未裝，讀唔到張圖"}), 503
+    meta = _upload_meta(upload.filename, data)
+    # ~2 s of CPU; statement._ocr_lock serialises the engine across the
+    # threaded server, so concurrent uploads queue rather than collide.
+    stmt = statement.read_image(data)
+    if not stmt.days:
+        logging.getLogger("web").warning("statement unreadable: %s warnings=%s",
+                                         meta, stmt.warnings)
+        statement_flow.keep_unread_image(DB_PATH, upload.filename or "", data)
+        return jsonify({"error": statement_flow.unreadable_text(stmt) + "— 再上載一次"}), 400
+    logging.getLogger("web").info("statement read: %d days %d rows · %s", len(stmt.days),
+                                  sum(len(d.rows) for d in stmt.days), meta)
+    prepared = statement_flow.prepare(DB_PATH, stmt, datetime.now())
+    token = None
+    if prepared.can_settle:
+        token = secrets.token_urlsafe(16)
+        now = time.time()
+        with _pending_lock:
+            _sweep_pending(now)
+            _pending_statements[token] = (now, prepared, data)
+    archive = prepared.no_orders_credit
+    return jsonify({
+        "token": token,
+        "report": prepared.report,
+        "credit_line": prepared.credit_line,
+        "confirm_label": prepared.confirm_label,
+        "can_settle": prepared.can_settle,
+        "no_orders_offer": ({"credit_id": archive["id"],
+                             "label": statement_flow.NO_ORDERS_ARCHIVE_LABEL}
+                            if archive else None),
+    })
+
+
+@app.post("/api/statements/confirm")
+def api_confirm_statement():
+    """Write the batch the read statement describes.
+
+    The token is spent on the way in, so a double tap reaches the same 410 an
+    expired one does rather than a second batch.
+    """
+    body = request.get_json(silent=True) or {}
+    token = body.get("token")
+    with _pending_lock:
+        _sweep_pending(time.time())
+        entry = _pending_statements.pop(token, None) if isinstance(token, str) else None
+    if entry is None:
+        return jsonify({"error": "已過期，再上載一次"}), 410
+    _read_at, prepared, image = entry
+    try:
+        done = statement_flow.confirm(DB_PATH, prepared, image, datetime.now())
+    except ValueError as e:
+        return jsonify({"error": f"結算唔到：{e}"}), 409
+    return jsonify({"settlement_id": done.settlement_id, "text": done.text})
 
 
 @app.get("/api/credits")
