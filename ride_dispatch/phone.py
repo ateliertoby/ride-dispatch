@@ -15,6 +15,9 @@ def format_phone_e164(raw: str) -> str:
     Display-time only — never rewrites stored values.  Returns the
     original string unchanged when the input doesn't match a
     recognised pattern (wrong guess = wrong number dialled).
+
+    JS twin: formatPhoneE164() in templates/_shared.js — keep in sync,
+    KNOWN_CC included.
     """
     s = raw.strip()
     if not s:
