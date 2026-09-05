@@ -24,7 +24,7 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
                       db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS, HOURLY_FEE)
 from .phone import format_phone_e164
-from .service import is_flight_pickup, label as service_label
+from .service import expected_of, is_flight_pickup, label as service_label
 from . import statement
 from . import credits
 from .whiteboard import generate as generate_whiteboard, qualifies_for_prompt, sanitize_name as sanitize_board_name, is_configured as whiteboard_configured, WhiteboardError, cache_load as whiteboard_cache_load, cache_store as whiteboard_cache_store, cache_discard as whiteboard_cache_discard
@@ -408,6 +408,7 @@ async def handle_callback(update: Update, context):
             settlement_id = create_settlement(
                 DB_PATH, "ride", rec.settle_ids, rec.confirmed or 0.0,
                 datetime.now().strftime("%Y-%m-%d"), statement=stmt_json, image=image,
+                penalties=statement.penalties_of(rec),
             )
         except ValueError as e:
             await query.message.edit_reply_markup(reply_markup=None)
@@ -1026,6 +1027,12 @@ async def handle_start(update: Update, context):
         ]
         if order.get("price"):
             lines.append(f"收入: ${order['price']:g}")
+        # A 判罰賠款 comes off what the platform pays, so the card names the
+        # fine and what the trip is actually worth after it.
+        penalty = order.get("penalty_fee") or 0
+        if penalty > 0:
+            lines.append(f"判罰: {statement.money_str(-penalty)}"
+                         f"（淨收 {statement.money_str(expected_of(order))}）")
         tunnel = order.get("tunnel_fee") or 0
         parking = order.get("parking_fee") or 0
         if tunnel or parking:

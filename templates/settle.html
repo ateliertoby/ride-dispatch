@@ -186,6 +186,10 @@
     background: var(--banner-bg); color: var(--banner-fg);
   }
   .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
+  /* A fine already netted into the figure beside it, so it explains a number
+     rather than warning about one — same shape as .oplat, the colour of money
+     going out. */
+  .ofine { color: var(--red); font-size: 0.85em; margin-left: 4px; }
   /* A leg the platform held back and paid later is a record, not a warning:
      same shape as the 未過數 mark, the colour of money that has arrived. */
   .omark.paid { background: var(--paid-bg); color: var(--green); }
@@ -394,13 +398,8 @@ function savePlat() {
 }
 
 // ---- derived state ----
-// JS twin of service.py:expected_of — keep in sync. Null fees count as 0.
-function expectedOf(o) {
-  const p = platform(o);
-  if (p === 'ride') return (o.price || 0) + (o.banner_fee || 0);
-  if (p === 'foodpanda') return o.price || 0;
-  return (o.price || 0) + (o.tunnel_fee || 0);   // didi, uber: the toll is reimbursed
-}
+// expectedOf() is the twin of service.py:expected_of and lives in _shared.js,
+// because the dashboard's detail sheet reads it too.
 function orderDate(o) { return (o.scheduled_time || '').split(' ')[0]; }
 function batchById(id) { return data.settlements.find(b => b.id === +id) || null; }
 function creditById(id) { return ledger.credits.find(c => c.id === +id) || null; }
@@ -613,7 +612,7 @@ function renderHeader() {
   // business and is read off the calendar by its value date instead.
   const open = openCredits();
   document.getElementById('summary').innerHTML =
-    '未結算 <span class="warn">$' + $(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
+    '未結算 <span class="warn">' + money(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
     (open.length ? ' · <button class="sum-link" data-credits="1">入數未對 ' + open.length +
       ' 筆 $' + $(ledger.sums.open) + '</button>' : '');
 }
@@ -638,7 +637,7 @@ function cellHtml(dateStr) {
   const cls = future ? 'future' : (info.loose > 0 ? 'unsettled' : 'done');
   const amt = future ? info.total : (info.loose > 0 ? info.loose : info.total);
   return '<button class="cell' + today + '" data-d="' + dateStr + '">' +
-    '<span class="d">' + day + '</span><span class="amt ' + cls + '">$' + $(amt) + '</span></button>';
+    '<span class="d">' + day + '</span><span class="amt ' + cls + '">' + money(amt) + '</span></button>';
 }
 
 function monthWeeks() {
@@ -874,7 +873,7 @@ function orderRowHtml(o, mode, opts) {
   if (mode === 'day') {
     const tag = dayTag(o);
     const amt = expectedOf(o);
-    right = '<span class="oend">' + (amt ? '<span class="oa">$' + $(amt) + '</span>' : '') +
+    right = '<span class="oend">' + (amt ? '<span class="oa">' + money(amt) + '</span>' : '') +
       '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span></span>';
   } else if (tick) {
     // The figure to tick against is the platform's, because the outstanding
@@ -888,8 +887,12 @@ function orderRowHtml(o, mode, opts) {
     // an equal figure would only repeat the number.
     const platNote = plat !== undefined && Math.abs(plat - expectedOf(o)) >= 0.005
       ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
+    // The fine is why the leg is worth less than its fare; both figures are
+    // already net, so this only names the deduction.
+    const penNote = (o.penalty_fee || 0) > 0
+      ? ' · <span class="ofine">判罰 ' + money(-o.penalty_fee) + '</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
-                 : '<span class="oa">$' + $(expectedOf(o)) + platNote + '</span>';
+                 : '<span class="oa">' + money(expectedOf(o)) + penNote + platNote + '</span>';
     // A leg the platform held back says when its money finally came, so the
     // list keeps the record the flags were kept for.
     if (opts && opts.madeUp) right = '<span class="omark paid">補收 ' + esc(opts.madeUp) +

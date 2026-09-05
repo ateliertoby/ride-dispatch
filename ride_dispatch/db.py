@@ -64,6 +64,11 @@ def init_db(db_path: str):
             "tunnel_fee REAL DEFAULT 0",
             "parking_fee REAL DEFAULT 0",
             "banner_fee REAL DEFAULT 0",
+            # 判罰賠款: the fine the platform charged back, stored positive like
+            # the other fee columns and netted off by expected_of.  Nullable
+            # with no default, so "never fined" stays distinguishable from
+            # "fined nothing" on rows that predate the column.
+            "penalty_fee REAL",
             "estimated_landing TEXT",
             "flight_scheduled TEXT",
             "flight_eta TEXT",
@@ -639,10 +644,10 @@ def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | N
 # ---- Settlement (埋數) ----
 
 # Columns the settle page needs per order; the batch total is recomputed from
-# price/banner_fee/tunnel_fee, so all three travel with every row.
+# price/banner_fee/tunnel_fee/penalty_fee, so all four travel with every row.
 _SETTLE_ORDER_COLS = (
     "order_id, scheduled_time, service_type, flight_number, "
-    "pickup, dropoff, price, banner_fee, tunnel_fee, settlement_id, "
+    "pickup, dropoff, price, banner_fee, tunnel_fee, penalty_fee, settlement_id, "
     "coalesce(unpaid, 0) AS unpaid"
 )
 
@@ -688,7 +693,8 @@ def statement_image_path(db_path: str, settlement_id: int, ext: str = "jpg") -> 
 def create_settlement(db_path: str, platform: str, order_ids: list[str],
                       confirmed_amount: float, settled_on: str,
                       now: datetime | None = None,
-                      statement: dict | None = None, image: bytes | None = None) -> int:
+                      statement: dict | None = None, image: bytes | None = None,
+                      penalties: dict[str, float] | None = None) -> int:
     """Batch one platform's settleable orders; returns the settlement id.
 
     All-or-nothing: any order that is missing, cancelled, unpriced, still in
@@ -696,6 +702,13 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
     call with ValueError naming it, and nothing is written.  expected_amount is
     summed from the stored rows rather than taken from the caller, so a stale
     client cannot disagree with the DB about what is owed.
+
+    `penalties` are 判罰賠款 amounts (positive) by order id, each of which must
+    be in `order_ids`.  They are added to the order's own penalty_fee inside
+    this transaction and BEFORE the sum is taken, because a fine is a cost of
+    its order and the frozen expected_amount has to be net of it.  Sharing the
+    transaction is also what keeps a fine from ever being recorded against an
+    order whose batch failed to be created.
 
     `statement` is what the platform's statement said (stored as JSON, shown
     beside the system's numbers in batch detail); `image` is the screenshot
@@ -707,9 +720,9 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
         raise ValueError(f"unknown platform: {platform}")
     if not order_ids:
         raise ValueError("order_ids required")
+    penalties = penalties or {}
     cutoff = _now_str(now)
     with _conn(db_path) as conn:
-        expected = 0.0
         seen = set()
         for order_id in order_ids:
             if order_id in seen:
@@ -730,6 +743,20 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
                 raise ValueError(f"{order_id}: 未完成")
             if platform_of(row["service_type"]) != platform:
                 raise ValueError(f"{order_id}: 唔屬於呢個平台")
+        for order_id in penalties:
+            if order_id not in seen:
+                raise ValueError(f"{order_id}: 判罰唔喺呢個 batch 入面")
+        for order_id, amount in penalties.items():
+            conn.execute(
+                "UPDATE orders SET penalty_fee = coalesce(penalty_fee, 0) + ? WHERE order_id = ?",
+                (amount, order_id),
+            )
+        # A second read rather than a running total in the loop above: the sum
+        # has to see the penalties just written, and reading it back from the
+        # rows keeps the one definition of what an order is worth.
+        expected = 0.0
+        for order_id in order_ids:
+            row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
             expected += expected_of(dict(row))
         cur = conn.execute(
             "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on, statement) "

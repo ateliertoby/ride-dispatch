@@ -16,6 +16,10 @@ function fmtDate(d) {
     String(d.getDate()).padStart(2, '0');
 }
 function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
+// JS twin of statement.py:money_str. A 判罰賠款 can outweigh what a leg or a
+// day earned, and "$-97.38" reads as a mangled figure where "−$97.38" reads as
+// money taken off, so the sign goes outside the symbol.
+function money(n) { return (n < 0 ? '−$' : '$') + $(Math.abs(n)); }
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -27,6 +31,16 @@ function platform(o) {
   if (o.service_type === 'Uber') return 'uber';
   if (o.service_type === 'foodpanda') return 'foodpanda';
   return 'ride';
+}
+// JS twin of service.py:expected_of — keep in sync. Null fees count as 0, and
+// a recorded 判罰賠款 is money the platform takes back out of whatever it pays,
+// so it nets off on every platform.
+function expectedOf(o) {
+  const p = platform(o);
+  const pen = o.penalty_fee || 0;
+  if (p === 'ride') return (o.price || 0) + (o.banner_fee || 0) - pen;
+  if (p === 'foodpanda') return (o.price || 0) - pen;
+  return (o.price || 0) + (o.tunnel_fee || 0) - pen;   // didi, uber: the toll is reimbursed
 }
 // JS port of service.py — display-time classification only.  Keep the service
 // types listed here in step with that module.

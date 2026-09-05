@@ -11,10 +11,11 @@ def row(date, oid, amount, **kw):
     return StatementRow(date=date, order_id=oid, amount=amount, **kw)
 
 
-def order(oid, scheduled, price=210.0, banner=0.0, status="active", settlement_id=None, service_type="送机"):
+def order(oid, scheduled, price=210.0, banner=0.0, status="active", settlement_id=None, service_type="送机",
+          penalty=None):
     return {"order_id": oid, "scheduled_time": scheduled, "service_type": service_type, "flight_number": "",
             "pickup": "", "dropoff": "", "price": price, "banner_fee": banner, "tunnel_fee": 0.0,
-            "settlement_id": settlement_id, "status": status}
+            "settlement_id": settlement_id, "status": status, "penalty_fee": penalty}
 
 
 def stmt(days, total=None, account="YY0000"):
@@ -301,6 +302,82 @@ def test_result_independent_of_candidate_order():
     assert sorted(a.settle_ids) == sorted(b.settle_ids)
     assert a.expected == b.expected
     assert [o["order_id"] for o in a.missing] == [o["order_id"] for o in b.missing]
+
+
+# ---- 判罰賠款 ----
+
+def penalty_stmt(penalty=-97.38, trip=280.0, oid="A1"):
+    """The shape the platform prints: the fine repeats its trip's order id."""
+    total = round(trip + penalty, 2)
+    return stmt([day("2026-08-23", [row("2026-08-23", oid, trip),
+                                    row("2026-08-23", oid, penalty)], 2, total)], total=total)
+
+
+def test_a_penalty_row_explains_the_whole_difference():
+    """Nothing is wrong with the pricing: the platform paid the fare and took a
+    fine off it, so the batch is settleable and owes exactly what arrived."""
+    r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 280.0)], NOW)
+    e = r.entries[0]
+    assert e.kind == "penalty" and e.penalty == -97.38
+    assert e.platform_amount == 182.62 and e.expected == 280.0
+    assert r.settle_ids == ["A1"]
+    assert r.expected == 182.62 and r.confirmed == 182.62 and r.diff == 0
+    assert r.can_settle and r.clean
+
+
+def test_resending_a_recorded_penalty_folds_to_matched():
+    """The idempotency hinge: expected_of nets the stored fine, so the second
+    read of the same image agrees with the platform and settles nothing new."""
+    r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 280.0, penalty=97.38)], NOW)
+    assert r.entries[0].kind == "matched"
+    assert r.entries[0].expected == 182.62
+    assert r.expected == 182.62 and r.diff == 0 and r.clean
+
+
+def test_a_penalty_on_a_mispriced_order_stays_an_amount_difference():
+    """The fine is still recorded — a negative row is reliable — but the fare
+    the platform paid disagrees with the system's, which is the operator's to
+    settle, so the 差額 measures only that."""
+    r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 250.0)], NOW)
+    e = r.entries[0]
+    assert e.kind == "amount_diff" and e.penalty == -97.38
+    assert r.settle_ids == ["A1"]
+    assert r.expected == 152.62 and r.diff == 30.0
+    assert not r.clean
+
+
+def test_a_penalty_against_a_settled_order_is_display_only():
+    """A fine arriving after its trip was batched would have to reopen a frozen
+    batch, so nothing is written and the shortfall stays visible."""
+    r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 280.0, settlement_id=7)], NOW)
+    e = r.entries[0]
+    assert e.kind == "already_settled" and e.penalty == -97.38 and e.settlement_id == 7
+    assert r.settle_ids == [] and not r.can_settle
+
+
+def test_a_penalty_for_an_unknown_id_stays_unknown():
+    r = reconcile(penalty_stmt(oid="NEW"), [], NOW)
+    assert r.entries[0].kind == "unknown"
+    assert r.settle_ids == [] and r.expected == 0.0
+
+
+def test_a_penalty_alongside_a_clean_leg_settles_both():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "A1", 300.0),
+                                 row("2026-08-23", "A2", 280.0),
+                                 row("2026-08-23", "A2", -97.38)], 3, 482.62)], total=482.62)
+    orders = [order("A1", "2026-08-23 09:00:00", 300.0), order("A2", "2026-08-23 13:00:00", 280.0)]
+    r = reconcile(s, orders, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "penalty"]
+    assert sorted(r.settle_ids) == ["A1", "A2"]
+    assert r.expected == 482.62 and r.diff == 0 and r.clean
+
+
+def test_a_penalty_bigger_than_its_trip_still_settles_net():
+    """Nothing caps a fine at the fare, and the reader keeps the sign, so a day
+    can be worth less than nothing."""
+    r = reconcile(penalty_stmt(penalty=-330.0), [order("A1", "2026-08-23 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "penalty"
+    assert r.expected == -50.0 and r.confirmed == -50.0 and r.diff == 0
 
 
 def test_corrected_json_rewrites_fuzzy_ids():

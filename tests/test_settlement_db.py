@@ -140,6 +140,78 @@ def test_create_refuses_anything_that_cannot_enter_a_batch(db_path):
     assert [b["id"] for b in open_batches(db_path, "ride")] == [sid]
 
 
+# ---- 判罰賠款 ----
+
+def test_a_penalty_is_recorded_and_the_frozen_figure_is_net(db_path):
+    """The fine is a cost of its order, and expected_amount is frozen at
+    creation, so it has to be written before the sum is taken."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "A2", "2026-08-23 12:30:00", 210.0)
+    sid = create_settlement(db_path, "ride", ["A1", "A2"], 392.62, "2026-08-26", now=NOW,
+                            penalties={"A1": 97.38})
+    batch = get_settlement(db_path, sid)
+    assert batch["expected_amount"] == 392.62
+    legs = {o["order_id"]: o for o in batch["orders"]}
+    assert legs["A1"]["penalty_fee"] == 97.38
+    assert legs["A2"]["penalty_fee"] is None
+    # The fare itself is untouched: gross and net are both readable afterwards.
+    assert legs["A1"]["price"] == 280.0
+
+
+def test_penalties_on_the_same_order_accumulate(db_path):
+    """A second statement can fine the same trip again, and the column holds
+    what the platform has taken in total."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "A2", "2026-08-23 12:30:00", 210.0)
+    create_settlement(db_path, "ride", ["A1"], 182.62, "2026-08-26", now=NOW,
+                      penalties={"A1": 97.38})
+    delete_settlement(db_path, 1)
+    sid = create_settlement(db_path, "ride", ["A1", "A2"], 342.62, "2026-08-27", now=NOW,
+                            penalties={"A1": 50.0})
+    legs = {o["order_id"]: o for o in get_settlement(db_path, sid)["orders"]}
+    assert legs["A1"]["penalty_fee"] == 147.38
+    assert get_settlement(db_path, sid)["expected_amount"] == 342.62
+
+
+def test_a_penalty_outside_the_batch_is_refused(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "A2", "2026-08-23 12:30:00", 210.0)
+    with pytest.raises(ValueError, match="判罰唔喺呢個 batch 入面"):
+        create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
+                          penalties={"A2": 97.38})
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT penalty_fee FROM orders WHERE order_id = 'A2'").fetchone()[0] is None
+
+
+def test_a_refused_batch_records_no_penalty(db_path):
+    """Atomicity: a fine must never outlive the batch it was confirmed with,
+    or the order silently loses money no batch accounts for."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "FUTURE", "2026-08-27 09:00:00", 210.0)
+    with pytest.raises(ValueError, match="未完成"):
+        create_settlement(db_path, "ride", ["A1", "FUTURE"], 490.0, "2026-08-26", now=NOW,
+                          penalties={"A1": 97.38})
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT penalty_fee FROM orders WHERE order_id = 'A1'").fetchone()[0] is None
+    assert open_batches(db_path, "ride") == []
+
+
+def test_init_db_adds_the_penalty_column_to_an_old_database(tmp_path):
+    path = str(tmp_path / "orders.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, order_id TEXT UNIQUE, price REAL)")
+    conn.commit()
+    conn.close()
+
+    init_db(path)
+    init_db(path)  # the ALTER must stay a no-op on an already migrated database
+
+    conn = sqlite3.connect(path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)")]
+    conn.close()
+    assert "penalty_fee" in cols
+
+
 def test_no_db_function_marks_a_batch_paid_by_hand():
     """paid_on is the bank's value date and allocate is the only writer.
 
