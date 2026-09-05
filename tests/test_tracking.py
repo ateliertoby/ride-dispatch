@@ -1,6 +1,8 @@
+import asyncio
 import os
 import tempfile
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -208,3 +210,89 @@ def test_urgent_exit_no_flight_data_keeps_fallback():
     # Polling can't refresh an ETA that doesn't exist; clamp_interval owns this wake-up
     orders = [order_dict(scheduled_time="2026-07-02 13:00:00", passenger_exit_minutes=20)]
     assert calc_next_interval(orders, now=NOW) == 1800
+
+
+# --- poll cadence: the heartbeat gate must not skip a tick ---
+
+
+class _Clock:
+    """Stand-in for the wall clock the poll gate reads."""
+
+    def __init__(self, start: datetime):
+        self.t = start
+
+
+def _heartbeat(monkeypatch, interval: int, poll_seconds: float, ticks: int,
+               fail: bool = False, jitter: list[float] | None = None) -> list[float]:
+    """Drive `ticks` heartbeats on the fixed 60s grid, each displaced by its
+    `jitter` offset; return the seconds at which a poll actually ran, measured
+    from the grid origin."""
+    # Imported here, not at module scope: importing the bot needs a bot token
+    # in the environment, and the rest of this file must stay pure.
+    import ride_dispatch.bot as bot
+
+    # chat_id 0 keeps the credit and parking checks out of the tick.
+    monkeypatch.setenv("NOTIFY_CHAT_ID", "0")
+    monkeypatch.setattr(bot, "_next_poll_at", None)
+    monkeypatch.setattr(bot, "_poll_running", False)
+    monkeypatch.setattr(bot, "_parking_running", False)
+
+    start = datetime(2026, 7, 2, 12, 0, 0)
+    clock = _Clock(start)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.t
+
+    monkeypatch.setattr(bot, "datetime", FakeDatetime)
+
+    polled: list[float] = []
+
+    async def fake_poll(context):
+        polled.append(round((clock.t - start).total_seconds(), 3))
+        clock.t += timedelta(seconds=poll_seconds)   # the HKIA round trip
+        if fail:
+            raise RuntimeError("feed down")
+        return interval
+
+    monkeypatch.setattr(bot, "_poll_and_notify", fake_poll)
+
+    for i in range(ticks):
+        clock.t = start + timedelta(seconds=60 * i + (jitter[i] if jitter else 0))
+        asyncio.run(bot._poll_tick(MagicMock()))
+    return polled
+
+
+def test_poll_runs_on_every_heartbeat_at_the_minimum_interval(monkeypatch):
+    # A 60s interval must land on consecutive 60s heartbeats. Anchoring the
+    # next-poll time to the end of the tick instead of its start pushes it past
+    # the following heartbeat by the poll's own duration, halving the cadence.
+    assert _heartbeat(monkeypatch, interval=60, poll_seconds=15, ticks=5) == [0, 60, 120, 180, 240]
+
+
+def test_poll_cadence_survives_a_poll_longer_than_the_tolerance(monkeypatch):
+    assert _heartbeat(monkeypatch, interval=60, poll_seconds=45, ticks=4) == [0, 60, 120, 180]
+
+
+def test_instant_poll_keeps_the_same_cadence(monkeypatch):
+    assert _heartbeat(monkeypatch, interval=60, poll_seconds=0, ticks=3) == [0, 60, 120]
+
+
+def test_tolerance_absorbs_heartbeat_jitter(monkeypatch):
+    # The heartbeat fires around the grid, not exactly on it. One tick running
+    # late followed by one running early re-opens the skip on its own, so the
+    # gate has to sit a little before the heartbeat rather than on top of it.
+    assert _heartbeat(monkeypatch, interval=60, poll_seconds=15, ticks=6,
+                      jitter=[0.5, -0.2] * 3) == [0.5, 59.8, 120.5, 179.8, 240.5, 299.8]
+
+
+def test_long_interval_still_gates_the_heartbeat(monkeypatch):
+    # Firing a few seconds early is fine; firing every heartbeat is not.
+    assert _heartbeat(monkeypatch, interval=600, poll_seconds=15, ticks=12) == [0, 600]
+
+
+def test_error_backoff_is_anchored_to_the_tick_start(monkeypatch):
+    from ride_dispatch.bot import POLL_ERROR_BACKOFF
+    assert POLL_ERROR_BACKOFF == 300
+    assert _heartbeat(monkeypatch, interval=60, poll_seconds=15, ticks=7, fail=True) == [0, 300]
