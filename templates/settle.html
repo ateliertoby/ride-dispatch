@@ -327,6 +327,45 @@
 
   .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
 
+  /* ---- statement sheet ----
+     The report is the text the bot's card carries, printed as it came rather
+     than rebuilt as rows: one text source means the chat and the page cannot
+     drift apart about what a statement says. */
+  .stmt-report {
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: inherit; font-size: 13px; line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface); border-radius: 10px;
+    padding: 12px; margin-top: 8px;
+  }
+  .stmt-credit { font-size: 14px; color: var(--text-2); padding: 10px 2px 0; }
+  .stmt-note { font-size: 13px; color: var(--text-3); padding: 6px 2px 0; }
+  .stmt-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
+  /* Reading is ~2 s of OCR on top of the upload, so the control says it is
+     working rather than looking like a tap that missed. */
+  .icon-btn:disabled { opacity: .5; cursor: default; }
+
+  /* The drop target is the whole page: on a desktop the file is dragged out of
+     the platform's own download, which is the original the reader wants. */
+  .drop {
+    position: fixed; inset: 0; z-index: 40; display: none;
+    background: var(--scrim); color: var(--text);
+    align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 650;
+  }
+  .drop.show { display: flex; }
+  .drop span {
+    border: 2px dashed var(--text-2); border-radius: 14px;
+    padding: 24px 28px; background: var(--sheet-bg);
+  }
+
+  /* Five controls share the header row here. Below iPhone SE width the month
+     label wraps onto a second line and collides with the summary under it, so
+     the round buttons give up the width instead. */
+  @media (max-width: 360px) {
+    .nav-btn, .icon-btn { width: 34px; }
+  }
+
   /* ---- desktop ----
      The dashboard is phone-only. A wide screen has nothing else to show --
      every batch is read from the day it sits on -- so the width buys bigger
@@ -348,6 +387,7 @@
     <button class="nav-btn" id="prevM" aria-label="前一個月">&larr;</button>
     <button class="date-btn" id="monthBtn"></button>
     <button class="nav-btn" id="nextM" aria-label="後一個月">&rarr;</button>
+    <button class="icon-btn" id="stmtBtn" aria-label="讀結算圖">圖</button>
     <a class="icon-btn" href="/" aria-label="返日程">&#10005;</a>
   </div>
   <div class="summary" id="summary"></div>
@@ -362,6 +402,8 @@
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet"></div>
 <div class="toast" id="toast"></div>
+<div class="drop" id="drop"><span>放低張結算圖</span></div>
+<input type="file" id="stmtFile" accept="image/*" hidden>
 
 <script>
 'use strict';
@@ -827,6 +869,7 @@ function viewHtml(v) {
   if (v.kind === 'unlink') return unlinkViewHtml(v);
   if (v.kind === 'credit') return creditViewHtml(v);
   if (v.kind === 'queue') return queueViewHtml();
+  if (v.kind === 'stmt') return stmtViewHtml(v);
   return batchViewHtml(v);
 }
 // keepScroll is for a repaint the operator asked for from inside the sheet
@@ -1191,6 +1234,34 @@ function queueRowHtml(c) {
     '">對</button></div></div>';
 }
 
+// ---- statement sheet ----
+// What the reader made of the screenshot, and the one tap that writes the
+// batch from it. The report is printed as the server sent it, which is the
+// same string the bot's card carries.
+function stmtViewHtml(v) {
+  if (v.done) {
+    return sheetHead('已結算') +
+      '<pre class="stmt-report">' + esc(v.done.text) + '</pre>' +
+      '<button class="ghost-btn" data-bl="' + v.done.settlement_id + '">睇批次</button>' +
+      '<button class="ghost-btn" data-close="1">收埋</button>';
+  }
+  const r = v.read;
+  // A spent read cannot be confirmed again: the server has said why, and the
+  // way out is another upload rather than another tap.
+  const canConfirm = r.can_settle && !!r.token && !v.err;
+  return sheetHead('結算單', esc(platLabel('ride'))) +
+    (v.err ? '<div class="stmt-err">' + esc(v.err) + '</div>' : '') +
+    '<pre class="stmt-report">' + esc(r.report) + '</pre>' +
+    (r.credit_line ? '<div class="stmt-credit">' + esc(r.credit_line) + '</div>' : '') +
+    // No batch can come out of this statement; what is left to do is to the
+    // credit, and archiving one is a chat-card action the page does not have.
+    // Naming it here says what the money is waiting on rather than offering a
+    // control that would do nothing.
+    (r.no_orders_offer ? '<div class="stmt-note">' + esc(r.no_orders_offer.label) + '</div>' : '') +
+    (canConfirm ? '<button class="primary-btn" data-stmtgo="1">' + esc(r.confirm_label) + '</button>' : '') +
+    '<button class="ghost-btn" data-close="1">' + (canConfirm ? '唔確認' : '收埋') + '</button>';
+}
+
 // Taking money back off a batch is destructive the same way undo is, and is
 // confirmed the same way: a pushed view rather than an armed button, so a
 // repaint mid-decision cannot wipe the armed state.
@@ -1286,6 +1357,86 @@ async function openBatch(id) {
   pushView({ kind: 'batch', id: id });
 }
 
+// ---- reading a statement ----
+// The file picked here is the platform's own: a screenshot forwarded through a
+// chat has been recompressed first, and that is what the reader mis-reads.
+const stmtBtn = document.getElementById('stmtBtn');
+const stmtFile = document.getElementById('stmtFile');
+let stmtBusy = false;
+
+function setStmtBusy(on) {
+  stmtBusy = on;
+  stmtBtn.disabled = on;
+  stmtBtn.textContent = on ? '⋯' : '圖';
+}
+
+async function readStatement(file) {
+  if (!file || stmtBusy) return;
+  setStmtBusy(true);
+  let body;
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/api/statements/read', { method: 'POST', body: form });
+    body = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(body.error || ('HTTP ' + res.status)); return; }
+  } catch (e) {
+    toast('讀唔到張圖');
+    return;
+  } finally {
+    setStmtBusy(false);
+  }
+  openView({ kind: 'stmt', read: body, err: '' });
+}
+
+// The tap that writes the batch. The token is spent server-side, so a refusal
+// leaves the sheet with the server's wording and no second tap to give.
+async function confirmStatement() {
+  const v = curView();
+  if (!v || v.kind !== 'stmt' || v.done || !v.read.token) return;
+  const btn = document.querySelector('[data-stmtgo]');
+  if (btn) btn.disabled = true;
+  try {
+    v.done = await apiWrite('POST', '/api/statements/confirm', { token: v.read.token });
+  } catch (e) {
+    v.err = e.message;
+    v.read.token = null;
+  }
+  // The batch is new money on the calendar, and load() repaints the open sheet
+  // with whatever this tap left on the view.
+  await load();
+}
+
+stmtBtn.addEventListener('click', () => stmtFile.click());
+stmtFile.addEventListener('change', () => {
+  const file = stmtFile.files[0];
+  // Cleared first, so picking the same file again still fires a change.
+  stmtFile.value = '';
+  readStatement(file);
+});
+
+// Desktop only in practice: a phone has no drag. Both handlers preventDefault
+// because a browser left to itself navigates away to the dropped file.
+let dragDepth = 0;
+function showDrop(on) { document.getElementById('drop').classList.toggle('show', on); }
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragenter', e => {
+  e.preventDefault();
+  if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+  dragDepth++;
+  showDrop(true);
+});
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) showDrop(false);
+});
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dragDepth = 0;
+  showDrop(false);
+  readStatement(e.dataTransfer && e.dataTransfer.files[0]);
+});
+
 function copyId(id) {
   // The async clipboard can be refused depending on where the page is served
   // from; the toast is the feedback either way.
@@ -1343,6 +1494,8 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
   const undoGo = e.target.closest('[data-undogo]');
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
+  const stmtGo = e.target.closest('[data-stmtgo]');
+  if (stmtGo && !stmtGo.disabled) { confirmStatement(); return; }
   const alloc = e.target.closest('[data-alloc-credit]');
   if (alloc) { allocateCredit(+alloc.dataset.allocCredit, +alloc.dataset.allocBatch); return; }
   // The confirm button carries the same pair as the row that opened it, so it
