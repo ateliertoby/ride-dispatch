@@ -29,13 +29,28 @@
   }
   .ghost-btn:active { background: var(--key-press); }
 
-  /* ---- month grid ---- */
-  .cal { padding: 12px 14px 4px; }
+  /* ---- week strip ----
+     One continuous run of weeks rather than a month at a time: a week row can
+     hold the end of one month and the start of the next, and money settled on
+     the last day of a month is paid in the one after it. */
+  .cal { padding: 8px 14px 4px; }
   /* minmax(0, 1fr): WebKit lets a grid track grow past its share when an item
      is wider than the column, which would push the seventh day off screen. */
   .wk, .grid, .lane { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
-  .wk { padding-bottom: 4px; }
   .wk span { text-align: center; font-size: 11px; color: var(--text-3); }
+  /* Everything that labels the strip rides in the sticky header, because the
+     strip grows at both ends: scrolling up prepends months, so anything left
+     above the first week row can never be scrolled back to. */
+  .header .chips { padding: 10px 0 2px; }
+  .header .wk { padding: 8px 0 0; }
+  /* The strip's own ends, watched to know when to load the month past them.
+     Zero height is skipped by some observers, so they keep a pixel. */
+  .sent { height: 1px; }
+  /* Where one month gives way to the next. The strip carries no month heading
+     -- that is the point: a batch straddling the boundary stays one bar -- so
+     the break is a hairline, and the 1st names its month in its own corner
+     label. */
+  .wkblock.mstart { border-top: 1px solid var(--line); padding-top: 4px; }
   .cell {
     position: relative; min-height: 56px; border: none; border-radius: 10px;
     background: var(--surface); cursor: pointer;
@@ -47,9 +62,9 @@
     display: flex; align-items: center; justify-content: center;
     font-family: inherit; color: inherit; min-width: 0; overflow: hidden;
   }
-  .cell.pad { background: none; cursor: default; }
   /* A day with no orders carries no money and no decision, so it recedes to
-     little more than a calendar coordinate. */
+     little more than a calendar coordinate. A day in a month the strip has not
+     loaded yet reads the same way and fills in when that month arrives. */
   .cell.none { opacity: .35; cursor: default; }
   .cell .d {
     position: absolute; top: 4px; left: 6px;
@@ -68,7 +83,7 @@
   .cell .amt.future { color: var(--text-3); opacity: .5; }
   .cell.today .d { color: var(--text); }
   .cell.today { box-shadow: inset 0 0 0 1px var(--text-3); }
-  .cell:not(.none):not(.pad):active { background: var(--surface-press); }
+  .cell:not(.none):active { background: var(--surface-press); }
 
   /* ---- event lanes ----
      Under each week's cells, one grid holding every batch segment and credit
@@ -130,7 +145,7 @@
      is done with but the account it paid into is not, so the chip wears the
      colour of what is owed instead of dimming away as a record. */
   .cchip.short { border-color: var(--amber); color: var(--amber); opacity: 1; }
-  .legend { padding: 10px 2px 2px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
+  .legend { padding: 0 2px 8px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
   /* The batch sheet is read for its money on every open and for its order
@@ -410,13 +425,16 @@
     <a class="icon-btn" href="/" aria-label="返日程">&#10005;</a>
   </div>
   <div class="summary" id="summary"></div>
-</div>
-<div class="chips" id="chips"></div>
-<div class="cal">
+  <div class="chips" id="chips"></div>
   <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
-  <div class="weeks" id="grid"></div>
-  <div id="calEmpty"></div>
+</div>
+<div class="cal">
+  <!-- The colour key is read once and sits above the strip: the strip has no
+       end to put it after, since scrolling to either end loads another month. -->
   <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結</div>
+  <div class="sent" id="sentTop"></div>
+  <div class="weeks" id="grid"></div>
+  <div class="sent" id="sentBot"></div>
 </div>
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet"></div>
@@ -429,13 +447,29 @@
 {% include "_shared.js" %}
 
 // ---- state ----
-// One month of one platform at a time, exactly what /api/settle returns.
-let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, credits: { unallocated: 0, unallocated_sum: 0 }, now: '' };
+// /api/settle answers one month at a time, but the calendar is a continuous
+// strip, so the page holds every month it has scrolled through: 'YYYY-MM' ->
+// that month's payload. The keys are always an unbroken run, because a gap
+// would draw as real dates carrying no data -- indistinguishable from days
+// with no work on them.
+let months = new Map();
+// Months with a fetch in flight. A sentinel can enter the viewport twice
+// before its month lands, and the second entry must not fetch again.
+let loading = new Set();
+// Bumped whenever the strip is thrown away and refounded (platform switch, a
+// jump far outside it). A fetch that started before the bump is answering a
+// question nobody is asking any more.
+let gen = 0;
+// The merged read of every loaded month, which is what the whole page below
+// works off.
+let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, now: '' };
 // The bank ledger, exactly what /api/credits returns: every credit of the
-// platform, not the month on screen.
+// platform, whatever the strip has loaded.
 let ledger = { counts: { open: 0, partial: 0, done: 0, archived: 0 }, sums: { open: 0, done: 0 }, credits: [] };
 let curPlat = 'ride';
-let curMonth = fmtDate(new Date()).slice(0, 7);
+// The month the header names: the one the strip is showing, updated by the
+// scroll rather than by a paging button.
+let viewMonth = fmtDate(new Date()).slice(0, 7);
 // Settle-ability is decided against the server's clock, not the browser's, so
 // the page and the API agree on which legs are done.
 let NOW = '';
@@ -470,7 +504,7 @@ function openCredits() { return ledger.credits.filter(c => c.state === 'open' ||
 function batchOf(orderId) { return BATCH_OF.get(orderId) || null; }
 function reindex() {
   // A batch can straddle months, so its own member list is the only place legs
-  // outside the month on screen appear.
+  // outside the loaded months appear.
   BATCH_OF = new Map();
   for (const b of data.settlements) {
     for (const o of b.orders) BATCH_OF.set(o.order_id, b);
@@ -505,6 +539,23 @@ function addDays(dateStr, n) {
   d.setDate(d.getDate() + n);
   return fmtDate(d);
 }
+// 0 = Sunday, the column the week strip starts on.
+function dow(dateStr) { return new Date(dateStr + 'T00:00:00').getDay(); }
+function monthKey(dateStr) { return dateStr.slice(0, 7); }
+function addMonths(key, n) {
+  const y = +key.slice(0, 4), m = +key.slice(5, 7) - 1 + n;
+  return (y + Math.floor(m / 12)) + '-' + pad2((m % 12 + 12) % 12 + 1);
+}
+// Day 0 of the next month is the last day of this one, whatever its length.
+function monthEnd(key) {
+  return key + '-' + pad2(new Date(+key.slice(0, 4), +key.slice(5, 7), 0).getDate());
+}
+function monthsBetween(a, b) {
+  const out = [];
+  for (let k = a; k <= b; k = addMonths(k, 1)) out.push(k);
+  return out;
+}
+function todayMonth() { return TODAY ? monthKey(TODAY) : fmtDate(new Date()).slice(0, 7); }
 function mdLabel(dateStr) {
   const p = dateStr.split('-');
   return (+p[1]) + '月' + (+p[2]) + '日';
@@ -616,24 +667,121 @@ function heldLabel(b) {
 }
 
 // ---- load ----
-async function load() {
-  // The ledger comes with the month: the header counts it and the sheet lists
-  // it, and a credit landing has to reach both at once.
+function loadedMonths() { return [...months.keys()].sort(); }
+
+// Every reader below asks the merged book, not a month, so the merge is where
+// the strip stops being a pile of month payloads.
+function remerge(book) {
+  const orders = [];
+  const settlements = [];
+  const seen = new Set();
+  for (const key of loadedMonths()) {
+    const p = months.get(key);
+    for (const o of p.orders) orders.push(o);
+    // Orders are scoped to their month server-side, but a batch straddling a
+    // boundary comes back whole in both months' payloads, so it has to be
+    // taken once or its bar would be drawn twice.
+    for (const b of p.settlements) {
+      if (seen.has(b.id)) continue;
+      seen.add(b.id);
+      settlements.push(b);
+    }
+  }
+  // counts, totals and the clock span all time, so any payload carries them and
+  // the freshest one wins.
+  data = { orders, settlements, counts: book.counts, totals: book.totals, now: book.now };
+  NOW = data.now;
+  TODAY = NOW.slice(0, 10);
+  reindex();
+}
+
+// One month into the map, nothing drawn: a caller loading several fills them
+// all in and paints once.
+async function fetchMonth(key) {
+  if (months.has(key) || loading.has(key)) return;
+  // Refounding swaps the set rather than emptying it, so the entry has to come
+  // out of the one it went into and not out of whatever is current by then.
+  const inflight = loading;
+  const g = gen;
+  inflight.add(key);
+  let payload;
   try {
-    const [month, credits] = await Promise.all([
-      fetch('/api/settle?month=' + curMonth + '&platform=' + curPlat),
-      fetch('/api/credits?platform=' + curPlat),
-    ]);
-    if (!month.ok || !credits.ok) throw new Error('HTTP ' + month.status + '/' + credits.status);
-    data = await month.json();
-    ledger = await credits.json();
+    const res = await fetch('/api/settle?month=' + key + '&platform=' + curPlat);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    payload = await res.json();
+  } catch (e) {
+    toast('載入失敗');
+    return;
+  } finally {
+    inflight.delete(key);
+  }
+  if (g !== gen) return;
+  months.set(key, payload);
+}
+
+// The strip fills in every month between what it holds and the one asked for,
+// because its keys have to stay an unbroken run. A month far outside it is a
+// jump rather than a scroll, so past this many the strip is refounded there
+// instead of paying for every month in between.
+const FILL_MAX = 3;
+async function ensureMonth(key) {
+  if (months.has(key)) return true;
+  const keys = loadedMonths();
+  const lo = keys.length && keys[0] < key ? keys[0] : key;
+  const hi = keys.length && keys[keys.length - 1] > key ? keys[keys.length - 1] : key;
+  const want = monthsBetween(lo, hi).filter(k => !months.has(k) && !loading.has(k));
+  if (want.length > FILL_MAX) return refound(key);
+  await Promise.all(want.map(fetchMonth));
+  if (!months.has(key)) return false;
+  remerge(months.get(key));
+  render();
+  return true;
+}
+
+// Throw the strip away and start it again on one month: the platform changed,
+// or the operator asked for somewhere the strip cannot reach by scrolling.
+// The old rows go first, so the paint has nothing to hold position against and
+// the new strip -- which begins on that month's first week -- comes up at the
+// top of the strip area on its own.
+async function refound(key) {
+  gen++;
+  months = new Map();
+  loading = new Set();
+  anchorDebt = 0;
+  pinId = '';
+  document.getElementById('grid').innerHTML = '';
+  window.scrollTo(0, 0);
+  await load(key);
+  return months.has(key);
+}
+
+// A write here or on another device lands through load(): every month the strip
+// holds is refetched at once, because a batch or a credit can have moved in any
+// of them, and a half-refreshed strip would show the same batch in two states.
+async function load(seed) {
+  const keys = loadedMonths();
+  if (!keys.length) keys.push(seed || todayMonth());
+  const g = gen;
+  let payloads, credits;
+  try {
+    // The ledger comes with the months: the header counts it and the sheet
+    // lists it, and a credit landing has to reach both at once.
+    const res = await Promise.all(
+      keys.map(k => fetch('/api/settle?month=' + k + '&platform=' + curPlat))
+        .concat([fetch('/api/credits?platform=' + curPlat)]));
+    const bad = res.find(r => !r.ok);
+    if (bad) throw new Error('HTTP ' + bad.status);
+    const bodies = await Promise.all(res.map(r => r.json()));
+    credits = bodies.pop();
+    payloads = bodies;
   } catch (e) {
     toast('載入失敗');
     return;
   }
-  NOW = data.now;
-  TODAY = NOW.slice(0, 10);
-  reindex();
+  if (g !== gen) return;
+  keys.forEach((k, i) => months.set(k, payloads[i]));
+  ledger = credits;
+  remerge(payloads[payloads.length - 1]);
   render();
   repaintOpenView();
 }
@@ -656,19 +804,22 @@ function repaintOpenView() {
 }
 
 // ---- render ----
+// The calendar goes first: the header names the month the strip is showing, and
+// that is read off the rows the calendar has just laid out.
 function render() {
-  renderHeader();
   renderChips();
   renderCalendar();
+  renderHeader();
 }
 
 function renderHeader() {
-  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
+  const y = +viewMonth.slice(0, 4), m = +viewMonth.slice(5, 7);
   document.getElementById('monthBtn').innerHTML =
-    y + ' 年 ' + m + ' 月' + (curMonth === TODAY.slice(0, 7) ? '<small>今個月</small>' : '<small>&nbsp;</small>');
-  // Totals span the whole book, not the month on screen: old unsettled days
-  // are exactly the ones the operator is here to clear. The server computes
-  // them, so the chips and the calendar cannot disagree about the same money.
+    y + ' 年 ' + m + ' 月' + (viewMonth === todayMonth() ? '<small>今個月</small>' : '<small>&nbsp;</small>');
+  // Totals span the whole book, not the months the strip has loaded: old
+  // unsettled days are exactly the ones the operator is here to clear. The
+  // server computes them, so the chips and the calendar cannot disagree about
+  // the same money.
   // Only what is still to be done: a matched or archived credit is finished
   // business and is read off the calendar by its value date instead.
   const open = openCredits();
@@ -688,39 +839,61 @@ function renderChips() {
 }
 
 function cellHtml(dateStr) {
-  if (!dateStr) return '<div class="cell pad"></div>';
   const day = +dateStr.slice(8);
+  // The 1st carries its month, because a week row is not a month and there is
+  // no heading above it to read the month off.
+  const num = day === 1 ? mdSlash(dateStr) : String(day);
   const info = dayInfo(dateStr);
   const today = dateStr === TODAY ? ' today' : '';
   // Only an empty day is inert; every day holding work opens, past or future.
-  if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + day + '</span></button>';
+  if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + num + '</span></button>';
   const future = dateStr > TODAY;
   const cls = future ? 'future' : (info.loose > 0 ? 'unsettled' : 'done');
   const amt = future ? info.total : (info.loose > 0 ? info.loose : info.total);
   return '<button class="cell' + today + '" data-d="' + dateStr + '">' +
-    '<span class="d">' + day + '</span><span class="amt ' + cls + '">' + money(amt) + '</span></button>';
+    '<span class="d">' + num + '</span><span class="amt ' + cls + '">' + money(amt) + '</span></button>';
 }
 
-function monthWeeks() {
-  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7);
-  const lead = new Date(y, m - 1, 1).getDay();
-  const days = new Date(y, m, 0).getDate();
+// Every week of the loaded run, end to end, with no month break in it: from the
+// Sunday of the week holding the 1st of the earliest month to the Saturday of
+// the week holding the last day of the latest. Every cell is a real date, so a
+// week row can span two months and a bar across the boundary stays one bar. The
+// edge weeks reach into months not loaded yet; those days draw as empty and
+// fill in when their month arrives.
+function stripWeeks() {
+  const keys = loadedMonths();
+  if (!keys.length) return [];
+  const last = monthEnd(keys[keys.length - 1]);
+  const end = addDays(last, 6 - dow(last));
   const weeks = [];
-  let w = new Array(lead).fill(null);
-  for (let d = 1; d <= days; d++) {
-    w.push(curMonth + '-' + pad2(d));
-    if (w.length === 7) { weeks.push(w); w = []; }
+  const first = keys[0] + '-01';
+  for (let s = addDays(first, -dow(first)); s <= end; s = addDays(s, 7)) {
+    const w = [];
+    for (let i = 0; i < 7; i++) w.push(addDays(s, i));
+    weeks.push(w);
   }
-  if (w.length) { while (w.length < 7) w.push(null); weeks.push(w); }
   return weeks;
 }
+
+// Which month a week row belongs to, for the header label and for the scroll
+// targets. The week holding the 1st is the first row of the new month: it is
+// the row the operator scrolls to for that month, and everything under it is
+// that month, whichever side of the boundary most of its own seven days sit.
+function weekMonth(week) { return monthKey(week[6]); }
+// A week row is addressed by the Sunday it starts on, both ways round: the
+// scroll code has to find a row again across a repaint that rebuilt every one
+// of them, and has to read a row's dates back off the row it found.
+function weekId(sunday) { return 'wk' + sunday; }
+function idWeek(id) { return id.slice(2); }
+// The Sunday of the week holding the 1st, which is that month's first row.
+function monthWeekId(key) { const d = key + '-01'; return weekId(addDays(d, -dow(d))); }
 
 // Each run of a batch is laid out on its own and cut again at the week
 // boundary, so a segment is the unit both the grid and the lane packer see.
 // Batches come before credits so a bar is never pushed under a chip.
 function weekEvents(week) {
   const idx = new Map();
-  week.forEach((d, i) => { if (d) idx.set(d, i); });
+  week.forEach((d, i) => idx.set(d, i));
   const out = [];
   for (const b of data.settlements) {
     const runs = runsOf(batchDates(b));
@@ -737,9 +910,10 @@ function weekEvents(week) {
         type: 'bar', start, cols: end - start + 1, batch: b,
         makeup, point, from: run[0], head,
         label: !head ? '' : makeup ? makeupLabel(point, run[0]) : barLabel(b),
-        // Squared off whenever the run carries on past this segment: into the
-        // next week, or off the edge of the month on screen, which is where a
-        // batch straddling two months leaves its other half.
+        // Squared off whenever the run carries on past this segment, so the
+        // pieces read as one bar wrapping. The strip is continuous, so the only
+        // thing that cuts a bar is the week wrap -- a batch straddling a month
+        // boundary is drawn whole.
         cutR: run[run.length - 1] > week[end],
         cutL: run[0] < week[start],
       });
@@ -863,18 +1037,127 @@ function eventHtml(e, lane) {
 function renderCalendar() {
   const grid = document.getElementById('grid');
   const m = calMetrics(grid);
-  const html = monthWeeks().map(week => {
+  const weeks = stripWeeks();
+  const html = weeks.map((week, wi) => {
     const events = weekEvents(week);
     reserve(events, m);
     const lanes = packLanes(events);
-    return '<div class="wkblock"><div class="grid">' + week.map(cellHtml).join('') + '</div>' +
+    const start = wi > 0 && weekMonth(week) !== weekMonth(weeks[wi - 1]);
+    return '<div class="wkblock' + (start ? ' mstart' : '') + '" id="' + weekId(week[0]) +
+      '"><div class="grid">' + week.map(cellHtml).join('') + '</div>' +
       (lanes.length ? '<div class="lane">' +
         lanes.map((lane, li) => lane.map(e => eventHtml(e, li)).join('')).join('') + '</div>' : '') +
       '</div>';
   }).join('');
+  const anchor = takeAnchor();
   grid.innerHTML = html;
-  document.getElementById('calEmpty').innerHTML =
-    data.orders.length ? '' : '<div class="empty">呢個月冇紀錄</div>';
+  putAnchor(anchor);
+  const mon = monthAtTop();
+  if (mon) viewMonth = mon;
+  pokeEdges();
+}
+
+// ---- scrolling the strip ----
+// Everything above the strip is sticky, so the top row of the strip sits flush
+// against the bottom of the header. Flush rather than spaced: a gap would show
+// the tail of the week above through it, and the header carries its own bottom
+// padding as breathing room. This is one line, and the scroll target, the
+// anchor and the header label all have to read it as the same line -- give any
+// of them its own offset and a month scrolled to the top leaves the sliver of
+// the week above it naming the header.
+function stripTop() {
+  return document.querySelector('.header').getBoundingClientRect().bottom;
+}
+function topRow() {
+  // The row above the top one ends exactly on that line, and subpixel layout
+  // drops its end a fraction either side, so the test carries a pixel of slack
+  // or the row above would win.
+  const edge = stripTop() + 1;
+  for (const el of document.querySelectorAll('#grid .wkblock')) {
+    if (el.getBoundingClientRect().bottom > edge) return el;
+  }
+  return null;
+}
+function monthAtTop() {
+  const el = topRow();
+  return el ? monthKey(addDays(idWeek(el.id), 6)) : null;
+}
+// Put a month's first week row at the top of the strip.
+function scrollToMonth(key, smooth) {
+  const el = document.getElementById(monthWeekId(key));
+  if (!el) return;
+  const y = window.scrollY + el.getBoundingClientRect().top - stripTop();
+  window.scrollTo({ top: Math.max(0, y), behavior: smooth ? 'smooth' : 'auto' });
+}
+
+// A repaint rebuilds every week row, and rows above the viewport change height
+// whenever a month is prepended or a lane appears -- which would slide the
+// strip out from under the operator. The fix is an anchor: where the top row
+// sat before the paint, put it back after.
+//
+// A strip only a month or two long is barely taller than the screen, so the
+// scroll that would hold it still runs out of document. What could not be
+// scrolled is owed to the next paint, by which time the strip has grown. A
+// pinned row states the same target every paint and simply asks again; an
+// ordinary one has no target to restate, so it carries the shortfall.
+let pinId = '';
+let anchorDebt = 0;
+function takeAnchor() {
+  const edge = stripTop();
+  // A pin left over from an earlier paint outranks whatever is on screen now,
+  // because what is on screen is where the unfinished scroll left it.
+  if (pinId && document.getElementById(pinId)) return { id: pinId, off: edge, pin: true };
+  const el = topRow();
+  if (!el) return null;
+  const top = el.getBoundingClientRect().top;
+  // A top row sitting below the strip's top line has page chrome above it --
+  // the colour key at the head of the page, which only the untouched strip is
+  // ever short enough to show. Growth at the top displaces that chrome, so
+  // such a row is pinned to the line. Anywhere else the row is where the
+  // operator scrolled it to, and goes back exactly there.
+  if (top <= edge) return { id: el.id, off: top, pin: false };
+  pinId = el.id;
+  return { id: el.id, off: edge, pin: true };
+}
+function putAnchor(a) {
+  const el = a && document.getElementById(a.id);
+  if (!el) { anchorDebt = 0; pinId = ''; return; }
+  const want = el.getBoundingClientRect().top - a.off + (a.pin ? 0 : anchorDebt);
+  const from = window.scrollY;
+  if (want) window.scrollBy(0, want);
+  const left = want - (window.scrollY - from);
+  if (!a.pin) { anchorDebt = left; return; }
+  anchorDebt = 0;
+  if (Math.abs(left) < 1) pinId = '';
+}
+
+// The strip grows by being scrolled rather than by a button, so its two ends
+// are watched: a sentinel entering the viewport is the ask for the month past
+// that end. The margin fires it early, so the month is there before the edge is
+// reached, and one entry loads one month.
+let edgeIO = null;
+function watchEdges() {
+  edgeIO = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const keys = loadedMonths();
+      if (!keys.length) continue;
+      ensureMonth(e.target.id === 'sentTop'
+        ? addMonths(keys[0], -1) : addMonths(keys[keys.length - 1], 1));
+    }
+  }, { rootMargin: '150px 0px' });
+  pokeEdges();
+}
+// An observer only speaks when a sentinel crosses the edge of the viewport, and
+// a sentinel that was already showing when the strip grew under it never does.
+// Re-observing after a paint makes it restate where it is, which is what
+// terminates the growth: a month prepended pushes the top sentinel out of
+// range, and until it is out of range the strip is still too short.
+function pokeEdges() {
+  if (!edgeIO) return;
+  edgeIO.disconnect();
+  edgeIO.observe(document.getElementById('sentTop'));
+  edgeIO.observe(document.getElementById('sentBot'));
 }
 
 // ---- sheet ----
@@ -1441,16 +1724,16 @@ async function unlinkCredit(batchId, creditId) {
   toast('已解除入數');
 }
 
-// A credit's batch can sit outside the month on screen, and the batch sheet
-// reads from the month. Move the calendar to it first, or the sheet opens on
-// nothing.
+// A credit's batch can sit outside every month the strip has loaded, and the
+// batch sheet reads from what is loaded. Bring its month into the strip first,
+// or the sheet opens on nothing.
 async function openBatch(id) {
   if (!batchById(id)) {
     const b = ledger.credits.flatMap(c => c.batches).find(x => x.id === id);
-    const month = b && b.dates.length ? b.dates[b.dates.length - 1].slice(0, 7) : '';
-    if (!month || month === curMonth) return;
-    curMonth = month;
-    await load();
+    const month = b && b.dates.length ? monthKey(b.dates[b.dates.length - 1]) : '';
+    if (!month) return;
+    if (!await ensureMonth(month)) return;
+    scrollToMonth(month);
     if (!batchById(id)) return;
   }
   pushView({ kind: 'batch', id: id });
@@ -1544,24 +1827,28 @@ function copyId(id) {
 }
 
 // ---- events ----
-function shiftMonth(n) {
-  const y = +curMonth.slice(0, 4), m = +curMonth.slice(5, 7) + n;
-  curMonth = m < 1 ? (y - 1) + '-12' : m > 12 ? (y + 1) + '-01' : y + '-' + pad2(m);
-  load();
+// The arrows move the strip a month at a time, relative to the month it is
+// showing, and load whatever is not in it yet. They move the scroll, not the
+// data: everything already loaded stays loaded and scrollable.
+async function shiftMonth(n) {
+  const key = addMonths(viewMonth, n);
+  if (await ensureMonth(key)) scrollToMonth(key);
 }
 document.getElementById('prevM').addEventListener('click', () => shiftMonth(-1));
 document.getElementById('nextM').addEventListener('click', () => shiftMonth(1));
-document.getElementById('monthBtn').addEventListener('click', () => {
-  if (!TODAY || curMonth === TODAY.slice(0, 7)) return;
-  curMonth = TODAY.slice(0, 7);
-  load();
+document.getElementById('monthBtn').addEventListener('click', async () => {
+  const key = todayMonth();
+  if (key === viewMonth) return;
+  if (await ensureMonth(key)) scrollToMonth(key, true);
 });
 document.getElementById('chips').addEventListener('click', e => {
   const c = e.target.closest('.chip');
   if (!c || c.dataset.f === curPlat) return;
   curPlat = c.dataset.f;
   savePlat();
-  load();
+  // Another platform's book is another set of months worth loading, so the
+  // strip starts again where the operator would start reading it.
+  refound(todayMonth());
 });
 document.getElementById('summary').addEventListener('click', e => {
   if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
@@ -1706,8 +1993,25 @@ async function saveUnpaid(bid) {
   toast('已記低');
 }
 
+// The header names the month the strip is showing, which changes as it scrolls
+// rather than when something is loaded. One read per frame at most: this fires
+// on every scroll tick.
+let monthTick = 0;
+window.addEventListener('scroll', () => {
+  if (monthTick) return;
+  monthTick = requestAnimationFrame(() => {
+    monthTick = 0;
+    const mon = monthAtTop();
+    if (mon && mon !== viewMonth) { viewMonth = mon; renderHeader(); }
+  });
+}, { passive: true });
+
 // ---- init ----
+// The strip opens on today's month at the top of the strip area, and every
+// growth after that holds whatever it was showing, so no positioning step is
+// needed here.
 loadPlat();
+watchEdges();
 load();
 const es = new EventSource('/api/events');
 es.onmessage = () => load();
