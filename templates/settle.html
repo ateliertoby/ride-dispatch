@@ -1223,24 +1223,49 @@ function pokeEdges() {
 // The relation is read off the ledger rather than off the loaded months,
 // because that is the only place an end outside them appears: a credit carries
 // every batch it went into, and each of those carries its own days.
+//
+// It is the whole connected run of allocations, not one hop out from the end
+// named. Two credits paying one batch are one money statement, and a statement
+// has to read the same from every end of it -- entering at either chip or at
+// the bar must light the identical set, or the operator is being told the sum
+// depends on where he looked. Closing over the edges buys that invariance at
+// the cost of a long chain lighting entirely, which is what a chain of money
+// crossing over itself is.
+
+// A batch's days wherever the page holds them: the ledger carries them for
+// every batch some credit paid, whatever the strip has loaded; the book carries
+// them for a batch no credit has been put against yet.
+function batchDatesOf(id) {
+  for (const c of ledger.credits) {
+    for (const b of c.batches) if (b.id === id) return b.dates;
+  }
+  const own = batchById(id);
+  return own ? batchDates(own) : [];
+}
+
 function focusSets() {
   const s = { batches: new Set(), credits: new Set(), dates: new Set() };
   if (!focus) return s;
-  if (focus.kind === 'batch') s.batches.add(focus.id); else s.credits.add(focus.id);
+  // Every allocation in both directions, so the walk crosses the graph the same
+  // way from either side of an edge.
+  const edges = { batch: new Map(), credit: new Map() };
+  const link = (m, from, to) => { if (!m.has(from)) m.set(from, []); m.get(from).push(to); };
   for (const c of ledger.credits) {
-    for (const b of c.batches) {
-      // A credit lights every batch it paid; a batch lights only the credits
-      // that paid it, never the other batches those credits also went into.
-      if (focus.kind === 'credit' ? c.id !== focus.id : b.id !== focus.id) continue;
-      s.credits.add(c.id);
-      s.batches.add(b.id);
-      for (const d of b.dates) s.dates.add(d);
+    for (const b of c.batches) { link(edges.credit, c.id, b.id); link(edges.batch, b.id, c.id); }
+  }
+  const seen = { batch: s.batches, credit: s.credits };
+  const walk = [focus];
+  seen[focus.kind].add(focus.id);
+  for (let i = 0; i < walk.length; i++) {
+    const n = walk[i];
+    if (n.kind === 'batch') for (const d of batchDatesOf(n.id)) s.dates.add(d);
+    const other = n.kind === 'batch' ? 'credit' : 'batch';
+    for (const id of edges[n.kind].get(n.id) || []) {
+      if (seen[other].has(id)) continue;
+      seen[other].add(id);
+      walk.push({ kind: other, id });
     }
   }
-  // A batch nothing has paid yet is absent from the ledger, so its own days are
-  // taken from the book as well.
-  const own = focus.kind === 'batch' ? batchById(focus.id) : null;
-  if (own) for (const d of batchDates(own)) s.dates.add(d);
   return s;
 }
 
@@ -1297,19 +1322,38 @@ function dropStaleFocus() {
   if (!alive) focus = null;
 }
 
-// The far end of the relation: the batches a focused credit paid, or the
-// credits that paid a focused batch. The near end is where the operator already
-// is -- he named it -- so it is the far end that decides whether the strip has
-// anything to show without being moved. Read back off the paint, which has
-// already run: lit, and not the focused element itself.
+// The far end of the relation: everything it lit bar the end the operator
+// named, since that end is where he already is and cannot be what tells him the
+// strip is worth moving. Naming a batch names the days its own bar runs across
+// too -- they came into view with it. Everything else in the relation counts,
+// a second credit on the same statement included: it answers the question the
+// focus asked as well as the batch does.
+function nearDates() {
+  return new Set(focus.kind === 'batch' ? batchDatesOf(focus.id) : []);
+}
+// Read back off the paint, which has already run, so the two agree by
+// construction on what is in the relation.
 function farNodes() {
   const grid = document.getElementById('grid');
-  return grid.querySelectorAll(focus.kind === 'credit'
-    ? '[data-bar]:not(.dim), .cell[data-d]:not(.dim)' : '[data-chip]:not(.dim)');
+  const own = nearDates();
+  const named = el => focus.kind === 'batch'
+    ? +el.dataset.bar === focus.id || own.has(el.dataset.d)
+    : +el.dataset.chip === focus.id;
+  return [...grid.querySelectorAll('[data-bar]:not(.dim), [data-chip]:not(.dim), ' +
+    '.cell[data-d]:not(.dim)')].filter(el => !named(el));
 }
+// Where that far end sits on the strip. A credit is only ever on its value
+// date, a batch on each of its days, so both kinds of member offer the scroll a
+// row and it can take whichever is nearest.
 function farDates(s) {
-  if (focus.kind === 'credit') return [...s.dates];
-  return ledger.credits.filter(c => s.credits.has(c.id)).map(c => c.value_date);
+  const own = nearDates();
+  const dates = [...s.dates].filter(d => !own.has(d));
+  for (const c of ledger.credits) {
+    if (s.credits.has(c.id) && !(focus.kind === 'credit' && c.id === focus.id)) {
+      dates.push(c.value_date);
+    }
+  }
+  return dates;
 }
 function onScreen(el) {
   const r = el.getBoundingClientRect();
