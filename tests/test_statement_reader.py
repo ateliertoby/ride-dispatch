@@ -27,6 +27,10 @@ DAY3 = [("11:47", "1578701224818578", 200.0), ("14:00", "1539272630110852", 210.
 # the trip's own order id whose 司機應結算金額 is negative.
 PENALTY_DAY1 = [("11:17", "1128296513125016", 300.0)]
 PENALTY_DAY2 = [("13:00", "1128106371423384", 280.0), ("13:00", "1128106371423384", -97.38)]
+# A fifth recording, off the platform's 完單待確認 view: a 結算狀態 column prints
+# to the right of 司機應結算金額, so the amount is not the row's last cell.
+STATUS_DAY = [("09:20", "1128962105062088", 210.0), ("11:15", "1128795078574671", 300.0),
+              ("16:30", "5127288820957047223", 210.0), ("17:10", "5127696895158503886", 300.0)]
 
 
 def load(name):
@@ -98,6 +102,31 @@ def test_the_penalty_statement_agrees_with_itself():
     sign is kept, so the checksum is what proves the sign was read."""
     from ride_dispatch.statement import _checksum
     stmt = parse_boxes(*load("statement_penalty.json"))
+    assert _checksum(stmt) == ("ok", [])
+
+
+def test_a_statement_with_a_settlement_status_column_is_read():
+    """A whole screenshot of the 完單待確認 view, where every data row ends with
+    its 結算狀態 and the header for 司機應結算金額 came back too mangled to name
+    the column, so the figures alone place it.  The account number the platform
+    stamps across the table prints a row of its own between two data rows: it
+    names nothing, so it costs neither a row nor a column."""
+    stmt = parse_boxes(*load("statement_status_column.json"))
+    assert stmt.account == "YY0000"
+    assert stmt.total == 1020.0
+    assert [d.date for d in stmt.days] == ["2026-09-07"]
+    assert [d.count for d in stmt.days] == [4]
+    assert [d.sum for d in stmt.days] == [1020.0]
+    assert [(r.time, r.order_id, r.amount) for r in stmt.days[0].rows] == STATUS_DAY
+    assert all(r.settle_date == "2026-09-09" for r in stmt.days[0].rows)
+    assert stmt.warnings == []
+
+
+def test_the_status_column_statement_agrees_with_itself():
+    """Rows and 求和 now come out of one column, so the checksum is a check on
+    that column rather than on whatever each row happened to end with."""
+    from ride_dispatch.statement import _checksum
+    stmt = parse_boxes(*load("statement_status_column.json"))
     assert _checksum(stmt) == ("ok", [])
 
 
@@ -197,8 +226,8 @@ def box(x, text, y, w=90):
 
 
 def wide_row(amount_text, y):
-    """A data line off the wide table: the 司機應結算金額 cell is the rightmost
-    box, with a 司機預估收入 figure and a 派單風險率 percentage in columns to its
+    """A data line off the wide table, in the view that ends at 司機應結算金額:
+    a 司機預估收入 figure and a 派單風險率 percentage print in columns to its
     left, either of which is money-shaped but is not the amount."""
     return [box(39, "2026-08-16", y),
             box(138, "2026-08-16 09:00", y),
@@ -209,15 +238,28 @@ def wide_row(amount_text, y):
             box(1240, amount_text, y, w=40)]
 
 
+def status_row(amount_text, status, y):
+    """The same line off the 完單待確認 view, which prints 結算狀態 to the right
+    of 司機應結算金額, so the amount is not the row's last cell."""
+    return wide_row(amount_text, y) + [box(1300, status, y, w=60)]
+
+
+def wide_day_row(date, count, total, y=10):
+    """A day group row of the wide table: 记录数 left of the aggregates, the
+    day's 求和 in the 司機應結算金額 column, and 記錄數 repeated under 結算狀態."""
+    return [box(39, date, y), box(300, f"记录数{count}", y),
+            box(1240, f"{total:.2f}", y, w=40), box(1300, f"记录数{count}", y, w=60)]
+
+
 def test_a_percentage_is_not_money():
     assert statement._MONEY_RE.findall("0.00%") == []
     assert statement._MONEY_RE.findall("210.00 合格 0.90%") == ["210.00"]
 
 
-def test_amount_is_read_off_the_end_of_the_rightmost_box():
+def test_amount_is_read_off_the_end_of_its_cell():
     """Junk OCR merges into the amount cell is ignored; a decimal point drawn
     at ~7 px comes back as ":"; one decimal digit is not an amount."""
-    f = statement._amount_at_row_end
+    f = statement._amount_in_cell
     assert f("正常 210.00") == 210.0
     assert f("#fo 830.00") == 830.0
     assert f("1,234.00") == 1234.0
@@ -228,10 +270,10 @@ def test_amount_is_read_off_the_end_of_the_rightmost_box():
     assert f("210.0") is None
 
 
-def test_a_negative_amount_at_the_row_end_keeps_its_sign():
+def test_a_negative_amount_in_its_cell_keeps_its_sign():
     """The sign is the whole signature of a 判罰賠款 row — the category chip is
     unreadable — so it must survive the amount cell in either glyph."""
-    f = statement._amount_at_row_end
+    f = statement._amount_in_cell
     assert f("-97.38") == -97.38
     assert f("−97.38") == -97.38
     assert f("不适用 -97.38") == -97.38
@@ -241,11 +283,26 @@ def test_a_negative_amount_at_the_row_end_keeps_its_sign():
     assert f("2026-08-19 13:00") == 13.0
 
 
-def test_amount_comes_from_the_rightmost_cell_not_the_percentage_column():
+def test_amount_comes_from_the_amount_column_not_the_percentage_column():
     boxes = [box(39, "2026-08-16", 10), box(300, "1", 10), box(1240, "200.00", 10, w=40)]
     boxes += wide_row("200:00", y=40)
     stmt = parse_boxes(boxes, 1280)
     assert [r.amount for r in stmt.days[0].rows] == [200.0]
+    assert stmt.warnings == []
+
+
+def test_a_status_column_right_of_the_amount_does_not_hide_it():
+    """The 完單待確認 view prints 結算狀態 after 司機應結算金額, so the amount is
+    no longer the row's last cell — and OCR mangles the status text, so the
+    column it opened cannot be recognised by reading what it says."""
+    boxes = wide_day_row("2026-08-16", 2, 400.0)
+    boxes += status_row("200.00", "完單待確認", y=40)
+    boxes += status_row("200:00", "完草待班部", y=70)
+    stmt = parse_boxes(boxes, 1400)
+    assert [d.date for d in stmt.days] == ["2026-08-16"]
+    assert [r.amount for r in stmt.days[0].rows] == [200.0, 200.0]
+    assert [d.sum for d in stmt.days] == [400.0]
+    assert [d.count for d in stmt.days] == [2]
     assert stmt.warnings == []
 
 
@@ -272,6 +329,95 @@ def test_a_stray_box_left_of_the_date_still_opens_the_day():
     assert [r.amount for r in stmt.days[0].rows] == [200.0, 200.0]
     assert stmt.days[0].count == 2
     assert stmt.warnings == []
+
+
+def named_amount_row(amount_text, y, trailing_money=None):
+    """A data line whose 司機應結算金額 column the header names, optionally with
+    a second money column printed to the right of it."""
+    row = [box(39, "2026-08-16", y),
+           box(138, "2026-08-16 09:00", y),
+           box(300, "1128000000000001", y, w=170),
+           box(1100, "2026-08-18", y),
+           box(1200, amount_text, y, w=80)]
+    if trailing_money is not None:
+        row.append(box(1320, trailing_money, y, w=80))
+    return row
+
+
+def named_amount_header():
+    return [box(138, "用車時間", 10, w=80),
+            box(1100, "應結算日期", 10, w=80),
+            box(1200, "司機應結算金額", 10, w=80)]
+
+
+def test_a_named_amount_column_and_the_rightmost_money_column_agreeing_are_read():
+    """The control for the refusal below: the same statement without the extra
+    money column, where the header and the figures name one column."""
+    boxes = named_amount_header()
+    boxes += [box(39, "2026-08-16", 40), box(300, "1", 40), box(1200, "200.00", 40, w=80)]
+    boxes += named_amount_row("200.00", y=70)
+    stmt = parse_boxes(boxes, 1500)
+    assert [d.sum for d in stmt.days] == [200.0]
+    assert [r.amount for r in stmt.days[0].rows] == [200.0]
+    assert stmt.warnings == []
+
+
+def test_a_money_column_right_of_the_named_amount_column_is_refused():
+    """Two readings of which column holds 司機應結算金額 — the one the header
+    names and the rightmost one holding money — that disagree leave no way to
+    tell which of them the platform changed.  Choosing either is invisible
+    afterwards: the day's 求和 would be read off the same column as its rows and
+    agree with them, so the statement would pass its own checksum on a figure
+    that is not the money.  Refusing is what the operator can see."""
+    boxes = named_amount_header()
+    boxes += [box(39, "2026-08-16", 40), box(300, "1", 40),
+              box(1200, "200.00", 40, w=80), box(1320, "1,234.00", 40, w=80)]
+    boxes += named_amount_row("200.00", y=70, trailing_money="1,234.00")
+    stmt = parse_boxes(boxes, 1500)
+    assert stmt.days[0].rows == []
+    assert stmt.days[0].sum is None
+    assert stmt.total is None
+    assert any("amount column unclear" in w for w in stmt.warnings)
+    assert any("row without amount" in w for w in stmt.warnings)
+
+
+# ---- naming the columns ----
+
+def column_named(cell):
+    m = statement._column_match(cell)
+    return None if m is None else statement._COLUMNS[m[0]][1][0]
+
+
+def test_a_garbled_header_still_names_its_column():
+    """OCR rewrites the header's characters and hands them back simplified, so
+    a column is recognised by distance from its printed name in either
+    script — every character differs between the two."""
+    assert column_named("结真状能") == "結算狀態"
+    assert column_named("结真日期") == "應結算日期"
+    assert column_named("用率特间") == "用車時間"
+    assert column_named("鹿结算日期") == "應結算日期"
+    assert column_named("[司模库结算金镇") == "司機應結算金額"
+
+
+def test_a_header_cell_too_far_gone_names_nothing():
+    """Four wrong characters out of six is not a reading of 出賬單日期, and an
+    unnamed column costs nothing here — the reader falls back to shape — while
+    a wrongly named one is acted on."""
+    assert column_named("国出联禁日期") is None
+    assert column_named("收款神的干重") is None
+    assert column_named("合格") is None
+
+
+def test_the_estimate_column_can_never_pass_as_the_amount_column():
+    """司機預估收入 prints beside 司機應結算金額 and holds a different figure, so
+    the tolerance has to stay under the distance between the two names: reading
+    a day off the estimate would settle a wrong sum while every subtotal on the
+    image still agreed with itself."""
+    for cell in ("司機預估收入", "司机预估收入", "团司概预估收入"):
+        m = statement._column_match(cell)
+        assert m is not None, cell
+        assert statement._COLUMNS[m[0]][0] is None, cell
+    assert statement._COLUMNS[statement._column_match("司機應結算金額")[0]][0] == "amount"
 
 
 # ---- bracketed cells ----

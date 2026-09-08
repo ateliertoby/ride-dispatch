@@ -522,24 +522,21 @@ _REAL_LETTER_RE = re.compile(r"[AC-HJ-NP-RT-Z]")
 MIN_PREFIX = 10
 
 
-# The amount (司機應結算金額) is the table's rightmost column, and the figure
-# ends its box; whatever precedes it is a neighbouring cell OCR merged in, or
-# noise.  A decimal point drawn at ~7 px comes back as ":", so both separators
-# are accepted, and a thousands comma read as "." ("2.540.00") is still a
-# thousands group.  Nothing else in the row may stand in for this cell: the other
-# columns hold figures that are not the amount (an estimate, a rate), so taking
-# one of those would settle a wrong sum with nothing to show for it, whereas
-# reporting the row unreadable is visible to the operator.
+# A money cell, read off the end of the text that landed in it: whatever
+# precedes the figure is a neighbouring cell OCR merged in, or the cell's own
+# label (求和), or noise.  A decimal point drawn at ~7 px comes back as ":", so
+# both separators are accepted, and a thousands comma read as "." ("2.540.00")
+# is still a thousands group.
 # A 判罰賠款 row is a negative 司機應結算金額 under its trip's own order id, and
 # the sign is the only reliable sign of it: OCR renders the category chip as
 # garbage.  Dropping it turns a fine into income, which fails the day's own 求和
 # and leaves the operator resending an image that can never reconcile.
-_ROW_END_AMOUNT_RE = re.compile(
+_CELL_AMOUNT_RE = re.compile(
     r"(?P<sign>[-−])?(?P<whole>\d{1,3}(?:[,.]\d{3})+|\d+)[.:](?P<cents>\d{2})\s*$")
 
 
-def _amount_at_row_end(text: str) -> float | None:
-    m = _ROW_END_AMOUNT_RE.search(text)
+def _amount_in_cell(text: str) -> float | None:
+    m = _CELL_AMOUNT_RE.search(text)
     if m is None:
         return None
     value = float(m["whole"].replace(",", "").replace(".", "") + "." + m["cents"])
@@ -574,90 +571,381 @@ def _ids_in(text: str) -> list[tuple[str, bool]]:
     return out
 
 
-def _rows_from_boxes(boxes: list) -> list[list[tuple[float, float, str]]]:
-    """Group boxes into table rows by vertical centre; each row is (x, y, text) sorted by x."""
+def _rows_from_boxes(boxes: list) -> list[list[tuple[float, float, float, str]]]:
+    """Group boxes into table rows by vertical centre; each row is
+    (left, right, y, text) sorted left to right.
+
+    Both horizontal edges are kept: the columns are reconstructed from where
+    cells overlap each other, and a cell's left edge alone says nothing about
+    which column it is in — the platform right-aligns its figures and
+    left-aligns its labels, so the two edges of one column disagree.
+    """
     items = []
     for quad, text, _score in boxes:
         ys = [p[1] for p in quad]
         xs = [p[0] for p in quad]
-        items.append((min(xs), (min(ys) + max(ys)) / 2, max(ys) - min(ys), str(text)))
+        items.append((min(xs), max(xs), (min(ys) + max(ys)) / 2, max(ys) - min(ys), str(text)))
     if not items:
         return []
-    heights = sorted(h for _, _, h, _ in items)
+    heights = sorted(it[3] for it in items)
     tol = max(4.0, 0.45 * heights[len(heights) // 2])
-    items.sort(key=lambda t: t[1])
+    items.sort(key=lambda t: t[2])
     rows: list[list] = []
     centre = None
-    for x, y, _h, text in items:
+    for x0, x1, y, _h, text in items:
         if centre is None or y - centre > tol:
             rows.append([])
             centre = y
-        rows[-1].append((x, y, text))
+        rows[-1].append((x0, x1, y, text))
     return [sorted(r) for r in rows]
 
 
+# ---- the grid ----
+
+# The reader binds to the table's schema, never to a position in the row.  The
+# platform adds columns without notice — a 結算狀態 column appeared to the right
+# of 司機應結算金額 and every data row read as amountless — so the table's own
+# structure is reconstructed instead: bands of x inferred from the rows that
+# carry structure, named from the header row where it is legible, and every
+# cell read out of the band that means it.
+
+# The columns as the platform prints them, in printed order, each with the
+# simplified spelling OCR returns instead.  Both are needed because every single
+# character differs between the two scripts, so an edit distance measured
+# against one spelling alone rejects a clean read of the other.
+# Columns this reader takes nothing from are still listed, with no role: they
+# are here to compete for a garbled header cell, so a mangled neighbour lands on
+# its own name rather than drifting onto a column the reader acts on.
+_ROLE_TIME = "time"
+_ROLE_ID = "order_id"
+_ROLE_SETTLE = "settle_date"
+_ROLE_AMOUNT = "amount"
+
+_COLUMNS: tuple[tuple[str | None, tuple[str, str]], ...] = (
+    (None, ("訂單服務日期", "订单服务日期")),
+    (_ROLE_TIME, ("用車時間", "用车时间")),
+    (None, ("出賬單日期", "出账单日期")),
+    (None, ("類目", "类目")),
+    (_ROLE_ID, ("訂單號", "订单号")),
+    (None, ("行程費", "行程费")),
+    (None, ("高峰加價", "高峰加价")),
+    (None, ("平峰加價", "平峰加价")),
+    (None, ("舉牌服務", "举牌服务")),
+    (None, ("兒童座椅", "儿童座椅")),
+    (None, ("其他調整", "其他调整")),
+    (None, ("司機預估收入", "司机预估收入")),
+    (None, ("履約遲到", "履约迟到")),
+    (None, ("遲到時間", "迟到时间")),
+    (None, ("司機端操作", "司机端操作")),
+    (None, ("質量問題", "质量问题")),
+    (None, ("派單風險率", "派单风险率")),
+    (None, ("司機責任", "司机责任")),
+    (None, ("司機等級", "司机等级")),
+    (None, ("司機風險", "司机风险")),
+    (None, ("結算比例", "结算比例")),
+    (None, ("結算類型", "结算类型")),
+    (_ROLE_SETTLE, ("應結算日期", "应结算日期")),
+    (None, ("收款幣種", "收款币种")),
+    (None, ("司機端包狀態", "司机端包状态")),
+    (_ROLE_AMOUNT, ("司機應結算金額", "司机应结算金额")),
+    (None, ("結算狀態", "结算状态")),
+)
+
+# Anything outside the CJK block is stripped off the ends of a header cell
+# before it is measured: OCR routinely opens or closes such a cell with a stray
+# bracket or table rule, and those edits would otherwise be spent on punctuation
+# rather than on the characters that identify the column.
+_HEADER_EDGE_RE = re.compile(r"^[^一-鿿]+|[^一-鿿]+$")
+
+
+def _header_tolerance(name: str) -> int:
+    """How many edits a header cell may be off its column's printed name.
+
+    Two fifths of the name, which is what a four-character name mis-read into
+    two other characters needs (結算狀態 comes back as 结真状能).  It may not go
+    much higher: 司機預估收入 and 司機應結算金額 are five edits apart, and reading a
+    day off the estimate column would settle a wrong figure while every subtotal
+    on the image still agreed with itself.
+    """
+    return max(1, (2 * len(name) + 2) // 5)
+
+
+def _column_match(cell: str) -> tuple[int, int] | None:
+    """(column index, edits) for a header cell, or None when it is too garbled.
+
+    A tie between two columns is no match, for the reason a tie is no match
+    anywhere else in this module: a column named by a coin toss is worse than a
+    column left anonymous, because nothing downstream can see the toss.
+    """
+    text = _HEADER_EDGE_RE.sub("", cell)
+    if not text:
+        return None
+    scored = []
+    for i, (_role, names) in enumerate(_COLUMNS):
+        d = min(levenshtein(text, name) for name in names)
+        if d <= _header_tolerance(names[0]):
+            scored.append((d, i))
+    if not scored:
+        return None
+    scored.sort()
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        return None
+    return scored[0][1], scored[0][0]
+
+
+def _bands(rows: list[list]) -> list[tuple[float, float]]:
+    """The table's columns as x intervals, left to right.
+
+    Two cells belong to the same column when they overlap horizontally, which
+    is the one relation that survives OCR: a cell's own box is drawn tight
+    around its text, so its width tells you nothing, but a figure and the label
+    above it always share ground.  Only rows the reader could classify are fed
+    in — the platform's watermark prints its own boxes across the table, and a
+    stray one landing between two columns would fuse them for good.
+    """
+    spans = sorted((x0, x1) for row in rows for x0, x1, _y, _t in row)
+    bands: list[list[float]] = []
+    for x0, x1 in spans:
+        if bands and x0 < bands[-1][1]:
+            bands[-1][1] = max(bands[-1][1], x1)
+        else:
+            bands.append([x0, x1])
+    return [(a, b) for a, b in bands]
+
+
+def _band_of(bands: list[tuple[float, float]], x0: float, x1: float) -> int | None:
+    """The column a box sits in: the one it overlaps most."""
+    best, best_overlap = None, 0.0
+    for i, (a, b) in enumerate(bands):
+        overlap = min(x1, b) - max(x0, a)
+        if overlap > best_overlap:
+            best, best_overlap = i, overlap
+    return best
+
+
+def _cells(row: list, bands: list[tuple[float, float]]) -> dict[int, str]:
+    """One row as {column: text}, boxes sharing a column joined left to right."""
+    out: dict[int, list[str]] = {}
+    for x0, x1, _y, text in row:
+        i = _band_of(bands, x0, x1)
+        if i is not None:
+            out.setdefault(i, []).append(text)
+    return {i: " ".join(parts) for i, parts in out.items()}
+
+
+def _day_head(row: list, width: int) -> tuple[int, str] | None:
+    """(box index, date) when the row opens a day group, else None.
+
+    A day group opens with its date at the left edge, but not always in the
+    row's first box: the ▾ expand caret beside it can be recognised as a box of
+    its own, so the date is looked for rather than assumed to lead.
+    """
+    for i, (x0, _x1, _y, text) in enumerate(row):
+        if x0 < width * 0.15 and (m := _DATE_RE.match(text.strip())):
+            return i, m.group()
+    return None
+
+
+# How many of its cells must land on a printed column name before a row is read
+# as the header.  Three, because two is within reach of a row of category chips.
+_MIN_HEADER_CELLS = 3
+
+_STRUCTURE = ("header", "account", "day", "data")
+
+
+def _classify(rows: list[list], width: int) -> list[str]:
+    """What each row is: header, account, day, data, or noise.
+
+    Shape first and labels last, because a Telegram-compressed photo garbles
+    the labels: a row carrying an order id is a data row whatever else it holds
+    (OCR renders the platform's category chips with 【】, and a matched pair
+    does land in a data row, which the account pattern must not be able to
+    claim), and the account code with the grand total prints above every day
+    group, so a bracket met after one has opened is chip noise.
+    Noise is silent by design — the watermark prints a row of its own on every
+    screenshot, and it names nothing the operator could act on.
+    """
+    kinds = []
+    seen_day = False
+    for row in rows:
+        text = " ".join(t for _, _, _, t in row)
+        if _ids_in(text):
+            kinds.append("data")
+        elif not seen_day and _ACCOUNT_RE.search(text):
+            kinds.append("account")
+        elif _day_head(row, width) is not None:
+            seen_day = True
+            kinds.append("day")
+        elif sum(_column_match(t) is not None for _, _, _, t in row) >= _MIN_HEADER_CELLS:
+            kinds.append("header")
+        else:
+            kinds.append("noise")
+    return kinds
+
+
+def _named_bands(rows: list[list], kinds: list[str],
+                 bands: list[tuple[float, float]]) -> dict[str, int]:
+    """{role: column} for the columns the header names.
+
+    Only the four columns this reader acts on get a role; the rest are matched
+    solely so they cannot be mistaken for one of the four.  A role claimed twice
+    goes to the closer read.
+    """
+    named: dict[str, int] = {}
+    edits: dict[str, int] = {}
+    for row, kind in zip(rows, kinds):
+        if kind != "header":
+            continue
+        for x0, x1, _y, text in row:
+            m = _column_match(text)
+            if m is None:
+                continue
+            role = _COLUMNS[m[0]][0]
+            band = _band_of(bands, x0, x1)
+            if role is None or band is None:
+                continue
+            if role not in edits or m[1] < edits[role]:
+                named[role], edits[role] = band, m[1]
+    return named
+
+
+def _money_columns(kinds: list[str], cells: list[dict[int, str]]) -> set[int]:
+    """The columns that hold money, by what the platform printed in them.
+
+    A 求和 in the group row and a money-shaped figure in the data rows both
+    count; a percentage counts as neither (派單風險率 prints "0.00%"), which is
+    what keeps a rate column from passing as the rightmost money column.
+    Header rows are excluded: a label is not a figure.
+    """
+    out = set()
+    for kind, cell in zip(kinds, cells):
+        if kind in ("account", "day", "data"):
+            out |= {i for i, text in cell.items() if _MONEY_RE.search(text)}
+    return out
+
+
+def _amount_column(named: dict[str, int], money: set[int],
+                   bands: list[tuple[float, float]]) -> tuple[int | None, str | None]:
+    """Which column is 司機應結算金額, and what to warn about if it is unclear.
+
+    Two independent readings have to agree: the column the header names, and
+    the rightmost column holding money.  The second one carries the read alone
+    when the header is missing or too garbled to match — a cropped screenshot
+    has no header row at all — but when both are present and name different
+    columns, neither is trusted.  The alternative is picking one, and a wrong
+    pick is invisible: the rows would be summed off the wrong column and the
+    day's own 求和, read off that same column, would agree with them.
+    """
+    by_name = named.get(_ROLE_AMOUNT)
+    by_shape = max(money) if money else None
+    if by_name is None:
+        return by_shape, None
+    if by_shape is None or by_name == by_shape:
+        return by_name, None
+    return None, ("amount column unclear: 司機應結算金額 header over "
+                  f"x={bands[by_name][0]:.0f}, rightmost money column at "
+                  f"x={bands[by_shape][0]:.0f}")
+
+
+def _id_of(row_text: str, cell: dict[int, str], named: dict[str, int]) -> tuple[str, bool]:
+    """The order number a data row names, and whether it was cut short.
+
+    Preferably out of the 訂單號 column, which is what keeps the watermark's
+    digits — printed across the table, sometimes close enough to a row to join
+    it — from being read as an order number.  Read off joined text rather than
+    box by box either way: OCR puts the platform's truncating ellipsis in
+    whichever box it lands in, and the id is only known to be a prefix if that
+    ellipsis is still beside it.
+    Only called for a row `_classify` read as data, so the row always holds one.
+    """
+    band = named.get(_ROLE_ID)
+    ids = _ids_in(cell.get(band, "")) if band is not None else []
+    return (ids or _ids_in(row_text))[0]
+
+
+def _time_of(row_text: str, cell: dict[int, str], named: dict[str, int]) -> str | None:
+    """用車時間, out of its column when the header named one."""
+    band = named.get(_ROLE_TIME)
+    found = _TIME_RE.findall(cell.get(band, "")) if band is not None else []
+    found = found or _TIME_RE.findall(row_text)
+    return found[0] if found else None
+
+
+def _settle_date_of(row: list, cell: dict[int, str], named: dict[str, int],
+                    width: int) -> str | None:
+    """應結算日期, out of its column when the header named one.
+
+    Without a named column the right half of the row is the best available
+    stand-in: 訂單服務日期 and 出賬單日期 print on the left, and this is the last
+    date before the amount.
+    """
+    band = named.get(_ROLE_SETTLE)
+    if band is not None and (m := _DATE_RE.search(cell.get(band, ""))):
+        return m.group()
+    right = [m for x0, _x1, _y, t in row for m in _DATE_RE.findall(t) if x0 > width * 0.5]
+    return right[-1] if right else None
+
+
+def _count_in(row: list, head_i: int, bands: list[tuple[float, float]],
+              money: set[int]) -> int | None:
+    """记录数 off a day group's row: the first countable cell after the date.
+
+    The scan stops at the first money column because the aggregates that follow
+    are 求和 figures, whose own trailing digits would read as a count.
+    """
+    for x0, x1, _y, text in row[head_i + 1:]:
+        if _MONEY_RE.search(text) or _band_of(bands, x0, x1) in money:
+            return None
+        if (m := _COUNT_RE.search(text.strip())):
+            return int(m.group(1))
+    return None
+
+
 def parse_boxes(boxes: list, width: int) -> Statement:
-    """RapidOCR boxes → Statement.  Only the numbers are trusted: labels such
-    as 求和 / 记录数 come out garbled on a Telegram-compressed photo, so rows
-    are classified by shape (a date at the left, an order id, an account
-    code) rather than by reading the labels."""
+    """RapidOCR boxes → Statement.
+
+    The table is reconstructed before it is read: rows are classified by shape,
+    their columns inferred from where the cells line up, and the columns that
+    matter named off the header row.  Every figure then comes out of the column
+    that means it — the day's 求和 and its rows' amounts out of the same
+    司機應結算金額 column, which is what makes `_checksum` a check on one column
+    rather than on whatever each row happened to end with.
+    """
     stmt = Statement(days=[])
+    rows = _rows_from_boxes(boxes)
+    kinds = _classify(rows, width)
+    bands = _bands([r for r, k in zip(rows, kinds) if k in _STRUCTURE])
+    cells = [_cells(r, bands) if k in _STRUCTURE else {} for r, k in zip(rows, kinds)]
+    named = _named_bands(rows, kinds, bands)
+    money = _money_columns(kinds, cells)
+    amount_col, complaint = _amount_column(named, money, bands)
+    if complaint:
+        stmt.warnings.append(complaint)
     current: StatementDay | None = None
-    for row in _rows_from_boxes(boxes):
-        text = " ".join(t for _, _, t in row)
-        moneys = [(x, m) for x, _, t in row for m in _MONEY_RE.findall(t)]
-        rightmost = _money(max(moneys, key=lambda t: t[0])[1]) if moneys else None
-        account = _ACCOUNT_RE.search(text)
-        # Read off the joined row rather than box by box: OCR puts the
-        # platform's ellipsis in whichever box it lands in, and the id is only
-        # known to be a prefix if that ellipsis is still beside it.
-        ids = _ids_in(text)
-        dates = [(x, m) for x, _, t in row for m in _DATE_RE.findall(t)]
-        # A day header opens with its date at the left edge, but not always in
-        # the row's first box: the ▾ expand caret beside it can be recognised
-        # as a box of its own.  Anything left of the date is that noise, so the
-        # 记录数 scan starts after the date box rather than after box zero.
-        heads = [(i, m.group()) for i, (x, _, t) in enumerate(row)
-                 if x < width * 0.15 and (m := _DATE_RE.match(t.strip()))]
-        # A row carrying an order id is a data row whatever else it holds: OCR
-        # renders the platform's category chips with 【】, and a matched pair
-        # does land in a data row, which the account pattern must not be able
-        # to claim.  The account row carries no id, so nothing is lost.
-        if ids:
+    for row, kind, cell in zip(rows, kinds, cells):
+        text = " ".join(t for _, _, _, t in row)
+        amount = _amount_in_cell(cell.get(amount_col, "")) if amount_col is not None else None
+        if kind == "data":
             if current is None:
                 stmt.warnings.append(f"row before any day header: {text[:40]}")
                 continue
-            amount = _amount_at_row_end(row[-1][2])
             if amount is None:
                 stmt.warnings.append(f"row without amount: {text[:40]}")
                 continue
-            times = _TIME_RE.findall(text)
-            right_dates = [m for x, m in dates if x > width * 0.5]
-            order_id, truncated = ids[0]
+            order_id, truncated = _id_of(text, cell, named)
             current.rows.append(StatementRow(
                 date=current.date, order_id=order_id, amount=amount,
-                time=times[0] if times else None,
-                settle_date=right_dates[-1] if right_dates else None,
+                time=_time_of(text, cell, named),
+                settle_date=_settle_date_of(row, cell, named, width),
                 truncated=truncated,
             ))
-        # The account code and the grand total print above every day header, so
-        # a bracket met once a day has opened is chip noise and must not be
-        # allowed to overwrite them.
-        elif account and current is None:
-            stmt.account = account.group(1).strip()
-            if rightmost is not None:
-                stmt.total = rightmost
-        elif heads:
-            head_i, head_date = heads[0]
-            current = StatementDay(date=head_date, rows=[], sum=rightmost)
-            first_money_x = min((x for x, _ in moneys), default=width)
-            for x, _, t in row[head_i + 1:]:
-                if x >= first_money_x:
-                    break
-                m = _COUNT_RE.search(t.strip())
-                if m:
-                    current.count = int(m.group(1))
-                    break
+        elif kind == "account":
+            stmt.account = _ACCOUNT_RE.search(text).group(1).strip()
+            stmt.total = amount
+        elif kind == "day":
+            head_i, head_date = _day_head(row, width)
+            current = StatementDay(date=head_date, rows=[], sum=amount,
+                                   count=_count_in(row, head_i, bands, money))
             stmt.days.append(current)
     return stmt
 
