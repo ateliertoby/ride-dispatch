@@ -182,6 +182,46 @@ def test_confirm_records_the_penalties_the_label_promised(db_path):
     assert "已記判罰 −$97.38" in done.text
 
 
+def test_confirm_records_the_batchs_own_lines_with_the_batch(db_path):
+    """The 改派 pair: a fine and its 免責 line under an order number that is
+    nobody's leg.  They are written with the batch, in the platform's own line
+    structure, and the batch is owed exactly what arrived."""
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    day = StatementDay(date=YESTERDAY, count=3, sum=280.0, rows=[
+        StatementRow(date=YESTERDAY, order_id="A1", amount=280.0, time="09:00"),
+        StatementRow(date=YESTERDAY, order_id="X9", amount=-30.0, time="15:00"),
+        StatementRow(date=YESTERDAY, order_id="X9", amount=30.0, time="15:00"),
+    ])
+    p = statement_flow.prepare(
+        db_path, Statement(days=[day], account="YY0000", total=280.0, reader="test"), NOW)
+    assert p.confirm_label == "確認結算 + 記帳項 · 1 程 · $280"
+    done = statement_flow.confirm(db_path, p, None, NOW)
+    batch = get_settlement(db_path, done.settlement_id)
+    assert batch["adjustments"] == [
+        {"order_ref": "X9", "date": YESTERDAY, "amount": -30.0},
+        {"order_ref": "X9", "date": YESTERDAY, "amount": 30.0},
+    ]
+    assert batch["expected_amount"] == 280.0 and batch["confirmed_amount"] == 280.0
+    assert "已記帳項 $0 · 2 行" in done.text
+
+
+def test_a_penalty_with_no_waiver_leaves_the_batch_owed_less(db_path):
+    """The case the recorded line is for: without it the batch would expect
+    money the platform never sent and the gap would never close."""
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    day = StatementDay(date=YESTERDAY, count=2, sum=250.0, rows=[
+        StatementRow(date=YESTERDAY, order_id="A1", amount=280.0, time="09:00"),
+        StatementRow(date=YESTERDAY, order_id="X9", amount=-30.0, time="15:00"),
+    ])
+    p = statement_flow.prepare(
+        db_path, Statement(days=[day], account="YY0000", total=250.0, reader="test"), NOW)
+    done = statement_flow.confirm(db_path, p, None, NOW)
+    batch = get_settlement(db_path, done.settlement_id)
+    assert batch["expected_amount"] == 250.0 and batch["outstanding"] == 250.0
+    assert get_order_by_id(db_path, "A1")["penalty_fee"] is None
+    assert "已記帳項 −$30 · 1 行" in done.text
+
+
 def test_confirm_allocates_the_credit_the_card_named(db_path):
     seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 2540.0)
     cid = credit_row(db_path, "R1", 2540.0, TODAY)

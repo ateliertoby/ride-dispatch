@@ -519,10 +519,10 @@ def settle(client, month="2026-07", platform="ride"):
 # A batch is born from a statement image in the bot and nowhere else, so these
 # tests create one the way that flow does rather than through an endpoint.
 def create_batch(order_ids, platform="ride", confirmed=540, settled_on="2026-07-03",
-                 statement=None, penalties=None):
+                 statement=None, penalties=None, adjustments=None):
     from ride_dispatch.db import create_settlement
     return create_settlement(web.DB_PATH, platform, order_ids, confirmed, settled_on,
-                             statement=statement, penalties=penalties)
+                             statement=statement, penalties=penalties, adjustments=adjustments)
 
 
 def test_settle_shape(client):
@@ -552,6 +552,18 @@ def test_settle_carries_the_penalty_so_the_page_can_net_it(client):
     assert data["orders"][1]["penalty_fee"] is None
     assert data["settlements"][0]["orders"][0]["penalty_fee"] == 97.38
     assert data["settlements"][0]["expected_amount"] == 442.62
+
+
+def test_settle_carries_the_batchs_own_lines(client):
+    """The page draws them as their own section, so they travel with the batch
+    in the platform's line structure rather than as one netted figure."""
+    seed_ride("R1")
+    pair = [{"order_ref": "X9", "date": "2026-07-01", "amount": -30.0},
+            {"order_ref": "X9", "date": "2026-07-01", "amount": 30.0}]
+    create_batch(["R1"], confirmed=540, adjustments=pair)
+    batch = settle(client)["settlements"][0]
+    assert batch["adjustments"] == pair
+    assert batch["expected_amount"] == 540.0
 
 
 def test_settle_totals_follow_the_batch(client):

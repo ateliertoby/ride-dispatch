@@ -196,6 +196,80 @@ def test_a_refused_batch_records_no_penalty(db_path):
     assert open_batches(db_path, "ride") == []
 
 
+# ---- 帳項 (the batch's own statement lines) ----
+
+WAIVED_PAIR = [{"order_ref": "X9", "date": "2026-08-23", "amount": -30.0},
+               {"order_ref": "X9", "date": "2026-08-23", "amount": 30.0}]
+
+
+def test_adjustments_are_stored_as_printed_and_join_the_frozen_figure(db_path):
+    """The pair is two lines, not a netted one, and a lone fine has to move the
+    figure the batch is owed or the transfer is short with nothing to show."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    paired = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
+                               adjustments=WAIVED_PAIR)
+    batch = get_settlement(db_path, paired)
+    assert batch["adjustments"] == WAIVED_PAIR
+    assert batch["expected_amount"] == 280.0
+
+    seed(db_path, "A2", "2026-08-24 09:00:00", 280.0)
+    lone = create_settlement(db_path, "ride", ["A2"], 250.0, "2026-08-27", now=NOW,
+                             adjustments=[{"order_ref": "X8", "date": "2026-08-24", "amount": -30.0}])
+    assert get_settlement(db_path, lone)["expected_amount"] == 250.0
+
+
+def test_settle_month_carries_adjustments(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
+                      statement=STATEMENT, adjustments=WAIVED_PAIR)
+    batch = get_settle_month(db_path, "2026-08", "ride", now=NOW)["settlements"][0]
+    assert batch["adjustments"] == WAIVED_PAIR
+    assert open_batches(db_path, "ride")[0]["adjustments"] == WAIVED_PAIR
+
+
+def test_deleting_a_batch_takes_its_adjustments_with_it(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,
+                            adjustments=WAIVED_PAIR)
+    assert delete_settlement(db_path, sid) is True
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM settlement_adjustments").fetchone()[0] == 0
+
+
+def test_a_refused_batch_records_no_adjustment(db_path):
+    """Same atomicity as a fine: money taken off a batch that was never created
+    is money taken off nothing."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "FUTURE", "2026-08-27 09:00:00", 210.0)
+    with pytest.raises(ValueError, match="未完成"):
+        create_settlement(db_path, "ride", ["A1", "FUTURE"], 490.0, "2026-08-26", now=NOW,
+                          adjustments=WAIVED_PAIR)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM settlement_adjustments").fetchone()[0] == 0
+
+
+def test_a_batch_without_adjustments_carries_an_empty_list(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW)
+    assert get_settlement(db_path, sid)["adjustments"] == []
+
+
+def test_init_db_adds_the_adjustments_table_to_an_old_database(tmp_path):
+    path = str(tmp_path / "orders.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, order_id TEXT UNIQUE, price REAL)")
+    conn.commit()
+    conn.close()
+
+    init_db(path)
+    init_db(path)  # the CREATE must stay a no-op on an already migrated database
+
+    conn = sqlite3.connect(path)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(settlement_adjustments)")]
+    conn.close()
+    assert cols == ["id", "settlement_id", "order_ref", "date", "amount"]
+
+
 def test_init_db_adds_the_penalty_column_to_an_old_database(tmp_path):
     path = str(tmp_path / "orders.db")
     conn = sqlite3.connect(path)

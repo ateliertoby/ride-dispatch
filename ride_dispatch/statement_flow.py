@@ -142,6 +142,7 @@ def confirm(db_path: str, prepared: Prepared, image: bytes | None,
         db_path, PLATFORM, prepared.rec.settle_ids, prepared.rec.confirmed or 0.0,
         now.strftime("%Y-%m-%d"), statement=prepared.stmt_json, image=image,
         penalties=statement.penalties_of(prepared.rec),
+        adjustments=prepared.rec.adjustments,
     )
     credit_id = prepared.credit_id
     batch = None

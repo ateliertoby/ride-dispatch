@@ -2,6 +2,7 @@ from datetime import datetime
 
 from ride_dispatch.statement import (
     Statement, StatementDay, StatementRow, reconcile, levenshtein, dates_of, corrected_json,
+    penalties_of,
 )
 
 NOW = datetime(2026, 8, 26, 12, 0)
@@ -248,14 +249,17 @@ def test_categories_and_missing():
     s, orders = mixed_fixture()
     r = reconcile(s, orders, NOW)
     kinds = {e.statement_id: e.kind for e in r.entries}
-    assert kinds == {"OK": "matched", "DIFF": "amount_diff", "DONE": "already_settled", "GONE": "cancelled",
+    assert kinds == {"OK": "matched", "DIFF": "amount_diff", "DONE": "already_settled", "GONE": "adjustment",
                      "NEW": "unknown", "LATE": "not_ready", "FREE": "not_ready"}
     diff_entry = next(e for e in r.entries if e.statement_id == "DIFF")
     assert diff_entry.platform_amount == 210.0 and diff_entry.expected == 250.0
     assert next(e for e in r.entries if e.statement_id == "DONE").settlement_id == 3
     assert [o["order_id"] for o in r.missing] == ["HELD"]
     assert sorted(r.settle_ids) == ["DIFF", "OK"]
-    assert r.expected == 460.0 and r.confirmed == 1470.0 and r.diff == 1010.0
+    # The cancelled trip's money is on the transfer whatever the trip is, so it
+    # is recorded on the batch and counted in what the batch is owed.
+    assert r.adjustments == [{"order_ref": "GONE", "date": "2026-08-23", "amount": 210.0}]
+    assert r.expected == 670.0 and r.confirmed == 1470.0 and r.diff == 800.0
     assert r.can_settle and not r.clean
 
 
@@ -356,9 +360,11 @@ def test_a_penalty_against_a_settled_order_is_display_only():
 
 
 def test_a_penalty_for_an_unknown_id_stays_unknown():
+    """A fare and a fine under a number the book does not know still nets
+    income, and income is leg-shaped: the group is an alarm, not a batch line."""
     r = reconcile(penalty_stmt(oid="NEW"), [], NOW)
     assert r.entries[0].kind == "unknown"
-    assert r.settle_ids == [] and r.expected == 0.0
+    assert r.settle_ids == [] and r.expected == 0.0 and r.adjustments == []
 
 
 def test_a_penalty_alongside_a_clean_leg_settles_both():
@@ -378,6 +384,116 @@ def test_a_penalty_bigger_than_its_trip_still_settles_net():
     r = reconcile(penalty_stmt(penalty=-330.0), [order("A1", "2026-08-23 09:00:00", 280.0)], NOW)
     assert r.entries[0].kind == "penalty"
     assert r.expected == -50.0 and r.confirmed == -50.0 and r.diff == 0
+
+
+# ---- 帳項: statement lines the batch records itself ----
+
+def with_leg(rows, leg=280.0):
+    """A settleable leg plus whatever else the statement carries that day."""
+    all_rows = [row("2026-08-23", "A1", leg)] + rows
+    total = round(sum(r.amount for r in all_rows), 2)
+    return stmt([day("2026-08-23", all_rows, len(all_rows), total)], total=total)
+
+
+LEG = [order("A1", "2026-08-23 09:00:00", 280.0)]
+
+
+def test_a_waived_penalty_pair_is_recorded_as_the_two_lines_it_was():
+    """The 改派 case: a fine and the 免責 line that cancels it, under an order
+    number that is nobody's leg.  Nothing is owed either way, and the statement
+    reads as fully explained rather than as something to look at by hand."""
+    r = reconcile(with_leg([row("2026-08-23", "X9", -30.0), row("2026-08-23", "X9", 30.0)]), LEG, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "adjustment"]
+    assert r.adjustments == [{"order_ref": "X9", "date": "2026-08-23", "amount": -30.0},
+                             {"order_ref": "X9", "date": "2026-08-23", "amount": 30.0}]
+    assert r.expected == 280.0 and r.confirmed == 280.0 and r.diff == 0
+    assert r.settle_ids == ["A1"] and r.clean
+
+
+def test_a_penalty_with_no_waiver_is_carried_by_the_batch():
+    """The case the pair was hiding: without the 免責 line the transfer really
+    is short, and the batch has to be owed less or the gap never closes."""
+    r = reconcile(with_leg([row("2026-08-23", "X9", -30.0)]), LEG, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "adjustment"]
+    assert r.adjustments == [{"order_ref": "X9", "date": "2026-08-23", "amount": -30.0}]
+    assert r.expected == 250.0 and r.confirmed == 250.0 and r.diff == 0
+    assert r.clean
+
+
+def test_a_fine_bigger_than_what_offsets_it_is_still_the_batchs_to_carry():
+    """What decides is the net, not the shape: a group that costs money is a
+    line of the transfer even when part of it was given back."""
+    r = reconcile(with_leg([row("2026-08-23", "X9", -50.0), row("2026-08-23", "X9", 20.0)]), LEG, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "adjustment"]
+    assert [a["amount"] for a in r.adjustments] == [-50.0, 20.0]
+    assert r.expected == 250.0 and r.confirmed == 250.0 and r.diff == 0 and r.clean
+
+
+def test_a_lone_positive_under_an_unknown_id_stays_the_alarm_it_is():
+    """The safety rule: money coming in under a number the book does not know
+    can be a leg whose number was misread, and booking it as a batch line would
+    swallow that."""
+    r = reconcile(with_leg([row("2026-08-23", "X9", 210.0)]), LEG, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "unknown"]
+    assert r.adjustments == []
+    assert r.expected == 280.0 and r.diff == 210.0 and not r.clean
+
+
+def test_income_under_an_unknown_id_is_an_alarm_even_with_a_fine_beside_it():
+    """A fine attached to it does not make income explainable: a leg the book
+    never got looks exactly like this, and booking it would read as clean while
+    the money that arrived goes unaccounted for.  When the leg IS in the book
+    but its number was misread, it is held back as well — two alarms, one
+    statement."""
+    orders = LEG + [order("990000000000000001", "2026-08-23 13:00:00", 210.0)]
+    r = reconcile(with_leg([row("2026-08-23", "770000000000000009", 210.0),
+                            row("2026-08-23", "770000000000000009", -30.0)]), orders, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "unknown"]
+    assert r.adjustments == []
+    assert [o["order_id"] for o in r.missing] == ["990000000000000001"]
+    assert not r.clean
+
+
+def test_a_cancelled_trips_money_is_the_batchs_to_carry():
+    """The number is verified real and cannot enter a batch, so whatever the
+    platform booked under it is a line of the transfer."""
+    orders = LEG + [order("GONE", "2026-08-23 12:00:00", 210.0, status="cancelled")]
+    r = reconcile(with_leg([row("2026-08-23", "GONE", -30.0)]), orders, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "adjustment"]
+    assert r.adjustments == [{"order_ref": "GONE", "date": "2026-08-23", "amount": -30.0}]
+    assert r.expected == 250.0 and r.diff == 0 and r.clean
+
+
+def test_a_late_fine_is_recorded_here_and_the_frozen_batch_left_alone():
+    """The fine came off this transfer, so this batch carries it; the trip
+    itself stays a read of the batch that already holds the leg."""
+    orders = LEG + [order("DONE", "2026-08-23 11:00:00", 210.0, settlement_id=7)]
+    r = reconcile(with_leg([row("2026-08-23", "DONE", 210.0),
+                            row("2026-08-23", "DONE", -30.0)]), orders, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "already_settled"]
+    assert r.adjustments == [{"order_ref": "DONE", "date": "2026-08-23", "amount": -30.0}]
+    # The trip's own 210 belongs to batch #7 and is not this batch's to expect.
+    assert r.expected == 250.0 and r.confirmed == 460.0
+    assert not r.clean
+
+
+def test_a_late_fine_already_taken_off_its_order_is_not_recorded_twice():
+    """Idempotency: expected_of nets a stored penalty_fee, so a second read of
+    a statement that was confirmed has nothing left to record."""
+    orders = LEG + [order("DONE", "2026-08-23 11:00:00", 210.0, settlement_id=7, penalty=30.0)]
+    r = reconcile(with_leg([row("2026-08-23", "DONE", 210.0),
+                            row("2026-08-23", "DONE", -30.0)]), orders, NOW)
+    assert [e.kind for e in r.entries] == ["matched", "already_settled"]
+    assert r.adjustments == []
+    assert r.expected == 280.0
+
+
+def test_a_fine_on_a_leg_of_this_batch_stays_on_the_order():
+    """The boundary: a cost of a leg the batch holds belongs to that leg, not
+    to the batch, so nothing about it becomes a batch line."""
+    r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 280.0)], NOW)
+    assert r.entries[0].kind == "penalty" and r.adjustments == []
+    assert penalties_of(r) == {"A1": 97.38}
 
 
 def test_corrected_json_rewrites_fuzzy_ids():

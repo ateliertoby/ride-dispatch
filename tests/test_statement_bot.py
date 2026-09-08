@@ -407,7 +407,7 @@ def test_resending_a_confirmed_penalty_statement_settles_nothing(db_path, monkey
     assert get_order_by_id(db_path, "B1")["penalty_fee"] == 97.38
 
 
-def test_a_late_penalty_on_a_settled_order_writes_nothing(db_path, monkeypatch):
+def test_a_late_penalty_with_no_batch_to_record_it_on_writes_nothing(db_path, monkeypatch):
     seed(db_path, "B1", f"{YESTERDAY} 13:00:00", 280.0)
     sid = create_settlement(db_path, "ride", ["B1"], 280.0, YESTERDAY)
     day = StatementDay(date=YESTERDAY, count=1, sum=-97.38,
@@ -418,6 +418,78 @@ def test_a_late_penalty_on_a_settled_order_writes_nothing(db_path, monkeypatch):
     text = sent_text(msg)
     assert f"判罰  #…B1  −$97.38（單已喺批次 #{sid}）— 要人手處理" in text
     assert buttons_of(msg) == []
+    assert get_order_by_id(db_path, "B1")["penalty_fee"] is None
+
+
+def reassigned_stmt(rows, total):
+    """A statement whose extra lines sit under an order number that is nobody's
+    leg — the shape a 改派 trip leaves behind."""
+    day = StatementDay(date=YESTERDAY, count=1 + len(rows), sum=total, rows=[
+        StatementRow(date=YESTERDAY, order_id="A1", amount=280.0, time="09:00"),
+        *[StatementRow(date=YESTERDAY, order_id="X9", amount=a, time="15:00") for a in rows],
+    ])
+    return Statement(days=[day], account="YY0000", total=total, reader="test")
+
+
+def test_a_waived_penalty_pair_reads_as_the_pair_it_is(db_path, monkeypatch):
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    use_statement(monkeypatch, reassigned_stmt([-30.0, 30.0], 280.0))
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    text = sent_text(msg)
+    assert "判罰  #…X9  −$30 · 抵銷 +$30 · 淨 $0 — 記入今次" in text
+    assert "差額 $0" in text
+    assert buttons_of(msg) == ["確認結算 + 記帳項 · 1 程 · $280", "唔確認"]
+
+    cb, q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+    b = open_batches(db_path, "ride")[0]
+    assert [a["amount"] for a in b["adjustments"]] == [-30.0, 30.0]
+    assert b["expected_amount"] == 280.0 and b["confirmed_amount"] == 280.0
+
+
+def test_a_penalty_with_no_waiver_says_what_it_takes_off(db_path, monkeypatch):
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    use_statement(monkeypatch, reassigned_stmt([-30.0], 250.0))
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    text = sent_text(msg)
+    assert "判罰  #…X9  −$30 — 記入今次" in text
+    assert "系統應收 $250 · 差額 $0" in text
+    assert buttons_of(msg) == ["確認結算 + 記帳項 · 1 程 · $250", "唔確認"]
+
+    cb, _q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+    b = open_batches(db_path, "ride")[0]
+    assert b["expected_amount"] == 250.0 and b["outstanding"] == 250.0
+
+
+def test_a_late_fine_is_recorded_on_the_batch_being_confirmed(db_path, monkeypatch):
+    """The frozen batch keeps its figure; the fine came off this transfer, so
+    this batch carries it and the card says so instead of stopping."""
+    seed(db_path, "A1", f"{YESTERDAY} 09:00:00", 280.0)
+    seed(db_path, "B1", f"{TWO_DAYS} 13:00:00", 280.0)
+    old = create_settlement(db_path, "ride", ["B1"], 280.0, TWO_DAYS)
+    day = StatementDay(date=YESTERDAY, count=2, sum=250.0, rows=[
+        StatementRow(date=YESTERDAY, order_id="A1", amount=280.0, time="09:00"),
+        StatementRow(date=YESTERDAY, order_id="B1", amount=-30.0, time="13:00"),
+    ])
+    use_statement(monkeypatch, Statement(days=[day], account="YY0000", total=250.0, reader="test"))
+    upd, msg = photo_update()
+    ctx = context_with_file()
+    asyncio.run(bot.handle_statement_image(upd, ctx))
+    text = sent_text(msg)
+    assert f"判罰  #…B1  −$30（單已喺批次 #{old}）— 記入今次" in text
+    assert "要人手處理" not in text
+
+    cb, q = callback_update("stmt:confirm")
+    asyncio.run(bot.handle_callback(cb, ctx))
+    new = next(b for b in open_batches(db_path, "ride") if b["id"] != old)
+    assert [a["amount"] for a in new["adjustments"]] == [-30.0]
+    assert new["expected_amount"] == 250.0
+    assert get_settlement(db_path, old)["expected_amount"] == 280.0
     assert get_order_by_id(db_path, "B1")["penalty_fee"] is None
 
 

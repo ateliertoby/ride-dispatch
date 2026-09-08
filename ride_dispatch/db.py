@@ -156,6 +156,24 @@ def init_db(db_path: str):
             "WHERE bank_credit_id IS NOT NULL"
         )
         conn.execute("UPDATE settlements SET bank_credit_id = NULL WHERE bank_credit_id IS NOT NULL")
+        # One row per statement line a batch has to carry itself because no leg
+        # of it can: a 判罰 booked against a trip that is not in the batch, the
+        # 免責 line that offsets it, money the platform paid for a cancelled
+        # trip.  The platform's own line structure is kept — a fine and its
+        # waiver stay two rows — so the batch's book reads the way the
+        # statement does.  order_ref is the order number as the statement
+        # printed it and need not name a row in orders: the whole point of the
+        # table is money whose order is not one of ours.  The amounts join the
+        # batch's expected_amount at creation and are frozen with it.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settlement_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                settlement_id INTEGER NOT NULL,
+                order_ref TEXT,
+                date TEXT,
+                amount REAL NOT NULL
+            )
+        """)
         # One row per car park visit. pv_nr is HKIA's own visit number, so a
         # bot restart mid-visit finds the open row again instead of opening
         # a second one. `free` is derived exactly once, at close, from paid
@@ -694,7 +712,8 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
                       confirmed_amount: float, settled_on: str,
                       now: datetime | None = None,
                       statement: dict | None = None, image: bytes | None = None,
-                      penalties: dict[str, float] | None = None) -> int:
+                      penalties: dict[str, float] | None = None,
+                      adjustments: list[dict] | None = None) -> int:
     """Batch one platform's settleable orders; returns the settlement id.
 
     All-or-nothing: any order that is missing, cancelled, unpriced, still in
@@ -710,6 +729,12 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
     transaction is also what keeps a fine from ever being recorded against an
     order whose batch failed to be created.
 
+    `adjustments` are the statement's own lines that no leg of this batch can
+    carry — {order_ref, date, amount}, the amount signed as printed.  They are
+    money on this transfer, so they join expected_amount the way a leg does,
+    and they are written in this transaction: a fine recorded against a batch
+    that failed to be created would be money taken off nothing.
+
     `statement` is what the platform's statement said (stored as JSON, shown
     beside the system's numbers in batch detail); `image` is the screenshot
     it was read from.  The screenshot is written after the commit: a failed
@@ -721,6 +746,7 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
     if not order_ids:
         raise ValueError("order_ids required")
     penalties = penalties or {}
+    adjustments = adjustments or []
     cutoff = _now_str(now)
     with _conn(db_path) as conn:
         seen = set()
@@ -758,6 +784,7 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
         for order_id in order_ids:
             row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
             expected += expected_of(dict(row))
+        expected = round(expected + sum(a["amount"] for a in adjustments), 2)
         cur = conn.execute(
             "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on, statement) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -769,6 +796,11 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
             "UPDATE orders SET settlement_id = ? WHERE order_id IN "
             f"({', '.join('?' * len(order_ids))})",
             [settlement_id, *order_ids],
+        )
+        conn.executemany(
+            "INSERT INTO settlement_adjustments (settlement_id, order_ref, date, amount) "
+            "VALUES (?, ?, ?, ?)",
+            [(settlement_id, a["order_ref"], a["date"], a["amount"]) for a in adjustments],
         )
         conn.commit()
         if image is not None:
@@ -790,7 +822,9 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
 
     The money follows the batch out: its allocations go, so every credit that
     paid it gets its remainder back, and the legs the platform said it had not
-    paid stop being owed by a batch that no longer exists.
+    paid stop being owed by a batch that no longer exists.  Its adjustments go
+    with it as well — they were lines of this transfer and there is no transfer
+    left for them to belong to.
     """
     with _conn(db_path) as conn:
         # The file name has to be read before the row goes: it is the only
@@ -806,6 +840,7 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
             (settlement_id,),
         )
         conn.execute("DELETE FROM credit_allocations WHERE settlement_id = ?", (settlement_id,))
+        conn.execute("DELETE FROM settlement_adjustments WHERE settlement_id = ?", (settlement_id,))
         conn.execute("DELETE FROM settlements WHERE id = ?", (settlement_id,))
         conn.commit()
         # The batch rows are already gone, so a file that will not go away must
@@ -860,15 +895,35 @@ def _batch_allocations(conn, settlement_ids: list[int]) -> dict[int, list[dict]]
     return grouped
 
 
-def _derive_batch(batch: dict, allocations: list[dict]) -> dict:
+def _batch_adjustments(conn, settlement_ids: list[int]) -> dict[int, list[dict]]:
+    """Each batch's own statement lines, in the order the statement printed them."""
+    if not settlement_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT settlement_id, order_ref, date, amount FROM settlement_adjustments "
+        f"WHERE settlement_id IN ({', '.join('?' * len(settlement_ids))}) ORDER BY id",
+        settlement_ids,
+    ).fetchall()
+    grouped: dict[int, list[dict]] = {sid: [] for sid in settlement_ids}
+    for row in rows:
+        grouped[row["settlement_id"]].append(
+            {"order_ref": row["order_ref"], "date": row["date"], "amount": row["amount"]})
+    return grouped
+
+
+def _derive_batch(batch: dict, allocations: list[dict], adjustments: list[dict]) -> dict:
     """Add what the bank has paid this batch and what it still owes.
 
     Never stored: the allocations are the record, so undoing one gives both
     sides their money back without a second write that could disagree.  A batch
     is 部分 while some of its money has arrived and some has not — the platform
     pays a statement short when it failed to submit legs of its own.
+
+    The adjustments ride along here rather than at each caller so no batch can
+    reach a reader without the lines that are part of what it is owed.
     """
     batch["allocations"] = allocations
+    batch["adjustments"] = adjustments
     received = round(sum(a["amount"] for a in allocations), 2)
     batch["received"] = received
     batch["outstanding"] = round((batch["confirmed_amount"] or 0.0) - received, 2)
@@ -890,7 +945,8 @@ def get_settlement(db_path: str, settlement_id: int) -> dict | None:
             return None
         out = _settlement_dict(row)
         out["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
-        return _derive_batch(out, _batch_allocations(conn, [settlement_id])[settlement_id])
+        return _derive_batch(out, _batch_allocations(conn, [settlement_id])[settlement_id],
+                             _batch_adjustments(conn, [settlement_id])[settlement_id])
 
 
 # ---- bank credits (入數) ----
@@ -977,9 +1033,10 @@ def open_batches(db_path: str, platform: str) -> list[dict]:
         ids = [b["id"] for b in batches]
         members = _settlement_orders(conn, ids)
         allocations = _batch_allocations(conn, ids)
+        adjustments = _batch_adjustments(conn, ids)
         for b in batches:
             b["orders"] = members[b["id"]]
-            _derive_batch(b, allocations[b["id"]])
+            _derive_batch(b, allocations[b["id"]], adjustments[b["id"]])
         return [b for b in batches if b["outstanding"] > CENT]
 
 
@@ -990,7 +1047,8 @@ def _load_batch(conn, settlement_id: int) -> dict:
         raise ValueError("搵唔到批次")
     batch = _settlement_dict(row)
     batch["orders"] = _settlement_orders(conn, [settlement_id])[settlement_id]
-    return _derive_batch(batch, _batch_allocations(conn, [settlement_id])[settlement_id])
+    return _derive_batch(batch, _batch_allocations(conn, [settlement_id])[settlement_id],
+                         _batch_adjustments(conn, [settlement_id])[settlement_id])
 
 
 def allocate(db_path: str, credit_id: int, settlement_id: int,
@@ -1233,6 +1291,7 @@ def get_settle_month(db_path: str, month: str, platform: str,
         if settlement_ids:
             members = _settlement_orders(conn, settlement_ids)
             allocations = _batch_allocations(conn, settlement_ids)
+            adjustments = _batch_adjustments(conn, settlement_ids)
             rows = conn.execute(
                 "SELECT * FROM settlements WHERE id IN "
                 f"({', '.join('?' * len(settlement_ids))}) ORDER BY id",
@@ -1241,7 +1300,8 @@ def get_settle_month(db_path: str, month: str, platform: str,
             for row in rows:
                 batch = _settlement_dict(row)
                 batch["orders"] = members[row["id"]]
-                settlements.append(_derive_batch(batch, allocations[row["id"]]))
+                settlements.append(
+                    _derive_batch(batch, allocations[row["id"]], adjustments[row["id"]]))
 
         counts = {p: 0 for p in PLATFORMS}
         unsettled = 0.0

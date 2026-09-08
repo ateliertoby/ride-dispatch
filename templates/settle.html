@@ -1685,6 +1685,21 @@ function batchPropHtml(p, c) {
     '">' + label + '</button></div>';
 }
 
+// The lines the batch carries itself: money on the transfer that no leg of it
+// could hold -- a 判罰 booked against a trip outside the batch, the 免責 line
+// that cancels it. The platform's own line structure is kept, so a pair that
+// nets to zero still reads as the pair it was.
+function adjustmentsHtml(b) {
+  const rows = b.adjustments || [];
+  if (!rows.length) return '';
+  const total = round2(rows.reduce((sum, a) => sum + a.amount, 0));
+  return '<div class="prop-sec"><div class="prop-head">帳項 · ' + money(total) + '</div>' +
+    rows.map(a => '<div class="sum-row"><span class="k">' + esc(tailId(a.order_ref)) +
+      ' · ' + esc(mdSlash(a.date)) + '</span><span class="v">' +
+      (a.amount < 0 ? '&minus;' : '+') + '$' + $(Math.abs(a.amount)) + '</span></div>').join('') +
+    '</div>';
+}
+
 function batchViewHtml(v) {
   const b = batchById(v.id);
   if (!b) return '';
@@ -1725,7 +1740,12 @@ function batchViewHtml(v) {
     const inBatch = new Set(b.orders.map(o => o.order_id));
     const plat = new Map();
     b.statement.days.flatMap(d => d.rows).forEach(r => plat.set(r.order_id, (plat.get(r.order_id) || 0) + r.amount));
-    [...plat.keys()].filter(id => !inBatch.has(id)).forEach(id =>
+    // A line the batch records is accounted for, so it comes off what is left
+    // over: this row is the alarm for statement money nothing explains, and an
+    // explained line showing up in it twice would be noise wearing a warning.
+    (b.adjustments || []).forEach(a =>
+      plat.set(a.order_ref, round2((plat.get(a.order_ref) || 0) - a.amount)));
+    [...plat.keys()].filter(id => !inBatch.has(id) && Math.abs(plat.get(id)) >= 0.005).forEach(id =>
       sums.push('<div class="sum-row"><span class="k">平台多出 ' + esc(groupId(id)) +
         '</span><span class="v">$' + $(plat.get(id)) + '</span></div>'));
     if (b.statement_image) sums.push('<div class="sum-row"><span class="k">結算單</span><span class="v">' +
@@ -1773,6 +1793,7 @@ function batchViewHtml(v) {
     '<div class="hero"><div class="hero-k">平台確認</div>' +
     '<div class="hero-v">$' + $(b.confirmed_amount) + '</div>' + state + '</div>' +
     '<div class="sum-rows">' + sums.join('') + '</div>' +
+    adjustmentsHtml(b) +
     mid +
     '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
     '<button class="ghost-btn" data-back="1">收埋</button>';
