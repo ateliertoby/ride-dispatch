@@ -16,11 +16,15 @@ anyone holding the repository can invert it and recover every real order
 number.  A keyed hash is one-way without the salt.
 
 The account holder's name also prints in the 收款人 column of every data row,
-outside any bracket, and OCR renders it differently in each cell, so no pattern
-can find it: STATEMENT_FIXTURE_NAMES carries the fragments that survive the
-mis-reads (a surname character is usually enough) and any box containing one is
-replaced wholesale.  Like the salt it is supplied per run and never committed.
-Geometry is untouched, so scrubbed cells still group into their rows.
+outside any bracket, and the platform stamps his account number across the
+table as a watermark; OCR renders both differently in each cell, so no pattern
+can find them: STATEMENT_FIXTURE_NAMES carries the fragments that survive the
+mis-reads (a surname character, or the watermark's digits) and any box holding
+one is replaced wholesale.  A box that is nothing but digits keeps that shape
+and becomes zeros, because the reader is tested on what stray digits beside a
+column do.  Like the salt these fragments are supplied per run and never
+committed.  Geometry is untouched, so scrubbed cells still group into their
+rows.
 
 Ids are stable for whoever holds the salt, so re-recording the same screenshot
 reproduces the same fixture.  Recording with a different salt changes every id,
@@ -33,14 +37,17 @@ import pathlib
 import re
 import sys
 
-from rapidocr_onnxruntime import RapidOCR
-
 # Run as a script, so the repo root is not on sys.path.  The id pattern has to
 # come from the package the fixture will be replayed against: a token the reader
 # would read as an id but this script did not anonymise is a real-data leak.
+# The engine and the padding come from there for the same reason the pattern
+# does: boxes recorded through a different pipeline than the reader runs are a
+# fixture of nothing (past the detector's width/height threshold an unpadded
+# wide screenshot yields no boxes at all).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from ride_dispatch.statement import _ID_RE, _normalise_id  # noqa: E402
+from ride_dispatch.statement import (  # noqa: E402
+    _ID_RE, _decode, _engine, _normalise_id, _pad_for_detection)
 
 
 def _salt() -> str:
@@ -83,18 +90,17 @@ def anonymise_text(text: str) -> str:
     text = _ID_RE.sub(_anonymise_match, text)
     text = _ACCOUNT_BRACKET_RE.sub(f"{_PLACEHOLDER_NAME}【YY0000】", text)
     if any(fragment in text for fragment in _name_fragments()):
-        return _PLACEHOLDER_NAME
+        return "0" * len(text) if text.isdigit() else _PLACEHOLDER_NAME
     return text
 
 
 def main(src: str, dst: str) -> None:
-    result, _ = RapidOCR()(src)
-    boxes = [[[[float(x), float(y)] for x, y in quad], anonymise_text(text), float(score)]
+    img = _pad_for_detection(_decode(pathlib.Path(src).read_bytes()))
+    result, _ = _engine()(img)
+    boxes = [[[[float(x), float(y)] for x, y in quad], anonymise_text(str(text)), float(score)]
              for quad, text, score in (result or [])]
-    from PIL import Image
-    width = Image.open(src).size[0]
     with open(dst, "w", encoding="utf-8") as f:
-        json.dump({"width": width, "boxes": boxes}, f, ensure_ascii=False, indent=0)
+        json.dump({"width": img.shape[1], "boxes": boxes}, f, ensure_ascii=False, indent=0)
     print(f"{len(boxes)} boxes → {dst}")
 
 
