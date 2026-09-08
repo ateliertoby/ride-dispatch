@@ -69,7 +69,7 @@
      click rather than letting it through, and these days are the largest part
      of what reads as blank calendar -- which is where a tap lands to put a
      focus down. */
-  .cell.none { opacity: .35; cursor: default; pointer-events: none; }
+  .cell.none { --o-state: .35; cursor: default; pointer-events: none; }
   .cell .d {
     position: absolute; top: 4px; left: 6px;
     font-size: 11px; line-height: 13px; font-weight: 600; color: var(--text-3);
@@ -112,7 +112,7 @@
   .bar.partial { background: var(--banner-bg); color: var(--text); }
   /* A collected batch is a record, not a task, so it holds its fill but stops
      shouting as loudly as the amber ones. */
-  .bar.paid { background: var(--paid-bg); color: var(--green); font-weight: 600; opacity: .8; }
+  .bar.paid { background: var(--paid-bg); color: var(--green); font-weight: 600; --o-state: .8; }
   /* A batch cut by the week boundary squares off the cut end, so the two
      segments read as one bar wrapping. */
   .bar.cut-r { border-top-right-radius: 1px; border-bottom-right-radius: 1px; }
@@ -132,7 +132,7 @@
      only a credit still waiting for a statement carries its colour at full. */
   .cchip {
     height: 18px; border-radius: 5px; background: none;
-    border: 1px solid var(--green); color: var(--green); opacity: .55;
+    border: 1px solid var(--green); color: var(--green); --o-state: .55;
     font-family: inherit; font-size: 10.5px; font-weight: 650;
     font-variant-numeric: tabular-nums; letter-spacing: -.2px;
     padding: 0 2px; min-width: 0; cursor: pointer;
@@ -143,23 +143,49 @@
     width: max-content; max-width: 100%; justify-self: start;
   }
   .cchip.spill-l { justify-self: end; }
-  .cchip.open { border-color: var(--blue); color: var(--blue); opacity: 1; }
-  .cchip.gone { border-color: var(--text-3); color: var(--text-3); opacity: .5; }
+  .cchip.open { border-color: var(--blue); color: var(--blue); --o-state: 1; }
+  .cchip.gone { border-color: var(--text-3); color: var(--text-3); --o-state: .5; }
   /* Money that has been put against a batch which is still short: the credit
      is done with but the account it paid into is not, so the chip wears the
      colour of what is owed instead of dimming away as a record. */
-  .cchip.short { border-color: var(--amber); color: var(--amber); opacity: 1; }
+  .cchip.short { border-color: var(--amber); color: var(--amber); --o-state: 1; }
 
   /* ---- focus ----
      One money relation at a time: a bank credit and the batches it paid, or a
      batch and the credits that paid it. The two ends can be weeks apart on the
-     strip and are rarely on screen together, so the link is drawn by everything
-     unrelated receding rather than by a connector that would have nothing to
-     run along. Opacity is theme-neutral and leaves every token as it was, so
-     the state colours still read at whatever strength they are given.
-     Last, so it wins over the state opacities above it. */
-  .cell, .bar, .cchip { transition: opacity .12s ease; }
-  .cell.dim, .bar.dim, .cchip.dim { opacity: .22; }
+     strip and are rarely on screen together, so the link is drawn by opening a
+     gap around the relation rather than by a connector that would have nothing
+     to run along. The gap is opened from both sides and gently from each:
+     everything unrelated recedes, the relation itself lifts, and a receded
+     figure stays money the operator can still read at a glance.
+
+     Receding works on the strength each state already chose rather than
+     replacing it -- dim is a ceiling, lit is a floor -- so a record stays
+     quieter than an open one at both ends and nothing is made louder by being
+     pushed away. Every rule above wanting a strength of its own therefore sets
+     --o-state rather than opacity. */
+  .cell, .bar, .cchip {
+    opacity: clamp(var(--o-lit, 0), var(--o-state, 1), var(--o-dim, 1));
+    transition: opacity .12s ease, box-shadow .12s ease, background-color .12s ease;
+  }
+  .cell.dim, .bar.dim, .cchip.dim { --o-dim: .58; }
+  .cell.lit, .bar.lit, .cchip.lit { --o-lit: .85; }
+  /* A lit surface has to read against the ground it sits on: on dark it can
+     brighten, on light it is already white and rises by casting instead. */
+  :root {
+    --lit-surface: var(--surface-press);
+    --lit-cast: 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --lit-surface: var(--surface); --lit-cast: 0 1px 3px rgba(16,24,40,.15); }
+  }
+  .cell.lit { background: var(--lit-surface); box-shadow: var(--lit-cast); }
+  /* Today keeps its ring: the lift is on top of what the cell already says. */
+  .cell.today.lit { box-shadow: inset 0 0 0 1px var(--text-3), var(--lit-cast); }
+  /* A bar or chip is an object on the lane rather than a surface, so it lifts
+     by haloing in the colour it already wears -- state, never a hue of its
+     own. */
+  .bar.lit, .cchip.lit { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 20%, transparent); }
   .legend { padding: 0 2px 8px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
 
   /* ---- sheet contents ---- */
@@ -1225,15 +1251,21 @@ function focusSets() {
 function paintFocus() {
   const s = focus ? focusSets() : null;
   const grid = document.getElementById('grid');
+  // The two ends of the same statement, so they are set together: with no
+  // focus down neither is set and the strip is back to its own strengths.
+  const mark = (el, held) => {
+    el.classList.toggle('lit', !!s && held);
+    el.classList.toggle('dim', !!s && !held);
+  };
   grid.querySelectorAll('[data-bar]').forEach(el =>
-    el.classList.toggle('dim', !!s && !s.batches.has(+el.dataset.bar)));
+    mark(el, s && s.batches.has(+el.dataset.bar)));
   grid.querySelectorAll('[data-chip]').forEach(el =>
-    el.classList.toggle('dim', !!s && !s.credits.has(+el.dataset.chip)));
+    mark(el, s && s.credits.has(+el.dataset.chip)));
   // An empty day already reads as a calendar coordinate rather than money, so
   // it is left alone: dimming it again would only separate it from the other
   // empty days.
   grid.querySelectorAll('.cell[data-d]').forEach(el =>
-    el.classList.toggle('dim', !!s && !s.dates.has(el.dataset.d)));
+    mark(el, s && s.dates.has(el.dataset.d)));
 }
 
 function focusTarget(el) {
