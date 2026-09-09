@@ -113,11 +113,15 @@ def test_feed_missing_is_logged_once_per_disappearance(tmp_path, caplog):
 
 # ---- the matcher ----
 
-def B(id, amount, dates, settle_dates=None, platform="ride", received=0.0):
+def B(id, amount, dates, settled_on, settle_dates=None, platform="ride", received=0.0):
+    """A batch: what it is owed, the days it worked, the day it was confirmed,
+    and optionally the settle dates its statement printed.  Only `settled_on`
+    windows a match; the settle dates are carried to prove they do not."""
     stmt = {"days": [{"date": d, "rows": [{"order_id": "x", "amount": amount, "settle_date": sd}]}
                      for d, sd in zip(dates, settle_dates)]} if settle_dates else None
     return {"id": id, "platform": platform, "confirmed_amount": amount, "statement": stmt,
-            "received": received, "outstanding": round(amount - received, 2),
+            "settled_on": settled_on, "received": received,
+            "outstanding": round(amount - received, 2),
             "orders": [{"scheduled_time": f"{d} 09:00:00"} for d in dates]}
 
 
@@ -127,36 +131,46 @@ def C(id, amount, value_date, remaining=None, platform="ride"):
             "allocated": round(amount - remaining, 2), "remaining": remaining}
 
 
-def test_anchor_prefers_statement_settle_date():
-    assert anchor(B(1, 100, ["2026-08-01"], ["2026-08-07"])) == "2026-08-07"
-    assert anchor(B(1, 100, ["2026-08-01", "2026-08-03"])) == "2026-08-03"
+def test_anchor_is_the_confirmation_day_and_the_window_is_symmetric():
+    assert anchor(B(1, 100, ["2026-08-01"], "2026-08-20",
+                    settle_dates=["2026-08-07"])) == "2026-08-20"
+    assert anchor({"orders": [{"scheduled_time": "2026-08-03 09:00:00"}]}) is None
     assert in_window("2026-08-19", "2026-08-26") and in_window("2026-08-26", "2026-08-26")
-    assert not in_window("2026-08-18", "2026-08-26") and not in_window("2026-08-27", "2026-08-26")
+    assert in_window("2026-08-28", "2026-08-26")         # money before the batch is recorded
+    assert not in_window("2026-08-18", "2026-08-26") and not in_window("2026-09-03", "2026-08-26")
 
 
 def test_match_credit_exact_single():
     m = match_credit(C(1, 2540.0, "2026-08-26"),
-                     [B(4, 2540.0, ["2026-08-23", "2026-08-24"]), B(3, 1450.0, ["2026-08-20"])])
+                     [B(4, 2540.0, ["2026-08-23", "2026-08-24"], "2026-08-25"),
+                      B(3, 1450.0, ["2026-08-20"], "2026-08-21")])
     assert m.reason == "exact" and m.exact == [4]
     # The proposal leads, the alternatives stay reachable: the operator taps.
-    assert [b["id"] for b in offer(m, [B(4, 2540.0, ["2026-08-23"]), B(3, 1450.0, ["2026-08-20"])])] == [4, 3]
+    assert [b["id"] for b in offer(m, [B(4, 2540.0, ["2026-08-23"], "2026-08-25"),
+                                       B(3, 1450.0, ["2026-08-20"], "2026-08-21")])] == [4, 3]
 
 
 def test_match_credit_exact_several_prefers_window_then_ambiguous():
-    old = B(1, 930.0, ["2026-07-01"])
-    new = B(2, 930.0, ["2026-08-22"])
+    old = B(1, 930.0, ["2026-07-01"], "2026-07-02")
+    new = B(2, 930.0, ["2026-08-22"], "2026-08-23")
     assert match_credit(C(1, 930.0, "2026-08-24"), [old, new]).exact == [2]
-    m = match_credit(C(1, 930.0, "2026-08-24"), [new, B(3, 930.0, ["2026-08-21"])])
+    m = match_credit(C(1, 930.0, "2026-08-24"),
+                     [new, B(3, 930.0, ["2026-08-21"], "2026-08-22")])
     assert m.reason == "ambiguous" and set(m.exact) == {2, 3}
 
 
 def test_match_credit_subset_unique_and_ambiguous_and_none():
-    bs = [B(1, 930.0, ["2026-08-22"]), B(2, 1080.0, ["2026-08-21"]), B(3, 1450.0, ["2026-08-20"])]
+    """Three batches confirmed on three different days: no whole confirmation
+    group can answer the credit, so the blind combination search does."""
+    bs = [B(1, 930.0, ["2026-08-22"], "2026-08-23"), B(2, 1080.0, ["2026-08-21"], "2026-08-22"),
+          B(3, 1450.0, ["2026-08-20"], "2026-08-21")]
     sub_m = match_credit(C(1, 2530.0, "2026-08-24"), bs)
     assert sub_m.reason == "subset" and sub_m.exact == [2, 3]
     assert match_credit(C(1, 2010.0, "2026-08-24"), bs).exact == [1, 2]
     amb = match_credit(C(1, 2000.0, "2026-08-24"),
-                       [B(1, 1000.0, ["2026-08-22"]), B(2, 1000.0, ["2026-08-21"]), B(3, 1000.0, ["2026-08-20"])])
+                       [B(1, 1000.0, ["2026-08-22"], "2026-08-23"),
+                        B(2, 1000.0, ["2026-08-21"], "2026-08-22"),
+                        B(3, 1000.0, ["2026-08-20"], "2026-08-21")])
     assert amb.reason == "ambiguous" and amb.exact == [] and len(amb.candidates) == 3
     none = match_credit(C(1, 2950.0, "2026-08-24"), bs)
     assert none.reason == "none" and [b["id"] for b in none.candidates] == [1, 2, 3]   # newest anchor first
@@ -164,33 +178,47 @@ def test_match_credit_subset_unique_and_ambiguous_and_none():
     assert far.reason == "none"
 
 
-def test_match_credit_will_not_link_an_exact_amount_outside_the_window():
-    """A lone amount agreeing to the cent is not enough on its own. Amounts here
-    are round hundreds and the ledger holds months of them, so the dates have to
-    agree too; the stale batch still leads the card as the likeliest tap."""
-    stale = B(1, 1080.0, ["2026-08-01"])                 # anchor 20 days before the credit
+def test_the_window_reads_the_confirmation_day_not_the_settle_dates():
+    """A statement can be confirmed weeks after the days it settles, and the
+    transfer follows the confirmation: the printed settle dates must neither
+    window a real payment out nor window a stale batch in."""
+    late = B(1, 1080.0, ["2026-07-28"], "2026-08-20", settle_dates=["2026-07-30"])
+    assert match_credit(C(1, 1080.0, "2026-08-21"), [late]).exact == [1]
+    stale = B(2, 1080.0, ["2026-08-01"], "2026-08-02", settle_dates=["2026-08-20"])
     m = match_credit(C(1, 1080.0, "2026-08-21"), [stale])
     assert m.reason == "none" and m.exact == []
-    assert [b["id"] for b in m.candidates] == [1]
-    fresh = B(2, 1080.0, ["2026-08-21"])
-    assert match_credit(C(1, 1080.0, "2026-08-24"), [fresh]).exact == [2]
+    assert [b["id"] for b in m.candidates] == [2]        # still the likeliest tap
+
+
+def test_the_window_is_symmetric_around_the_confirmation_day():
+    """The bank credit and the confirmation reach the system independently, so
+    money can be dated either side of the day the batch was recorded here; only
+    distance rules a credit out."""
+    b = B(1, 1450.0, ["2026-08-10"], "2026-08-24")
+    assert match_credit(C(9, 1450.0, "2026-08-22"), [b]).exact == [1]    # two days early
+    assert match_credit(C(9, 1450.0, "2026-08-26"), [b]).exact == [1]    # two days late
+    assert match_credit(C(9, 1450.0, "2026-08-17"), [b]).exact == [1]    # the near edge
+    assert match_credit(C(9, 1450.0, "2026-08-31"), [b]).exact == [1]    # the far edge
+    assert match_credit(C(9, 1450.0, "2026-08-16"), [b]).exact == []     # a day past either
+    assert match_credit(C(9, 1450.0, "2026-09-01"), [b]).exact == []
 
 
 def test_match_batch_will_not_link_an_exact_amount_outside_the_window():
-    stale = C(1, 1450.0, "2026-09-09")                   # value date 20 days after the batch
-    m = match_batch(B(3, 1450.0, ["2026-08-20"]), [stale])
+    stale = C(1, 1450.0, "2026-09-09")                   # value date 18 days after the confirmation
+    m = match_batch(B(3, 1450.0, ["2026-08-20"], "2026-08-22"), [stale])
     assert m.reason == "none" and m.exact == []
     assert [c["id"] for c in m.candidates] == [1]
     fresh = C(2, 1450.0, "2026-08-24")
-    assert match_batch(B(3, 1450.0, ["2026-08-20"]), [fresh]).exact == [2]
+    assert match_batch(B(3, 1450.0, ["2026-08-20"], "2026-08-22"), [fresh]).exact == [2]
 
 
 def test_a_round_amount_months_apart_is_a_coincidence_not_a_payment():
-    """The first backfill put 48 credits beside 4 batches and linked two of them
-    to payouts that predate the service: $1,080 paid 07-30 against legs of
-    08-21, $1,450 paid 08-11 against legs of 08-20. Neither direction may."""
+    """Amounts here are round hundreds and the ledger holds months of them, so
+    an amount agreeing to the cent proves nothing by itself.  Money that
+    predates the work is never the payment for it, in either direction."""
     credits_ = [C(1, 1080.0, "2026-07-30"), C(2, 1450.0, "2026-08-11")]
-    batches = [B(2, 1080.0, ["2026-08-21"]), B(3, 1450.0, ["2026-08-20"])]
+    batches = [B(2, 1080.0, ["2026-08-21"], "2026-08-22"),
+               B(3, 1450.0, ["2026-08-20"], "2026-08-21")]
     for c in credits_:
         assert match_credit(c, batches).exact == []
     for b in batches:
@@ -199,45 +227,99 @@ def test_a_round_amount_months_apart_is_a_coincidence_not_a_payment():
 
 def test_match_credit_never_links_a_near_miss():
     """A thirty dollar gap is a question for the operator, not a rounding error."""
-    bs = [B(1, 1450.0, ["2026-08-22"])]
+    bs = [B(1, 1450.0, ["2026-08-22"], "2026-08-23")]
     m = match_credit(C(1, 1480.0, "2026-08-24"), bs)
     assert m.reason == "none" and m.exact == [] and [b["id"] for b in m.candidates] == [1]
 
 
 def test_match_credit_uses_remaining_filters_platform_and_caps_candidates():
-    bs = [B(i, 100.0, ["2026-08-2%d" % (i % 10)]) for i in range(1, 12)] + \
-         [B(99, 100.0, ["2026-08-22"], platform="uber")]
-    m = match_credit(C(1, 5000.0, "2026-08-24", remaining=100.0), bs)
-    assert m.reason == "ambiguous" and len(m.candidates) <= 8 and all(b["platform"] == "ride" for b in m.candidates)
+    bs = [B(i, 100.0 + i, ["2026-08-18"], "2026-08-19") for i in range(1, 16)] + \
+         [B(99, 105.0, ["2026-08-18"], "2026-08-19", platform="uber")]
+    # remaining, not amount: a credit already part spent matches what is left of
+    # it, and the other platform's batch of the same size is not offered.
+    part_spent = match_credit(C(1, 5000.0, "2026-08-24", remaining=105.0), bs)
+    assert part_spent.reason == "exact" and part_spent.exact == [5]
     # Money is allocated in amounts, so a credit smaller than every batch pays
     # part of one instead of nothing: those are the short proposals.
-    m2 = match_credit(C(1, 5000.0, "2026-08-24", remaining=35.0), bs)
-    assert m2.reason == "none" and len(m2.short) == credits.MAX_SHORT
-    assert all(b["platform"] == "ride" for b in m2.short)
-    assert all(b["id"] not in {x["id"] for x in m2.short} for b in m2.candidates)
+    m = match_credit(C(1, 5000.0, "2026-08-24", remaining=37.0), bs)
+    assert m.reason == "none"
+    assert len(m.short) == credits.MAX_SHORT and len(m.candidates) == credits.MAX_CANDIDATES
+    assert all(b["platform"] == "ride" for b in m.short + m.candidates)
+    assert all(b["id"] not in {x["id"] for x in m.short} for b in m.candidates)
 
 
 def test_match_batch_exact_and_candidates():
     cs = [C(1, 2540.0, "2026-08-26"), C(2, 2950.0, "2026-08-24", remaining=1500.0), C(3, 100.0, "2026-08-20")]
-    assert match_batch(B(4, 2540.0, ["2026-08-23", "2026-08-24"]), cs).exact == [1]
-    m = match_batch(B(5, 1450.0, ["2026-08-20"]), cs)
+    assert match_batch(B(4, 2540.0, ["2026-08-23", "2026-08-24"], "2026-08-25"), cs).exact == [1]
+    m = match_batch(B(5, 1450.0, ["2026-08-20"], "2026-08-21"), cs)
     assert m.reason == "none" and [c["id"] for c in m.candidates] == [1, 2]   # remaining >= amount, newest first
     assert [c["id"] for c in m.short] == [3]                                  # would leave the batch partial
-    assert match_batch(B(6, 1500.0, ["2026-08-21"]), cs).exact == [2]
+    assert match_batch(B(6, 1500.0, ["2026-08-21"], "2026-08-22"), cs).exact == [2]
 
 
 def test_match_batch_filters_platform():
     cs = [C(1, 2540.0, "2026-08-26", platform="uber")]
-    m = match_batch(B(4, 2540.0, ["2026-08-23"]), cs)
+    m = match_batch(B(4, 2540.0, ["2026-08-23"], "2026-08-25"), cs)
     assert m.exact == [] and m.candidates == []
+
+
+# ---- one transfer per confirmation day ----
+
+def test_a_whole_confirmation_day_is_matched_past_the_blind_search_cap():
+    """Everything confirmed on one working day is paid as a single transfer, and
+    a day can hold more statements than the capped combination search will ever
+    reach: the group is matched whole, at any size."""
+    day = [B(i, 100.0 * i, ["2026-08-18"], "2026-08-20") for i in range(1, 6)]
+    assert credits.MAX_SUBSET < len(day)
+    m = match_credit(C(9, 1500.0, "2026-08-21"), day)
+    assert m.reason == "subset" and m.exact == [1, 2, 3, 4, 5]
+
+
+def test_two_confirmation_days_summing_alike_are_ambiguous():
+    """Two days adding up to the same money are two candidate transfers, and
+    nothing in the ledger says which arrived: both are offered, neither is
+    proposed."""
+    bs = [B(1, 600.0, ["2026-08-16"], "2026-08-18"), B(2, 900.0, ["2026-08-16"], "2026-08-18"),
+          B(3, 700.0, ["2026-08-17"], "2026-08-19"), B(4, 800.0, ["2026-08-17"], "2026-08-19")]
+    m = match_credit(C(9, 1500.0, "2026-08-21"), bs)
+    assert m.reason == "ambiguous" and m.exact == []
+    assert sorted(b["id"] for b in m.candidates) == [1, 2, 3, 4]
+
+
+def test_a_single_day_combination_beats_one_that_spans_days():
+    """No whole day sums to the credit, so the blind search finds two equal
+    combinations; only the one drawn from a single confirmation day can be a
+    transfer under the platform's grouping rule."""
+    bs = [B(1, 400.0, ["2026-08-16"], "2026-08-18"),
+          B(2, 600.0, ["2026-08-16"], "2026-08-18"),
+          B(3, 50.0, ["2026-08-16"], "2026-08-18"),
+          B(4, 250.0, ["2026-08-16"], "2026-08-19"),
+          B(5, 750.0, ["2026-08-16"], "2026-08-20")]
+    m = match_credit(C(9, 1000.0, "2026-08-21"), bs)
+    assert m.reason == "subset" and m.exact == [1, 2]
+
+
+def test_two_single_day_combinations_are_still_ambiguous():
+    """The tie-breaker names a payment only when one combination is a single
+    day's; two of them are two candidate transfers and the operator decides."""
+    bs = [B(1, 400.0, ["2026-08-16"], "2026-08-18"),
+          B(2, 600.0, ["2026-08-16"], "2026-08-18"),
+          B(3, 50.0, ["2026-08-16"], "2026-08-18"),
+          B(4, 250.0, ["2026-08-16"], "2026-08-19"),
+          B(5, 750.0, ["2026-08-16"], "2026-08-19"),
+          B(6, 90.0, ["2026-08-16"], "2026-08-19")]
+    m = match_credit(C(9, 1000.0, "2026-08-21"), bs)
+    assert m.reason == "ambiguous" and m.exact == []
 
 
 # ---- money cannot arrive before the work it pays for ----
 
-def stand_in(amount, dates):
+def stand_in(amount, dates, settled_on):
     """A statement standing in for the batch it is about to become, the way
-    propose_statement builds it: day headers and a total, no orders yet."""
+    propose_statement builds it: day headers, a total, today as its confirmation
+    date, no orders yet."""
     return {"id": 0, "platform": "ride", "confirmed_amount": amount, "outstanding": amount,
+            "settled_on": settled_on,
             "statement": {"days": [{"date": d, "rows": [{"order_id": "x", "amount": amount,
                                                          "settle_date": d}]} for d in dates]},
             "orders": []}
@@ -253,7 +335,7 @@ def old_pool():
 def test_match_batch_will_not_offer_credits_older_than_the_service_days():
     """A statement forwarded on 08-28 for legs driven 08-25/26: no money has
     arrived for it yet, and June's and July's leftovers never can be it."""
-    m = match_batch(B(5, 1450.0, ["2026-08-25", "2026-08-26"]), old_pool())
+    m = match_batch(B(5, 1450.0, ["2026-08-25", "2026-08-26"], "2026-08-28"), old_pool())
     assert m.exact == [] and m.short == []
     assert [c["id"] for c in m.candidates] == [3]
 
@@ -261,16 +343,16 @@ def test_match_batch_will_not_offer_credits_older_than_the_service_days():
 def test_match_batch_reads_the_service_days_off_a_statement_with_no_orders():
     """The same bound before the batch exists: the statement's day headers say
     when the work was done."""
-    m = match_batch(stand_in(1450.0, ["2026-08-25", "2026-08-26"]), old_pool())
+    m = match_batch(stand_in(1450.0, ["2026-08-25", "2026-08-26"], "2026-08-28"), old_pool())
     assert m.exact == [] and m.short == []
     assert [c["id"] for c in m.candidates] == [3]
 
 
 def test_match_credit_will_not_offer_a_batch_worked_after_the_money_arrived():
     """The mirror: a credit dated 08-24 is not for legs driven on 08-26,
-    however exactly the amounts agree."""
-    earlier = B(1, 1450.0, ["2026-08-22"])
-    later = B(2, 1450.0, ["2026-08-25", "2026-08-26"])
+    however exactly the amounts agree and however close the confirmation."""
+    earlier = B(1, 1450.0, ["2026-08-22"], "2026-08-23")
+    later = B(2, 1450.0, ["2026-08-25", "2026-08-26"], "2026-08-27")
     m = match_credit(C(9, 1450.0, "2026-08-24"), [earlier, later])
     assert m.exact == [1] and m.short == [] and m.candidates == []
 
@@ -279,7 +361,7 @@ def test_a_batch_that_cannot_say_when_it_was_worked_hides_nothing():
     """An unknown service end excludes nothing: the whole pool is still offered
     rather than silently dropped."""
     dateless = {"id": 5, "platform": "ride", "confirmed_amount": 1450.0, "outstanding": 1450.0,
-                "statement": None, "orders": []}
+                "settled_on": "2026-08-28", "statement": None, "orders": []}
     m = match_batch(dateless, old_pool())
     assert m.exact == [] and m.short == []
     assert [c["id"] for c in m.candidates] == [3, 2, 1]
@@ -288,9 +370,10 @@ def test_a_batch_that_cannot_say_when_it_was_worked_hides_nothing():
 # ---- short payments ----
 
 def test_match_credit_offers_the_batch_it_cannot_cover():
-    """The case that broke round 2: $3,460 of statement, $2,950 paid, because
-    the platform failed to submit two of its own legs."""
-    batch = B(5, 3460.0, ["2026-08-20", "2026-08-21", "2026-08-22"])
+    """The platform pays a statement short when its own system failed to submit
+    some of the legs, so a batch the money cannot cover is a real proposal
+    rather than a failure to find one."""
+    batch = B(5, 3460.0, ["2026-08-20", "2026-08-21", "2026-08-22"], "2026-08-23")
     m = match_credit(C(1, 2950.0, "2026-08-24"), [batch])
     assert m.reason == "none" and m.exact == []
     assert [b["id"] for b in m.short] == [5]
@@ -298,23 +381,24 @@ def test_match_credit_offers_the_batch_it_cannot_cover():
 
 
 def test_match_credit_short_is_newest_first_and_capped():
-    bs = [B(i, 9999.0, ["2026-08-%02d" % (14 + i)]) for i in range(1, 7)]
+    bs = [B(i, 9999.0, ["2026-08-%02d" % (10 + i)], "2026-08-%02d" % (14 + i))
+          for i in range(1, 7)]
     m = match_credit(C(1, 100.0, "2026-08-21"), bs)
-    assert [b["id"] for b in m.short] == [6, 5, 4, 3]     # anchors 08-20 down to 08-17
+    assert [b["id"] for b in m.short] == [6, 5, 4, 3]     # confirmed 08-20 down to 08-17
     assert [b["id"] for b in m.candidates] == [2, 1]
 
 
 def test_match_credit_measures_against_what_a_batch_is_still_owed():
     """A batch already part-paid is offered for its shortfall, not its total:
     a make-up payment agrees with what is left, never with the whole batch."""
-    part = B(5, 3460.0, ["2026-08-22"], received=2950.0)
+    part = B(5, 3460.0, ["2026-08-22"], "2026-08-25", received=2950.0)
     assert match_credit(C(9, 510.0, "2026-08-28"), [part]).exact == [5]
     assert match_credit(C(9, 3460.0, "2026-08-28"), [part]).exact == []
 
 
 def test_match_credit_subset_sums_outstanding_not_totals():
-    bs = [B(1, 1000.0, ["2026-08-22"], received=600.0),   # owed 400
-          B(2, 1080.0, ["2026-08-21"])]
+    bs = [B(1, 1000.0, ["2026-08-22"], "2026-08-23", received=600.0),   # owed 400
+          B(2, 1080.0, ["2026-08-21"], "2026-08-22")]
     m = match_credit(C(1, 1480.0, "2026-08-24"), bs)
     assert m.reason == "subset" and m.exact == [1, 2]
 
@@ -325,7 +409,7 @@ def test_match_batch_short_credits_and_offer_order():
     exact = C(1, 510.0, "2026-08-30")
     short = C(2, 300.0, "2026-08-29")
     big = C(3, 5000.0, "2026-08-28")
-    batch = B(5, 510.0, ["2026-08-25"])
+    batch = B(5, 510.0, ["2026-08-25"], "2026-08-27")
     m = match_batch(batch, [big, short, exact])
     assert m.exact == [1] and [c["id"] for c in m.short] == [2]
     assert [c["id"] for c in m.candidates] == [3]
@@ -500,8 +584,8 @@ def test_propose_is_empty_for_an_archived_or_spent_credit_and_a_linked_batch(db_
 # ---- the statement card, before the batch exists ----
 
 def stmt_json(settle_dates, rows=1):
-    """A statement as corrected_json stores it: what the card matches on is the
-    settle dates and the total, neither of which needs a batch to exist."""
+    """A statement as corrected_json stores it.  Its dates bound the work, never
+    the payment: what the card windows on is the day it is being confirmed."""
     return {"days": [{"date": d, "rows": [{"order_id": f"X{i}", "amount": 100.0, "settle_date": d}
                                           for i in range(rows)]}
                      for d in settle_dates]}
@@ -516,46 +600,57 @@ def a_credit(db_path, ref, amount, value_date):
 
 def test_propose_statement_matches_the_total_inside_the_window(db_path):
     cid = a_credit(db_path, "R1", 2540.0, "2026-08-26")
-    m = propose_statement(db_path, "ride", 2540.0, stmt_json(["2026-08-24"]))
+    m = propose_statement(db_path, "ride", 2540.0, stmt_json(["2026-08-24"]), NOW)
     assert m.reason == "exact" and m.exact == [cid]
+
+
+def test_propose_statement_anchors_on_today_not_on_the_statements_dates(db_path):
+    """The operator is confirming the statement right now, so today is the
+    confirmation date the payment is keyed to: money from the last few days is
+    its transfer however old the days it settles are, and older money is not."""
+    cid = a_credit(db_path, "R1", 2540.0, "2026-08-24")
+    m = propose_statement(db_path, "ride", 2540.0, stmt_json(["2026-07-20"]), NOW)
+    assert m.reason == "exact" and m.exact == [cid]
+    a_credit(db_path, "R2", 1450.0, "2026-08-01")
+    stale = propose_statement(db_path, "ride", 1450.0, stmt_json(["2026-07-20"]), NOW)
+    assert stale.reason == "none" and stale.exact == []
 
 
 def test_propose_statement_offers_credits_it_cannot_prove(db_path):
     big = a_credit(db_path, "R1", 2950.0, "2026-08-26")
     small = a_credit(db_path, "R2", 100.0, "2026-08-25")
-    m = propose_statement(db_path, "ride", 1450.0, stmt_json(["2026-08-24"]))
+    m = propose_statement(db_path, "ride", 1450.0, stmt_json(["2026-08-24"]), NOW)
     assert m.reason == "none" and m.exact == []
     assert [c["id"] for c in m.candidates] == [big]      # could pay the whole statement
     assert [c["id"] for c in m.short] == [small]         # would pay part of it
 
 
 def test_propose_statement_offers_a_short_payment(db_path):
-    """The case round 2 could not record: the platform failed to submit two of
-    its own legs, paid the rest, and said so by hand."""
+    """The platform failed to submit two of its own legs, paid the rest, and
+    said so by hand: the money that did arrive is still the answer."""
     cid = a_credit(db_path, "R1", 2950.0, "2026-08-24")
-    m = propose_statement(db_path, "ride", 3460.0, stmt_json(["2026-08-22"]))
+    m = propose_statement(db_path, "ride", 3460.0, stmt_json(["2026-08-22"]), NOW)
     assert m.exact == [] and [c["id"] for c in m.short] == [cid]
     assert m.short[0]["remaining"] == 2950.0
 
 
 def test_propose_statement_matches_nothing_when_no_credit_is_in_the_window(db_path):
     a_credit(db_path, "R1", 100.0, "2026-10-05")
-    m = propose_statement(db_path, "ride", 1450.0, stmt_json(["2026-08-24"]))
+    m = propose_statement(db_path, "ride", 1450.0, stmt_json(["2026-08-24"]), NOW)
     assert m.exact == [] and m.short == []
     assert [c["ref"] for c in m.candidates] == ["R1"]    # out of window: only a suggestion
 
 
 def test_propose_statement_will_not_match_a_credit_outside_the_window(db_path):
     cid = a_credit(db_path, "R1", 1000.0, "2026-10-05")
-    m = propose_statement(db_path, "ride", 1000.0, stmt_json(["2026-08-24"]))
+    m = propose_statement(db_path, "ride", 1000.0, stmt_json(["2026-08-24"]), NOW)
     assert m.reason == "none" and m.exact == [] and [c["id"] for c in m.candidates] == [cid]
 
 
-def test_propose_statement_needs_a_total_and_a_date(db_path):
-    """An unreadable total is not a match on $0, and a statement with no settle
-    date has nothing to put inside the window."""
-    a_credit(db_path, "R1", 1000.0, "2026-08-26")
-    assert propose_statement(db_path, "ride", 0.0, stmt_json(["2026-08-24"])) == Match()
+def test_propose_statement_needs_a_total(db_path):
+    """An unreadable total is not a match on $0.  A statement whose rows carry no
+    settle date still has a confirmation date, so it still matches."""
+    cid = a_credit(db_path, "R1", 1000.0, "2026-08-26")
+    assert propose_statement(db_path, "ride", 0.0, stmt_json(["2026-08-24"]), NOW) == Match()
     undated = {"days": [{"date": "2026-08-24", "rows": [{"order_id": "X", "amount": 1000.0}]}]}
-    assert anchor({"statement": undated, "orders": []}) is None
-    assert propose_statement(db_path, "ride", 1000.0, undated).exact == []
+    assert propose_statement(db_path, "ride", 1000.0, undated, NOW).exact == [cid]

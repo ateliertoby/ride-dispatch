@@ -94,7 +94,7 @@ def prepare(db_path: str, stmt: statement.Statement, now: datetime) -> Prepared:
     # The ledger is asked before anything is written: a batch has to trace back
     # to a statement, so the statement is where the operator is told which
     # credit it accounts for, and one confirm records both.
-    m = credits.propose_statement(db_path, PLATFORM, total, stmt_json)
+    m = credits.propose_statement(db_path, PLATFORM, total, stmt_json, now)
     matched = get_credit(db_path, m.exact[0]) if m.reason == "exact" else None
     # Exact beats short beats candidates: money that covers the statement
     # answers it, money that does not is the short-payment case, and anything

@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from itertools import combinations
 
 from .db import (get_credit, get_settlement, insert_credit, open_batches,
@@ -22,9 +22,11 @@ from .statement import batch_head, batch_label, leg_amount, money_str
 
 logger = logging.getLogger("credits")
 
-# The platform pays a statement two days after its settle date, and holds a
-# weekend's statements for the Monday transfer: a week covers every observed
-# gap without reaching back into the batches before it.
+# A payment is keyed to the working day the operator confirmed the statements,
+# never to the settle dates printed on them: everything confirmed within one
+# working day is paid as a single transfer about two working days later.  A
+# statement can be confirmed long after the days it covers, so its own dates
+# say nothing about when its money arrives.
 #
 # The window is what separates a match from a coincidence, not a tie-breaker.
 # Amounts here are round hundreds and the ledger holds months of them, so a
@@ -33,8 +35,9 @@ logger = logging.getLogger("credits")
 # as the answer; one outside it is only offered among the alternatives.
 WINDOW_DAYS = 7
 MAX_CANDIDATES = 8
-# One transfer has never covered more than a long weekend of statements, and
-# the combination search is exponential: past four the cost buys nothing.
+# A transfer can still mix confirmation days — a make-up payment bundled into
+# one — and only then is a combination searched for blind, once the day's whole
+# group has been tried.  The search is exponential: past four it buys nothing.
 MAX_SUBSET = 4
 # A card the operator has to scroll is a card he taps the wrong row of; the
 # part payments are a shortlist, the rest of the pool is behind them.
@@ -139,20 +142,12 @@ def ingest_feed(db_path: str, path: str) -> list[dict]:
 def anchor(batch: dict) -> str | None:
     """The date the platform paid a batch against, or None when it has no date.
 
-    Its statement's latest settle date when it has one, else its latest service
-    date: a held-back order's service date is already stale by the time the
-    statement carrying it is paid.  A statement read before its batch exists
-    carries no orders, which is why the statement is asked first.
+    The day the batch was confirmed, which is the only thing a payment is keyed
+    to.  `settled_on` is when the operator confirmed the batch in this system,
+    the proxy for the platform confirmation it mirrors; it can lag by a day or
+    two when a screenshot is fed late, and the window is what absorbs that.
     """
-    stmt = batch.get("statement") or {}
-    settle_dates = [r.get("settle_date") for day in stmt.get("days", [])
-                    for r in day.get("rows", []) if r.get("settle_date")]
-    if settle_dates:
-        return max(settle_dates)
-    orders = batch.get("orders") or []
-    if orders:
-        return max(o["scheduled_time"][:10] for o in orders)
-    return None
+    return batch.get("settled_on")
 
 
 def service_end(batch: dict) -> str | None:
@@ -184,12 +179,15 @@ def paid_after_the_work(batch: dict, value_date: str) -> bool:
 
 def in_window(anchor_date: str | None, value_date: str) -> bool:
     # No date at all is outside every window: the dates have to agree, and a
-    # batch that cannot say when it was earned never can.
+    # batch that cannot say when it was confirmed never can.
     if anchor_date is None:
         return False
     v = datetime.strptime(value_date, "%Y-%m-%d")
     a = datetime.strptime(anchor_date, "%Y-%m-%d")
-    return v - timedelta(days=WINDOW_DAYS) <= a <= v
+    # Symmetric, because the anchor is when the batch was recorded here rather
+    # than when the money moved: a credit can be dated either side of it, and
+    # the bank is legitimately first when a screenshot is confirmed late.
+    return abs((v - a).days) <= WINDOW_DAYS
 
 
 @dataclass
@@ -252,14 +250,40 @@ def match_credit(credit: dict, batches: list[dict]) -> Match:
         return Match(exact=[b["id"] for b in exact], short=short,
                      candidates=_others(pool, exact + short, _by_anchor),
                      reason="exact" if len(exact) == 1 else "ambiguous")
-    # A Monday transfer covers a weekend's statements, so a combination that
-    # sums to the credit is a real payment rather than a coincidence — but only
-    # when it is the sole combination that does.
+    # One transfer pays every batch confirmed on the same working day, so a
+    # whole confirmation group summing to the credit is the ordinary payment
+    # rather than a coincidence.  It is matched whole and at any size, which is
+    # what puts the ordinary case beyond the blind search's MAX_SUBSET cap.
+    groups: dict[str, list[dict]] = {}
+    for b in windowed:
+        groups.setdefault(anchor(b), []).append(b)
+    day_hits = [g for g in groups.values()
+                if _same(sum(b["outstanding"] for b in g), remaining)]
+    if len(day_hits) == 1:
+        group = day_hits[0]
+        return Match(exact=sorted(b["id"] for b in group), short=short,
+                     candidates=_others(pool, group + short, _by_anchor), reason="subset")
+    if day_hits:
+        union = {b["id"]: b for g in day_hits for b in g}
+        return Match(short=short,
+                     candidates=_lead_with(_others(list(union.values()), short, _by_anchor),
+                                           _others(pool, short, _by_anchor)),
+                     reason="ambiguous")
+    # A transfer that mixes confirmation days — a make-up payment bundled into
+    # one — leaves no whole group to match, so the combinations are searched
+    # blind, and only a single hit is an answer.
     hits = []
     for size in range(2, min(MAX_SUBSET, len(windowed)) + 1):
         for combo in combinations(windowed, size):
             if _same(sum(b["outstanding"] for b in combo), remaining):
                 hits.append(combo)
+    if len(hits) > 1:
+        # A combination drawn from a single confirmation day is a real payment
+        # under the platform's grouping rule; equal-sum combinations spanning
+        # days are the coincidences the ambiguity refusal exists for.
+        one_day = [h for h in hits if len({anchor(b) for b in h}) == 1]
+        if len(one_day) == 1:
+            hits = one_day
     if len(hits) == 1:
         combo = list(hits[0])
         return Match(exact=sorted(b["id"] for b in combo), short=short,
@@ -317,18 +341,21 @@ def propose_batch(db_path: str, settlement_id: int) -> Match:
 
 
 def propose_statement(db_path: str, platform: str, confirmed_amount: float,
-                      statement_json: dict) -> Match:
+                      statement_json: dict, now: datetime) -> Match:
     """What the ledger says about a statement whose batch does not exist yet.
 
     The card has to name the credit before anything is written, so the
-    statement stands in for the batch it is about to become: its settle dates
-    are the anchor and its total is what nothing has paid yet.  A statement
-    whose total could not be read has nothing to match on and matches nothing.
+    statement stands in for the batch it is about to become: its total is what
+    nothing has paid yet, and its confirmation date is today, because
+    confirming it is what the operator is doing right now — the same date the
+    confirm then writes as `settled_on`.  A statement whose total could not be
+    read has nothing to match on and matches nothing.
     """
     if confirmed_amount <= CENT:
         return Match()
     batch = {"id": 0, "platform": platform, "confirmed_amount": confirmed_amount,
-             "outstanding": confirmed_amount, "statement": statement_json, "orders": []}
+             "outstanding": confirmed_amount, "settled_on": now.strftime("%Y-%m-%d"),
+             "statement": statement_json, "orders": []}
     return match_batch(batch, unallocated_credits(db_path, platform))
 
 
