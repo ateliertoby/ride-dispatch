@@ -1,5 +1,8 @@
+import os
+import re
+
 import pytest
-from ride_dispatch.phone import format_phone_e164
+from ride_dispatch.phone import E164_CC, TRUNK_ZERO_CC, format_phone_e164
 
 
 # Every shape seen in the production DB (synthetic numbers), plus edge cases
@@ -37,8 +40,27 @@ from ride_dispatch.phone import format_phone_e164
     # + form without trunk zero — untouched
     ("+85251111111", "+85251111111"),
     ("+886922222222", "+886922222222"),
-    # + form with a CC outside KNOWN_CC — untouched, trunk zero and all
+    # Italy: 39 is outside TRUNK_ZERO_CC, so the 0 stays part of the number
     ("+390212345678", "+390212345678"),
+    ("+39 06 1234567", "+39061234567"),
+    ("39 06 1234567", "+39061234567"),
+    # Spain: a CC recognised only via the full E.164 table, both forms
+    ("34 612 345 678", "+34612345678"),
+    ("+34 612 345 678", "+34612345678"),
+    ("33 612345678", "+33612345678"),
+    # 3-digit CC + exactly 7 digits reads as a NANP area code — leave it alone
+    ("212 555 0100", "212 555 0100"),
+    ("254 555-0100", "254 555-0100"),
+    # Same CC, remainder that cannot be a NANP subscriber number — formatted
+    ("212 612345678", "+212612345678"),
+    # The guard is 3-digit-CC only: a 2-digit CC with 7 digits still formats
+    ("34 6123456", "+346123456"),
+    # A + declares an international number, so no NANP guard applies there
+    ("+212 555 0100", "+2125550100"),
+    # Withdrawn CC (42 Czechoslovakia) — not in the table, passthrough
+    ("42 1234567", "42 1234567"),
+    # Unrecognised CC after a + still falls back to the digits
+    ("+999 12345", "+99912345"),
     # Unknown shape — passthrough unchanged
     ("12345", "12345"),
     ("999 12345", "999 12345"),
@@ -50,3 +72,37 @@ from ride_dispatch.phone import format_phone_e164
 ])
 def test_format_phone_e164(raw, expected):
     assert format_phone_e164(raw) == expected
+
+
+def test_e164_table_is_prefix_free():
+    """The longest-match-first scan is only unambiguous on a prefix-free table."""
+    assert not [(a, b) for a in E164_CC for b in E164_CC
+                if a != b and b.startswith(a)]
+
+
+def test_trunk_zero_codes_are_assigned():
+    assert TRUNK_ZERO_CC <= E164_CC
+
+
+# formatPhoneE164() in templates/_shared.js hand-duplicates both tables, and
+# nothing else executes that file: there is no JS test rig, so a one-off typo
+# in either list would ship silently and un-recognise a country on the web UI
+# only.  These two tests are the only thing holding the copies together.
+_SHARED_JS = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                          "templates", "_shared.js")
+
+
+def _js_const(name):
+    """Country codes from a _shared.js Set literal, whitespace-insensitive."""
+    src = open(_SHARED_JS, encoding="utf-8").read()
+    m = re.search(r'const %s = new Set\((.*?)\);' % name, src, re.S)
+    assert m, f"{name} not found in {_SHARED_JS}"
+    return set(re.findall(r'\d+', m.group(1)))
+
+
+def test_js_e164_table_in_sync():
+    assert _js_const("_E164_CC") == set(E164_CC)
+
+
+def test_js_trunk_zero_table_in_sync():
+    assert _js_const("_TRUNK_ZERO_CC") == set(TRUNK_ZERO_CC)
