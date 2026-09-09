@@ -1009,7 +1009,8 @@ POLL_ERROR_BACKOFF = 300
 # Subtracted from every computed interval so the gate opens just before the
 # heartbeat that should carry the poll. Intervals are pacing estimates, not
 # deadlines, and the heartbeat itself is what stops the poll running more
-# often than once a minute.
+# often than once a minute. The parking gate below wants the same slack for
+# the same reason, on its own faster heartbeat.
 POLL_TICK_TOLERANCE = 3
 _JOB_KWARGS = {"misfire_grace_time": None, "coalesce": True}
 _next_poll_at: datetime | None = None
@@ -1024,17 +1025,27 @@ _kick_server = None
 # miss confirms the exit. In-memory on purpose: losing it on a restart costs
 # one extra tick, nothing more.
 #
-# The check runs on every heartbeat tick, never behind _next_poll_at: an exit
-# takes two consecutive misses to confirm, so gating it on the flight-poll
-# schedule would make exit latency twice the flight interval, which ranges
-# from a minute to hours. _parking_running keeps a slow HKIA query from
-# overlapping the next tick.
+# The check has its own heartbeat, never behind _next_poll_at: an exit takes
+# two consecutive misses to confirm, so gating it on the flight-poll schedule
+# would make exit latency twice the flight interval, which ranges from a
+# minute to hours.
+#
+# While a car is inside, the tick rate is what the recorded exit time is
+# accurate to, because that timestamp is the last tick that saw the car; at
+# 30s the exit is dated to within 30s of the truth and confirmed within ~60s
+# of it. With nothing inside there is no exit to date, so the rate drops back
+# to once a minute. _next_parking_at gates the fast heartbeat down to that,
+# the way _next_poll_at gates the flight poll. _parking_running keeps a slow
+# HKIA query from overlapping the next tick.
 # _parking_pay_busy holds the session ids with a pay-link fetch in flight, so
 # a second tap on the same button cannot open a second gateway order.
+PARKING_OPEN_INTERVAL = 30
+PARKING_IDLE_INTERVAL = 60
 _parking_client: ParkingClient | None = None
 _parking_client_built = False
 _parking_miss_at: datetime | None = None
 _parking_running = False
+_next_parking_at: datetime | None = None
 _parking_pay_busy: set[int] = set()
 _parking_logger = logging.getLogger("parking")
 
@@ -1171,8 +1182,48 @@ async def _check_credits(bot, chat_id: int):
             logger.exception("credit %s not handled", c["ref"])
 
 
+def _parking_interval() -> int:
+    """Seconds to wait before the next car park check.
+
+    Fast ticks buy exit-time accuracy, and only an open visit has an exit time
+    to get right; an armed pickup with no car inside gains nothing from them.
+    """
+    if _get_parking_client() is None:
+        return PARKING_IDLE_INTERVAL
+    return PARKING_OPEN_INTERVAL if get_open_parking_session(DB_PATH) else PARKING_IDLE_INTERVAL
+
+
+async def _parking_tick(context):
+    global _next_parking_at, _parking_running
+    if _parking_running:
+        return
+    if _next_parking_at and datetime.now() < _next_parking_at:
+        return
+    _parking_running = True
+    # Anchored to the start of the tick for the same reason as the flight
+    # gate: the HKIA round trip would otherwise push the gate past the next
+    # heartbeat and cost a whole tick of accuracy.
+    tick_start = datetime.now()
+    # A check that blew up leaves the cadence unknown; guessing fast costs one
+    # extra query a minute, guessing slow costs a visit recorded to the wrong
+    # minute.
+    interval = PARKING_OPEN_INTERVAL
+    try:
+        chat_id = _notify_chat_id()
+        if chat_id:
+            await _check_parking(context.application.bot, chat_id, tick_start)
+        # Read after the check, so a visit that just opened or closed is
+        # already on the cadence it calls for.
+        interval = _parking_interval()
+    except Exception:
+        logger.exception("parking check error")
+    finally:
+        _parking_running = False
+        _next_parking_at = tick_start + timedelta(seconds=interval - POLL_TICK_TOLERANCE)
+
+
 async def _poll_tick(context):
-    global _next_poll_at, _poll_running, _parking_running
+    global _next_poll_at, _poll_running
     # Before the flight gate: a credit must not wait out a long flight interval.
     try:
         chat_id = _notify_chat_id()
@@ -1180,16 +1231,6 @@ async def _poll_tick(context):
             await _check_credits(context.application.bot, chat_id)
     except Exception:
         logger.exception("credit feed check error")
-    if not _parking_running:
-        _parking_running = True
-        try:
-            chat_id = _notify_chat_id()
-            if chat_id:
-                await _check_parking(context.application.bot, chat_id, datetime.now())
-        except Exception:
-            logger.exception("parking check error")
-        finally:
-            _parking_running = False
     if _poll_running:
         return
     if _next_poll_at and datetime.now() < _next_poll_at:
@@ -1425,7 +1466,10 @@ def _history_line(s: dict) -> str:
     stamp = entry.strftime("%m-%d %H:%M")
     if not s.get("exit_time"):
         return f"{stamp} 泊緊"
-    stayed = int((from_db_time(s["exit_time"]) - entry).total_seconds() // 60)
+    # Stay length is not the exit timestamp minus the entry: the two are read
+    # off different clocks and disagree by up to a minute. Deriving it here
+    # would drift from the figure the close message already gave.
+    stayed = _stayed_minutes(s, from_db_time(s["exit_time"]))
     fee = s.get("last_fee")
     # Re-derived rather than read off `free`, which a manual verdict overwrites:
     # the line has to be able to show the two disagreeing.
@@ -1440,13 +1484,15 @@ def _history_line(s: dict) -> str:
 
 
 def _record_reading(session: dict, status: ParkingStatus, now: datetime):
-    """Keep HKIA's own clock and price from the latest reply seen inside.
+    """Keep our own tick time and HKIA's clock and price from the latest reply
+    seen inside.
 
-    Nothing else can date the exit: the ticks that miss the car are already
-    past it. The fee quoted here is what leaving at this moment would cost on
-    HKIA's own computation, allowance included, and is the only free/paid
-    answer available anywhere. The log line is the record from which HKIA's
-    unpublished free threshold can be learned.
+    last_seen_at is the tightest lower bound anyone has on the exit, and the
+    only reading that can date it: the ticks that miss the car are already past
+    it, and HKIA's parkTime carries no seconds. The fee quoted here is what
+    leaving at this moment would cost on HKIA's own computation, allowance
+    included, and is the only free/paid answer available anywhere. The log line
+    is the record from which HKIA's unpublished free threshold can be learned.
     """
     update_parking_session(DB_PATH, session["id"], last_seen_at=db_seconds(now),
                            last_park_minutes=status.park_minutes, last_fee=status.fee)
@@ -1454,29 +1500,45 @@ def _record_reading(session: dict, status: ParkingStatus, now: datetime):
                          status.pv_nr, status.park_minutes, status.fee, status.paid)
 
 
+def _exit_moment(session: dict, gone_at: datetime) -> datetime:
+    """When the car left, as early as the evidence allows.
+
+    The last tick that saw it is a lower bound on the real exit and tightens
+    with the tick rate; the first tick to miss it is the upper bound. Taking
+    the lower one keeps the recorded exit provably no later than the real one,
+    which is the direction an operator can reason about. last_seen_at is
+    written on every inside tick, session open included, so falling back to
+    the miss tick only ever happens to a row that predates the column.
+    """
+    seen = session.get("last_seen_at")
+    return from_db_seconds(seen) if seen else gone_at
+
+
 def _stayed_minutes(session: dict, gone_at: datetime) -> int:
     """How long the visit lasted, on the most authoritative clock available.
 
-    Ticks run once a minute, so the first one to miss the car is up to a
-    minute after the real exit and can only bound the stay from above. HKIA's
-    parkTime from the last sighting bounds it from below and is on the clock
-    that charges, so it wins; the miss tick is the last resort.
+    HKIA's parkTime from the last sighting is the clock that charges, so it
+    wins wherever there is one, and it is a whole-minute figure however often
+    we poll. Without it the stay is measured from our own timestamps: the last
+    sighting understates it by under a tick, and a row too old to carry one
+    falls back to the tick that missed the car, which overstates it by as much.
     """
     minutes = session.get("last_park_minutes")
     if minutes is not None:
         return int(minutes)
-    entry = _session_entry(session)
-    seen = session.get("last_seen_at")
-    end = from_db_seconds(seen) if seen else gone_at
-    return max(0, int((end - entry).total_seconds() // 60))
+    end = _exit_moment(session, gone_at)
+    return max(0, int((end - _session_entry(session)).total_seconds() // 60))
 
 
 async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now: datetime):
     entry = _session_entry(session)
     stayed = _stayed_minutes(session, gone_at)
-    # Exit time and stay length are the same fact, so they are stored from the
-    # same number; gone_at keeps the upper bound the tick gave.
-    exit_at = entry + timedelta(minutes=stayed)
+    # Two different facts on two different clocks, deliberately decoupled: the
+    # stay is what HKIA charges for and has one-minute resolution whatever the
+    # poll rate, so it cannot date the exit. Nothing forces them to agree, and
+    # entry + stayed can be a minute off the exit. gone_at keeps the upper
+    # bound the tick gave.
+    exit_at = _exit_moment(session, gone_at)
     fee = session.get("last_fee")
     kind = classify(bool(session.get("paid")), stayed, fee)
     close_parking_session(DB_PATH, session["id"], db_time(exit_at), 1 if kind == "free" else 0,
@@ -1943,6 +2005,11 @@ async def _post_init(app):
     await _set_commands(app)
     await _start_kick_server(app)
     app.job_queue.run_repeating(_poll_tick, interval=60, first=5, job_kwargs=_JOB_KWARGS)
+    # Its own job at the fast rate, gated back to PARKING_IDLE_INTERVAL when
+    # no car is inside: sharing the flight heartbeat would put the whole poll
+    # on the parking cadence.
+    app.job_queue.run_repeating(_parking_tick, interval=PARKING_OPEN_INTERVAL, first=5,
+                                job_kwargs=_JOB_KWARGS)
 
 
 async def _on_error(update, context):

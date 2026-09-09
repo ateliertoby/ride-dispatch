@@ -124,7 +124,7 @@ def test_entry_when_allowance_used_says_so(db_path, tg, monkeypatch):
     assert "免費已用" in texts(tg)[0] and "$32" in texts(tg)[0] and "19:48" in texts(tg)[0]
 
 
-def test_one_miss_keeps_session_two_misses_close_on_hkia_clock(db_path, tg, monkeypatch):
+def test_one_miss_keeps_the_session_two_misses_close_it(db_path, tg, monkeypatch):
     landed_order(db_path)
     monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(12), OUT, OUT]))
     run(tg, ENTRY + timedelta(minutes=12))
@@ -133,8 +133,9 @@ def test_one_miss_keeps_session_two_misses_close_on_hkia_clock(db_path, tg, monk
     run(tg, ENTRY + timedelta(minutes=21))
     assert get_open_parking_session(db_path) is None
     row = recent_parking_sessions(db_path, 1)[0]
-    # HKIA said 12 minutes at the last sighting; the tick 8 minutes later that
-    # missed the car only bounds the exit from above and is kept separately.
+    # The 19:00 sighting dates the exit and HKIA's 12 minutes size the stay;
+    # the tick 8 minutes later that missed the car only bounds it from above
+    # and is kept separately.
     assert row["exit_time"] == "2026-08-23 19:00" and row["free"] == 1
     assert row["gone_at"] == "2026-08-23 19:08:00"
     assert "已出閘 19:00，泊 12 分鐘" in texts(tg)[-1] and "免費（HKIA 計 $0）" in texts(tg)[-1]
@@ -467,6 +468,37 @@ def test_inside_tick_records_the_hkia_reading(db_path, tg, monkeypatch):
     assert s["last_park_minutes"] == 12 and s["last_fee"] == 32
 
 
+def _decoupled_close(db_path, tg, monkeypatch) -> int:
+    """A visit whose two clocks disagree by a minute.
+
+    HKIA counts 32 whole minutes at the 19:21:10 sighting — the car entered
+    partway through 18:48, which the stored entry minute cannot express — so
+    entry plus the stay lands a minute before the sighting that dates the exit.
+    """
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(32, fee=32), OUT, OUT]))
+    run(tg, ENTRY + timedelta(minutes=33, seconds=10))
+    run(tg, ENTRY + timedelta(minutes=34))
+    run(tg, ENTRY + timedelta(minutes=34, seconds=30))
+    return recent_parking_sessions(db_path, 1)[0]["id"]
+
+
+def test_the_exit_is_dated_by_the_last_sighting_not_by_hkias_stay(db_path, tg, monkeypatch):
+    sid = _decoupled_close(db_path, tg, monkeypatch)
+    row = get_parking_session(db_path, sid)
+    assert row["last_seen_at"] == "2026-08-23 19:21:10"
+    assert row["exit_time"] == "2026-08-23 19:21"        # not entry + 32 minutes
+    assert row["gone_at"] == "2026-08-23 19:22:00"
+    assert "已出閘 19:21，泊 32 分鐘" in texts(tg)[-1]
+
+
+def test_history_line_repeats_the_stay_the_close_message_gave(db_path, tg, monkeypatch):
+    # Exit time minus entry is 33 minutes here; the visit was 32.
+    sid = _decoupled_close(db_path, tg, monkeypatch)
+    assert "泊 32 分鐘" in texts(tg)[-1]
+    assert bot._history_line(get_parking_session(db_path, sid)) == "08-23 18:48 泊 32 分鐘 閘口 HKIA$32"
+
+
 def test_close_falls_back_to_last_seen_when_park_minutes_is_missing(db_path, tg, monkeypatch):
     from ride_dispatch.db import update_parking_session
     sid = open_session(db_path)
@@ -477,6 +509,7 @@ def test_close_falls_back_to_last_seen_when_park_minutes_is_missing(db_path, tg,
     row = recent_parking_sessions(db_path, 1)[0]
     assert row["exit_time"] == "2026-08-23 19:05"        # entry + 17 whole minutes
     assert row["gone_at"] == "2026-08-23 19:06:00"
+    assert "已出閘 19:05，泊 17 分鐘" in texts(tg)[-1]
     assert "冇 HKIA 讀數，按 30 分鐘估" in texts(tg)[-1]
 
 
@@ -662,6 +695,7 @@ def poll_globals(monkeypatch):
     monkeypatch.setattr(bot, "_next_poll_at", None)
     monkeypatch.setattr(bot, "_poll_running", False)
     monkeypatch.setattr(bot, "_parking_running", False)
+    monkeypatch.setattr(bot, "_next_parking_at", None)
     monkeypatch.setattr(bot, "_parking_miss_at", None)
 
 
@@ -700,38 +734,44 @@ def poll_spy(monkeypatch, interval: int = 600):
     return calls
 
 
-def test_tick_checks_parking_while_the_flight_poll_is_gated(db_path, tg, ctx, poll_globals, monkeypatch):
+def parking_tick(ctx):
+    # The gate is what the cadence tests below exercise; every other test
+    # wants the tick it asks for.
+    bot._next_parking_at = None
+    asyncio.run(bot._parking_tick(ctx))
+
+
+def test_two_parking_ticks_confirm_the_exit_whatever_the_flight_poll_is_doing(
+        db_path, tg, ctx, poll_globals, monkeypatch):
     open_session(db_path)
     client = CountingClient([OUT, OUT])
     monkeypatch.setattr(bot, "_parking_client", client)
     monkeypatch.setattr(bot, "_next_poll_at", datetime(2099, 1, 1))
     calls = poll_spy(monkeypatch)
 
-    asyncio.run(bot._poll_tick(ctx))
+    parking_tick(ctx)
     assert get_open_parking_session(db_path) is not None   # first miss only
 
-    asyncio.run(bot._poll_tick(ctx))
+    parking_tick(ctx)
     assert get_open_parking_session(db_path) is None
     assert any("已出閘" in t for t in texts(tg))
     assert client.queries == 2
-    assert calls == []                                     # flight poll stayed gated
+    assert calls == []                                     # its own job, not the poll's
 
 
-def test_due_tick_checks_parking_once_and_polls(db_path, tg, ctx, poll_globals, monkeypatch):
+def test_the_flight_heartbeat_no_longer_checks_parking(db_path, tg, ctx, poll_globals, monkeypatch):
     open_session(db_path)
     client = CountingClient([inside(30)])
     monkeypatch.setattr(bot, "_parking_client", client)
-    monkeypatch.setattr(bot, "_next_poll_at", datetime(2000, 1, 1))
     calls = poll_spy(monkeypatch)
 
     asyncio.run(bot._poll_tick(ctx))
 
-    assert client.queries == 1
     assert len(calls) == 1
-    assert bot._next_poll_at > datetime.now()
+    assert client.queries == 0
 
 
-def test_poll_and_notify_no_longer_checks_parking(db_path, tg, ctx, poll_globals, monkeypatch):
+def test_poll_and_notify_does_not_check_parking_either(db_path, tg, ctx, poll_globals, monkeypatch):
     open_session(db_path)
     client = CountingClient([inside(30)])
     monkeypatch.setattr(bot, "_parking_client", client)
@@ -746,21 +786,111 @@ def test_tick_skips_parking_while_a_check_is_running(db_path, tg, ctx, poll_glob
     client = CountingClient([OUT])
     monkeypatch.setattr(bot, "_parking_client", client)
     monkeypatch.setattr(bot, "_parking_running", True)
-    monkeypatch.setattr(bot, "_next_poll_at", datetime(2099, 1, 1))
-    poll_spy(monkeypatch)
 
-    asyncio.run(bot._poll_tick(ctx))
+    parking_tick(ctx)
 
     assert client.queries == 0
     assert get_open_parking_session(db_path) is not None
 
 
-def test_parking_failure_does_not_block_the_flight_poll(db_path, tg, ctx, poll_globals, monkeypatch):
+def test_a_failed_check_frees_the_job_for_the_next_tick(db_path, tg, ctx, poll_globals, monkeypatch):
     open_session(db_path)
     monkeypatch.setattr(bot, "_parking_client", CountingClient([RuntimeError("boom")]))
-    calls = poll_spy(monkeypatch)
 
-    asyncio.run(bot._poll_tick(ctx))
+    parking_tick(ctx)
 
-    assert len(calls) == 1
     assert bot._parking_running is False
+    assert bot._next_parking_at is not None
+
+
+# --- parking cadence: fast only while a car is inside ---
+
+
+class _Clock:
+    """Stand-in for the wall clock the parking gate reads."""
+
+    def __init__(self, start: datetime):
+        self.t = start
+
+
+def parking_heartbeats(monkeypatch, ctx, ticks: int, start: datetime) -> list[float]:
+    """Drive `ticks` parking heartbeats on the fast grid from `start`; return
+    the seconds from the origin at which a check actually ran."""
+    clock = _Clock(start)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.t
+
+    monkeypatch.setattr(bot, "datetime", FakeDatetime)
+    ran: list[float] = []
+    check = bot._check_parking
+
+    async def spy(b, chat_id, now):
+        ran.append(round((now - start).total_seconds(), 3))
+        await check(b, chat_id, now)
+
+    monkeypatch.setattr(bot, "_check_parking", spy)
+    for i in range(ticks):
+        clock.t = start + timedelta(seconds=bot.PARKING_OPEN_INTERVAL * i)
+        asyncio.run(bot._parking_tick(ctx))
+    return ran
+
+
+def test_the_parking_job_is_started_at_the_fast_rate(monkeypatch):
+    jobs = []
+
+    class FakeApp:
+        class job_queue:
+            @staticmethod
+            def run_repeating(fn, interval, first, job_kwargs=None):
+                jobs.append((fn, interval))
+
+    monkeypatch.setattr(bot, "_set_commands", AsyncMock())
+    monkeypatch.setattr(bot, "_start_kick_server", AsyncMock())
+    asyncio.run(bot._post_init(FakeApp()))
+    assert jobs == [(bot._poll_tick, 60), (bot._parking_tick, bot.PARKING_OPEN_INTERVAL)]
+
+
+def test_an_open_visit_is_checked_every_fast_tick(db_path, tg, ctx, poll_globals, monkeypatch):
+    open_session(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(12)] * 4))
+    assert parking_heartbeats(monkeypatch, ctx, ticks=4,
+                              start=ENTRY + timedelta(minutes=12)) == [0, 30, 60, 90]
+
+
+def test_an_idle_car_park_is_checked_once_a_minute(db_path, tg, ctx, poll_globals, monkeypatch):
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))   # any query would IndexError
+    assert parking_heartbeats(monkeypatch, ctx, ticks=5, start=ENTRY) == [0, 60, 120]
+
+
+def test_an_armed_pickup_with_no_car_inside_stays_slow(db_path, tg, ctx, poll_globals, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([OUT] * 3))
+    assert parking_heartbeats(monkeypatch, ctx, ticks=5, start=ENTRY) == [0, 60, 120]
+
+
+def test_the_rate_follows_the_visit_in_and_out(db_path, tg, ctx, poll_globals, monkeypatch):
+    # Slow until the car appears at 60s, fast until the second miss closes the
+    # visit at 150s, slow again from there.
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client",
+                        FakeClient([OUT, inside(1), inside(2), OUT, OUT, OUT]))
+    assert parking_heartbeats(monkeypatch, ctx, ticks=8,
+                              start=ENTRY + timedelta(minutes=1)) == [0, 60, 90, 120, 150, 210]
+
+
+def test_fast_ticks_bracket_the_exit_to_half_a_minute(db_path, tg, ctx, poll_globals, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1), inside(2), OUT, OUT]))
+    start = ENTRY + timedelta(minutes=1)
+
+    assert parking_heartbeats(monkeypatch, ctx, ticks=4, start=start) == [0, 30, 60, 90]
+
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["last_seen_at"] == "2026-08-23 18:49:30"
+    assert row["gone_at"] == "2026-08-23 18:50:00"    # the exit is inside that half minute
+    assert row["exit_time"] == "2026-08-23 18:49"
+    # Two fast ticks from the first miss, so the push lands ~60s after the car left.
+    assert "已出閘 18:49，泊 2 分鐘" in texts(tg)[-1]

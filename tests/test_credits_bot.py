@@ -285,7 +285,6 @@ def test_heartbeat_checks_the_feed_ahead_of_the_flight_gate(db_path, monkeypatch
     on every tick rather than behind the gate."""
     seen = []
     monkeypatch.setattr(bot, "_check_credits", AsyncMock(side_effect=lambda b, c: seen.append(c)))
-    monkeypatch.setattr(bot, "_check_parking", AsyncMock())
     monkeypatch.setattr(bot, "_poll_and_notify", AsyncMock(return_value=60))
     monkeypatch.setenv("NOTIFY_CHAT_ID", str(CHAT))
     bot._next_poll_at = datetime.now() + timedelta(hours=1)   # flight poll gated shut
@@ -296,7 +295,6 @@ def test_heartbeat_checks_the_feed_ahead_of_the_flight_gate(db_path, monkeypatch
 
 def test_heartbeat_survives_a_broken_feed_check(db_path, monkeypatch, caplog):
     monkeypatch.setattr(bot, "_check_credits", AsyncMock(side_effect=RuntimeError("boom")))
-    monkeypatch.setattr(bot, "_check_parking", AsyncMock())
     monkeypatch.setattr(bot, "_poll_and_notify", AsyncMock(return_value=60))
     monkeypatch.setenv("NOTIFY_CHAT_ID", str(CHAT))
     bot._next_poll_at = None

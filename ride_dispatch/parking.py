@@ -41,9 +41,9 @@ ARM_AFTER_HOURS = 2        # ...until this long after; no entry by then = not co
 
 API_TIME = "%Y%m%d%H%M"
 DB_TIME = "%Y-%m-%d %H:%M"
-# Tick times are stored to the second: they are the bounds an exit time is
-# reconstructed between, and rounding them to the minute would throw away the
-# very difference they exist to record.
+# Tick times are stored to the second: an exit time is reconstructed from
+# them and is only ever as accurate as the tick rate, so rounding them to the
+# minute would throw away the very difference they exist to record.
 DB_SECONDS = "%Y-%m-%d %H:%M:%S"
 
 
