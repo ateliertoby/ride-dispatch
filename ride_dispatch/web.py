@@ -9,7 +9,15 @@ import time
 from dataclasses import asdict
 from datetime import date, datetime
 from dotenv import load_dotenv
-from flask import Flask, Response, render_template, request, jsonify, send_file
+from flask import (
+    Flask,
+    Response,
+    render_template,
+    request,
+    jsonify,
+    send_file,
+    send_from_directory,
+)
 from .db import (
     init_db,
     resolve_db_path,
@@ -52,6 +60,7 @@ DB_PATH = resolve_db_path()
 app = Flask(
     __name__,
     template_folder=os.path.join(os.path.dirname(__file__), "..", "templates"),
+    static_folder=os.path.join(os.path.dirname(__file__), "..", "static"),
 )
 
 
@@ -63,6 +72,16 @@ def dashboard():
 @app.route("/settle")
 def settle():
     return render_template("settle.html")
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    # Served by hand rather than from /static because Python's mimetypes table
+    # has no entry for .webmanifest, and browsers reject the manifest unless it
+    # arrives as application/manifest+json.
+    return send_from_directory(
+        app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json"
+    )
 
 
 @app.route("/api/orders")

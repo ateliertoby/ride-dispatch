@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Ground is painted rather than left transparent: iOS composites a
+       transparent home-screen icon onto black, which would drop the ground
+       colour the rest of the mark is tuned against. -->
+  <rect width="512" height="512" fill="#0c0f14"/>
+  <!-- Navigation arrow. Filled and stroked with the same colour so the round
+       linejoin softens every corner without a second path. -->
+  <path d="M256 88 L410 428 L256 336 L102 428 Z"
+        fill="#6ab2ff" stroke="#6ab2ff" stroke-width="28" stroke-linejoin="round"/>
+</svg>
