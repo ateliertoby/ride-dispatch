@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 from .ingest import parse_any, parking_fee, banner_fee
 from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
-from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm
+from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
@@ -62,12 +62,25 @@ uber_state: dict[int, dict] = {}
 # beside the batch; a skipped or expired card drops it.
 pending_statements: dict[int, tuple] = {}
 
+def display_flight_no(flight: str | None) -> str:
+    """A flight number the way the boards and the airline apps write it.
+
+    The stored value is the platform's own, zero-padded to a width neither of
+    them uses.  The padding is a display problem only — matching canonicalises
+    the number for itself — so the database keeps what the platform sent and
+    the messages carry the canonical form.  The 舉牌 preview and caption are
+    the exception: they describe an image that is drawn from the stored value.
+    """
+    return normalize_flight_no(flight) if flight else ""
+
+
 def format_card(order) -> str:
     type_label = service_label(order.service_type)
     time = order.scheduled_time
     if " " in time:
         time = time.split(" ")[1][:5]
-    header = f"{type_label} | {order.flight_number}" if order.flight_number else type_label
+    flight = display_flight_no(order.flight_number)
+    header = f"{type_label} | {flight}" if flight else type_label
     lines = [
         header,
         f"乘客: {order.passenger_name}",
@@ -96,7 +109,12 @@ CHANGE_EMPTY = "—"
 
 
 def format_change_lines(changes: list[tuple[str, str, str]]) -> str:
-    """One "label：old → new" line per changed field."""
+    """One "label：old → new" line per changed field.
+
+    Both sides are quoted as stored, 航班 included: the diff is made from the
+    stored values, so canonicalising them here would render a re-send that
+    only changed the padding as a change from a number to itself.
+    """
     return "\n".join(
         f"{DIFF_LABELS[field]}：{old or CHANGE_EMPTY} → {new or CHANGE_EMPTY}"
         for field, old, new in changes
@@ -736,7 +754,7 @@ async def handle_board(update: Update, context):
     buttons = []
     for o in pickups:
         t = o["scheduled_time"].split(" ")[1][:5] if " " in o["scheduled_time"] else ""
-        flight = o.get("flight_number") or ""
+        flight = display_flight_no(o.get("flight_number"))
         label = f"{t} {o['passenger_name']}"
         if flight:
             label += f" {flight}"
@@ -959,7 +977,7 @@ async def handle_start(update: Update, context):
             return
         t = order["scheduled_time"].split(" ")[1][:5] if " " in order["scheduled_time"] else ""
         type_label = service_label(order["service_type"])
-        flight = order["flight_number"]
+        flight = display_flight_no(order["flight_number"])
         lines = [
             f"{type_label} | {flight}" if flight else type_label,
             f"乘客: {order['passenger_name']}",
@@ -1392,7 +1410,7 @@ def _entry_message(session: dict, status: ParkingStatus, now: datetime) -> str:
         o = get_order_by_id(DB_PATH, session["order_id"])
         if o:
             who = o.get("passenger_name") or ""
-            flight = o.get("flight_number") or ""
+            flight = display_flight_no(o.get("flight_number"))
             lines.append(f"乘客: {who} | {flight}" if flight else f"乘客: {who}")
     return "\n".join(lines)
 
@@ -1794,7 +1812,7 @@ def collect_contact_lines(order_data: dict) -> list[tuple[str, str]]:
 
 def _order_lines(order_data: dict, arrival_hhmm: str | None = None) -> str:
     lines = ""
-    flight = order_data.get("flight_number")
+    flight = display_flight_no(order_data.get("flight_number"))
     if flight:
         lines += f"\n航班: {flight}"
     if order_data.get("passenger_name"):
@@ -1831,6 +1849,8 @@ async def _prompt_whiteboard(bot, chat_id: int, order_id: str, order_data: dict)
     name = sanitize_board_name(order_data.get("passenger_name") or "")
     if name:
         lines.append(name)
+    # Quoted as stored, unlike every other message: the preview is only worth
+    # reading if it is the string the board will be drawn from.
     flight = order_data.get("flight_number") or ""
     if flight:
         lines.append(flight)
@@ -1880,6 +1900,8 @@ async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
                            fail_text: str | None = None):
     """Fire-and-forget: generate whiteboard image and send to chat."""
     name = sanitize_board_name(order_data.get("passenger_name") or "")
+    # Stored form throughout: it is drawn onto the image, keys the cache, and
+    # the caption has to name what the photo above it says.
     flight = order_data.get("flight_number", "")
     if fail_text is None:
         fail_text = f"舉牌相自動生成失敗 #{order_id[-4:]}，用 /board 重試。"

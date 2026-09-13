@@ -874,6 +874,16 @@ def test_advisory_push_names_the_eta_and_flags_it_unconfirmed(bot_db, tg):
     assert get_orders_by_date(bot_db, "2026-07-13")[0]["reminders_sent"] == "etapass"
 
 
+def test_advisory_push_drops_the_flight_numbers_padding(bot_db, tg):
+    """The HKIA boards the driver is reading write UO553, so the push does too
+    — while the row keeps the number as the platform sent it."""
+    save_order(bot_db, make_order(flight_number="UO0553"), telegram_msg_id=1)
+    update_flight_info(bot_db, "TEST001", "11:45", "11:50", None, "est")
+    asyncio.run(bot._check_eta_passed_advisories(tg, 123, NOW))
+    assert "航班: UO553" in sent_text(tg)
+    assert get_orders_by_date(bot_db, "2026-07-13")[0]["flight_number"] == "UO0553"
+
+
 def test_advisory_push_sent_once(bot_db, tg):
     est_pickup(bot_db)
     asyncio.run(bot._check_eta_passed_advisories(tg, 123, NOW))

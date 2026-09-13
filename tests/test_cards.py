@@ -1,4 +1,6 @@
-from ride_dispatch.bot import format_card, _order_lines, collect_contact_lines
+from ride_dispatch.bot import (
+    format_card, format_change_lines, _order_lines, collect_contact_lines,
+)
 from ride_dispatch.parser import Order
 
 
@@ -219,3 +221,22 @@ def test_order_lines_renders_all_contacts():
     assert "\n境外: +393330000111" in text
     assert "\nWhatsApp: +6590000001" in text
     assert "\n更多: +85291000002" in text
+
+
+# ---- flight number as it is displayed ----
+
+
+def test_card_header_drops_the_flight_numbers_padding():
+    card = format_card(make_order(flight_number="UO0553"))
+    assert card.split("\n")[0] == "接機 | UO553"
+
+
+def test_order_lines_drop_the_flight_numbers_padding():
+    text = _order_lines({**_pickup_dict(None), "flight_number": "UO0553"})
+    assert "\n航班: UO553" in text
+
+
+def test_change_lines_keep_both_sides_as_the_platform_sent_them():
+    """A re-send that only re-padded the number is still a change, and saying
+    so needs both sides as they are stored."""
+    assert format_change_lines([("flight_number", "UO0553", "UO553")]) == "航班：UO0553 → UO553"
