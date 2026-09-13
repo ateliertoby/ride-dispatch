@@ -45,7 +45,7 @@ from .db import (
     DIFF_LABELS,
 )
 from .credits import CENT, guess_unpaid, offer, propose_batch, propose_credit
-from .flight import depart_hhmm, exit_urgency, row_time
+from .flight import depart_hhmm, exit_urgency, normalize_flight_no, row_time
 from .ingest import parse_any, parking_fee, banner_fee
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
@@ -84,11 +84,25 @@ def manifest():
     )
 
 
+def _display_flight(order: dict) -> dict:
+    """The order with its flight number in the form the operator reads elsewhere.
+
+    The stored value is the platform's own, zero-padded to a width neither the
+    HKIA boards nor the airline apps use.  The padding is a display problem
+    only — matching canonicalises the number for itself — so the database keeps
+    what the platform sent and the page shows the canonical form.
+    """
+    if order.get("flight_number"):
+        order["flight_number"] = normalize_flight_no(order["flight_number"])
+    return order
+
+
 @app.route("/api/orders")
 def api_orders():
     date_str = request.args.get("date", date.today().isoformat())
     orders = get_orders_by_date(DB_PATH, date_str)
     for o in orders:
+        _display_flight(o)
         # Sort key and payload field are the same value: the dashboard places
         # its NOW line against it, so re-deriving it there could disagree.
         o["row_time"] = row_time(o)
@@ -141,7 +155,7 @@ def api_parse_order():
     row = get_order_by_id(DB_PATH, order.order_id)
     changes = diff_order_against_row(order, row, source) if row else []
     return jsonify({
-        "order": asdict(order),
+        "order": _display_flight(asdict(order)),
         "source": source,
         "parking_fee": parking_fee(order, source),
         "banner_fee": banner_fee(order.additional_services),
@@ -262,7 +276,7 @@ def api_order(order_id):
     order = get_order_by_id(DB_PATH, order_id)
     if not order:
         return jsonify({"error": "搵唔到單"}), 404
-    return jsonify(order)
+    return jsonify(_display_flight(order))
 
 
 @app.patch("/api/orders/<order_id>")
@@ -309,6 +323,7 @@ def _decorate_batch(batch: dict) -> dict:
     the guesses at which legs a short payment left out.
     """
     for o in batch["orders"]:
+        _display_flight(o)
         o["platform_amount"] = leg_amount(batch, o)
     batch["unpaid_guesses"] = guess_unpaid(batch)
     return batch
@@ -347,6 +362,8 @@ def api_settle():
     if platform not in PLATFORMS:
         return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
     data = get_settle_month(DB_PATH, month, platform)
+    for o in data["orders"]:
+        _display_flight(o)
     for batch in data["settlements"]:
         # The page only asks whether a screenshot exists; the file name it is
         # stored under is not something the client can do anything with.

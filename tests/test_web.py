@@ -475,6 +475,51 @@ def test_api_orders_carry_row_time(client):
     assert rows[0]["row_time"] == "2026-07-01 14:30:00"
 
 
+# ---- flight number as it is displayed ----
+
+PADDED_FLIGHT_MSG = PASTE_MSG.replace("航班号: CX477", "航班号: UO0553")
+NO_FLIGHT_MSG = PASTE_MSG.replace("航班号: CX477\n", "")
+
+
+def test_api_orders_drop_the_platforms_flight_number_padding(client):
+    """The boards and the airline apps the operator reads next to the page
+    write UO553, so the page does too — while the row keeps what came in."""
+    client.post("/api/orders", json={"type": "paste", "text": PADDED_FLIGHT_MSG, "price": 500})
+    rows = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    assert rows[0]["flight_number"] == "UO553"
+    assert get_order_by_id(web.DB_PATH, "1128000000000099")["flight_number"] == "UO0553"
+
+
+def test_api_orders_leave_an_empty_flight_number_empty(client):
+    client.post("/api/orders", json={"type": "paste", "text": NO_FLIGHT_MSG, "price": 500})
+    rows = client.get("/api/orders?date=2026-07-22").get_json()["orders"]
+    assert rows[0]["flight_number"] == ""
+
+
+def test_one_order_drops_the_flight_number_padding(client):
+    client.post("/api/orders", json={"type": "paste", "text": PADDED_FLIGHT_MSG, "price": 500})
+    order = client.get("/api/orders/1128000000000099").get_json()
+    assert order["flight_number"] == "UO553"
+
+
+def test_parse_preview_drops_the_flight_number_padding(client):
+    data = client.post("/api/orders/parse", json={"text": PADDED_FLIGHT_MSG}).get_json()
+    assert data["order"]["flight_number"] == "UO553"
+
+
+def test_settle_drops_the_flight_number_padding_in_both_lists(client):
+    """The day sheet reads the month's orders and the batch sheet its own
+    members, so the number is normalised on the way out of each."""
+    from ride_dispatch.db import create_settlement
+    client.post("/api/orders", json={"type": "paste", "text": PADDED_FLIGHT_MSG, "price": 500})
+    sid = create_settlement(web.DB_PATH, "ride", ["1128000000000099"], 500.0, "2026-07-23",
+                            now=datetime(2026, 7, 23, 9, 0))
+    data = client.get("/api/settle?month=2026-07&platform=ride").get_json()
+    assert [o["flight_number"] for o in data["orders"]] == ["UO553"]
+    batch = next(b for b in data["settlements"] if b["id"] == sid)
+    assert [o["flight_number"] for o in batch["orders"]] == ["UO553"]
+
+
 # ---- pages ----
 
 
