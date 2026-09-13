@@ -68,8 +68,7 @@ def display_flight_no(flight: str | None) -> str:
     The stored value is the platform's own, zero-padded to a width neither of
     them uses.  The padding is a display problem only — matching canonicalises
     the number for itself — so the database keeps what the platform sent and
-    the messages carry the canonical form.  The 舉牌 preview and caption are
-    the exception: they describe an image that is drawn from the stored value.
+    everything the operator and the passenger read carries this form.
     """
     return normalize_flight_no(flight) if flight else ""
 
@@ -1849,9 +1848,9 @@ async def _prompt_whiteboard(bot, chat_id: int, order_id: str, order_data: dict)
     name = sanitize_board_name(order_data.get("passenger_name") or "")
     if name:
         lines.append(name)
-    # Quoted as stored, unlike every other message: the preview is only worth
-    # reading if it is the string the board will be drawn from.
-    flight = order_data.get("flight_number") or ""
+    # The preview is only worth reading if it is the string the board will be
+    # drawn from, so it takes the same form _send_whiteboard writes.
+    flight = display_flight_no(order_data.get("flight_number"))
     if flight:
         lines.append(flight)
     await bot.send_message(
@@ -1900,9 +1899,9 @@ async def _send_whiteboard(bot, chat_id: int, order_id: str, order_data: dict,
                            fail_text: str | None = None):
     """Fire-and-forget: generate whiteboard image and send to chat."""
     name = sanitize_board_name(order_data.get("passenger_name") or "")
-    # Stored form throughout: it is drawn onto the image, keys the cache, and
-    # the caption has to name what the photo above it says.
-    flight = order_data.get("flight_number", "")
+    # One string for the whole chain: it is drawn onto the board, keys the
+    # cache, and the caption has to name what the photo above it says.
+    flight = display_flight_no(order_data.get("flight_number"))
     if fail_text is None:
         fail_text = f"舉牌相自動生成失敗 #{order_id[-4:]}，用 /board 重試。"
     log = logging.getLogger("whiteboard")

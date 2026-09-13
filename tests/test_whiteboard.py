@@ -426,7 +426,7 @@ def test_generate_5xx_retries_then_succeeds():
 
 
 def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=False,
-                             passenger_name="PIYA DEJKONG"):
+                             passenger_name="PIYA DEJKONG", flight_number="TG607"):
     from ride_dispatch.db import init_db, save_order, mark_reminder_sent
     from ride_dispatch.parser import Order
 
@@ -437,7 +437,7 @@ def _make_test_db_with_order(order_id, additional_services="", mark_whiteboard=F
         order_id=order_id, service_type="接机", vehicle_type="经济5座",
         passenger_name=passenger_name, scheduled_time="2026-07-13 14:00:00",
         passenger_phone="66 812345678", overseas_phone="",
-        flight_number="TG607", pickup="香港国际机场 T1", dropoff="尖沙咀",
+        flight_number=flight_number, pickup="香港国际机场 T1", dropoff="尖沙咀",
         distance_km=30, notes="", driver_notes="",
         additional_services=additional_services, passenger_exit_minutes=30,
         third_party_contact="", more_contacts="", raw_message="raw",
@@ -782,6 +782,59 @@ def test_cache_key_uses_sanitized_name():
     with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
         _run_send(bot, "WB035",
                   {"passenger_name": "PIYA DEJKONG(重要贵宾)", "flight_number": "TG607"})
+
+    gen.assert_not_called()
+    assert bot.send_photo.call_args[1]["photo"] == b"cached"
+
+
+# ---- flight number as it is displayed ----
+
+
+def test_prompt_previews_the_flight_number_without_the_platforms_padding():
+    """The preview is read against the boards, and it has to match the board
+    the tap will pay for."""
+    db = _make_test_db_with_order("WB040", additional_services="举牌接机",
+                                  flight_number="UO0553")
+    try:
+        bot = AsyncMock()
+        info = {"eta": "14:10", "gate": None, "status": "landed", "hall": "A"}
+
+        with patch("ride_dispatch.bot.DB_PATH", db), \
+             patch("ride_dispatch.whiteboard.FAL_KEY", "test-key"):
+            from ride_dispatch.bot import _notify_status_change
+            asyncio.run(_notify_status_change(bot, 123, "WB040", info, None, "landed"))
+
+        text = bot.send_message.call_args_list[1][1]["text"]
+        assert "UO553" in text
+        assert "UO0553" not in text
+    finally:
+        os.unlink(db)
+
+
+def test_board_and_caption_carry_the_flight_number_without_the_padding():
+    """generate() builds the prompt from what it is handed, so the argument is
+    what gets written on the board; the caption has to say the same thing."""
+    bot = AsyncMock()
+    gen = AsyncMock(return_value=b"img")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB041", {"passenger_name": "PIYA DEJKONG",
+                                 "flight_number": "UO0553"})
+
+    gen.assert_awaited_once_with("PIYA DEJKONG", "UO553")
+    assert bot.send_photo.call_args[1]["caption"] == "舉牌 | PIYA DEJKONG UO553"
+
+
+def test_cache_hit_across_a_padding_only_change():
+    """The digest is the text on the board, so a re-send that only re-padded
+    the number describes the same board and must not be paid for twice."""
+    cache_store("WB042", "PIYA DEJKONG", "UO553", b"cached")
+    bot = AsyncMock()
+    gen = AsyncMock(return_value=b"fresh")
+
+    with patch("ride_dispatch.bot.generate_whiteboard", new=gen):
+        _run_send(bot, "WB042", {"passenger_name": "PIYA DEJKONG",
+                                 "flight_number": "UO0553"})
 
     gen.assert_not_called()
     assert bot.send_photo.call_args[1]["photo"] == b"cached"
