@@ -131,6 +131,15 @@ def car_park_point(location: str | None, location_name: str | None) -> str | Non
     return None
 
 
+# Only Car Park 4 gives the once-a-day free half hour; Car Park 1 charges from
+# the moment the car enters. A car park not named here is assumed to charge.
+ALLOWANCE_CAR_PARKS = frozenset({"P4"})
+
+
+def has_allowance(point: str | None) -> bool:
+    return point in ALLOWANCE_CAR_PARKS
+
+
 def hourly_fee(point: str | None) -> float | None:
     """Published first-hour tariff of a car park, None where it is not known.
 
@@ -159,7 +168,7 @@ def pay_plan(entry: datetime, now: datetime) -> tuple[int, datetime]:
     return hours, entry + timedelta(hours=hours)
 
 
-def classify(paid: bool, stayed: int, fee: float | None = None) -> str:
+def classify(paid: bool, stayed: int, fee: float | None = None, allowance: bool = True) -> str:
     """What a finished visit cost, from HKIA's own answer where there is one.
 
     While the car is inside, every status reply carries the fee for leaving at
@@ -173,6 +182,10 @@ def classify(paid: bool, stayed: int, fee: float | None = None) -> str:
         return "paid"
     if fee is not None:
         return "free" if fee <= 0 else "gate"
+    # Without a reading, only a car park with the free half hour can have
+    # opened its gate for nothing.
+    if not allowance:
+        return "gate"
     return "free" if stayed <= FREE_MINUTES else "gate"
 
 

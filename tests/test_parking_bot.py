@@ -957,18 +957,33 @@ def test_unrecognised_car_park_keeps_hkias_name(db_path, tg, monkeypatch):
     for m in (1, 30, 31, 32):
         run(tg, ENTRY + timedelta(minutes=m))
     t = texts(tg)
-    # No tariff known for it, so the entry preview names no price.
-    assert "免費已用，泊 1 粒鐘 到 19:48" in t[0]
+    # Neither a free half hour nor a tariff is known for it.
+    assert "冇免費，泊 1 粒鐘 到 19:48" in t[0]
     o = get_order_by_id(db_path, "O1")
     assert o["pickup_point"] == "T2 Car Park" and o["parking_fee"] == 40
 
 
-def test_entry_preview_uses_the_car_parks_tariff(db_path, tg, monkeypatch):
+def test_car_park_1_charges_from_entry_even_with_the_allowance_unused(db_path, tg, monkeypatch):
     landed_order(db_path)
-    from ride_dispatch.db import open_parking_session, close_parking_session
-    sid = open_parking_session(db_path, pv_nr=1, plate="AB1234", location="P4O", location_name="Car Park 4",
-                               entry_time="2026-08-23 13:36", order_id=None)
-    close_parking_session(db_path, sid, exit_time="2026-08-23 13:50", free=1)
     monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(1)]))
     run(tg, ENTRY + timedelta(minutes=1))
-    assert "免費已用，泊 1 粒鐘 $35 到 19:48" in texts(tg)[0]
+    t = texts(tg)[0]
+    assert "冇免費，泊 1 粒鐘 $35 到 19:48" in t and "免費可用" not in t
+
+
+def test_car_park_1_visit_without_a_reading_is_never_free(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(10, fee=None), OUT, OUT]))
+    for m in (10, 11, 12):
+        run(tg, ENTRY + timedelta(minutes=m))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["free"] == 0
+    # The allowance is still there for Car Park 4.
+    assert bot._allowance_line(ENTRY + timedelta(minutes=20)) == "停車場 免費可用"
+
+
+def test_allowance_line_for_a_pickup_planned_at_car_park_1(db_path):
+    now = datetime(2026, 8, 23, 19, 0)
+    assert bot._allowance_line(now, "P1") == "P1 冇免費，入閘即收錢"
+    assert bot._allowance_line(now, "P4") == "停車場 免費可用"
+    assert bot._allowance_line(now, "富豪") == "停車場 免費可用"

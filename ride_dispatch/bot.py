@@ -23,7 +23,7 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
                       db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS,
-                      car_park_point, hourly_fee)
+                      car_park_point, hourly_fee, has_allowance)
 from .phone import format_phone_e164
 from .service import expected_of, is_flight_pickup, label as service_label
 from . import statement
@@ -1332,7 +1332,7 @@ async def _check_eta_passed_advisories(bot, chat_id: int, now: datetime):
             # Same decision the landing push puts to the driver: wait outside
             # for the free half hour, or go in.
             if _get_parking_client() is not None:
-                msg += "\n" + _allowance_line(now)
+                msg += "\n" + _allowance_line(now, order.get("pickup_point"))
             await bot.send_message(chat_id=chat_id, text=msg)
             mark_reminder_sent(DB_PATH, order['order_id'], 'etapass')
             logger.info("eta-passed advisory sent for %s", order['order_id'][-4:])
@@ -1389,7 +1389,11 @@ def _when(dt: datetime, now: datetime, day_always: bool = False) -> str:
     return hhmm
 
 
-def _allowance_line(now: datetime) -> str:
+def _allowance_line(now: datetime, point: str | None = None) -> str:
+    # The free half hour is Car Park 4's alone: a pickup planned at another car
+    # park is told it pays from entry instead of being offered it.
+    if point and point.startswith("P") and not has_allowance(point):
+        return f"{point} 冇免費，入閘即收錢"
     entries = _free_entries(now)
     if free_available(entries, now):
         return "停車場 免費可用"
@@ -1401,13 +1405,15 @@ def _allowance_line(now: datetime) -> str:
 def _entry_message(session: dict, status: ParkingStatus, now: datetime) -> str:
     entry = _session_entry(session)
     lines = [f"已入 {status.location_name or status.location} {entry.strftime('%H:%M')}"]
-    if free_available(_free_entries(now), now):
+    point = car_park_point(status.location, status.location_name)
+    if has_allowance(point) and free_available(_free_entries(now), now):
         lines.append(f"免費可用，{(entry + timedelta(minutes=FREE_MINUTES)).strftime('%H:%M')} 前出閘")
     else:
         hours, exit_at = pay_plan(entry, now)
-        rate = hourly_fee(car_park_point(status.location, status.location_name))
+        rate = hourly_fee(point)
         cost = f" ${rate * hours:g}" if rate is not None else ""
-        lines.append(f"免費已用，泊 {hours} 粒鐘{cost} 到 {exit_at.strftime('%H:%M')}")
+        head = "免費已用" if has_allowance(point) else "冇免費"
+        lines.append(f"{head}，泊 {hours} 粒鐘{cost} 到 {exit_at.strftime('%H:%M')}")
     if session.get("order_id"):
         o = get_order_by_id(DB_PATH, session["order_id"])
         if o:
@@ -1493,7 +1499,7 @@ def _history_line(s: dict) -> str:
     fee = s.get("last_fee")
     # Re-derived rather than read off `free`, which a manual verdict overwrites:
     # the line has to be able to show the two disagreeing.
-    derived = classify(bool(s.get("paid")), stayed, fee)
+    derived = classify(bool(s.get("paid")), stayed, fee, _session_allowance(s))
     line = f"{stamp} 泊 {stayed} 分鐘 {_KIND_WORDS[derived]}"
     if fee is not None:
         line += f" HKIA${fee:g}"
@@ -1550,6 +1556,10 @@ def _stayed_minutes(session: dict, gone_at: datetime) -> int:
     return max(0, int((end - _session_entry(session)).total_seconds() // 60))
 
 
+def _session_allowance(session: dict) -> bool:
+    return has_allowance(car_park_point(session.get("location"), session.get("location_name")))
+
+
 def _visit_point(session: dict) -> str | None:
     """Where the car waited, in the order's terms; HKIA's own name for a car
     park we have no name for, rather than a guess."""
@@ -1584,7 +1594,7 @@ async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now:
     # bound the tick gave.
     exit_at = _exit_moment(session, gone_at)
     fee = session.get("last_fee")
-    kind = classify(bool(session.get("paid")), stayed, fee)
+    kind = classify(bool(session.get("paid")), stayed, fee, _session_allowance(session))
     close_parking_session(DB_PATH, session["id"], db_time(exit_at), 1 if kind == "free" else 0,
                           gone_at=db_seconds(gone_at))
     if kind == "paid":
@@ -1987,7 +1997,7 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
         # The driver decides here whether to wait outside for the free half
         # hour or go in and rest, so the verdict rides on this message.
         if _get_parking_client() is not None:
-            msg += "\n" + _allowance_line(datetime.now())
+            msg += "\n" + _allowance_line(datetime.now(), (order_data or {}).get("pickup_point"))
         await bot.send_message(chat_id=chat_id, text=msg)
         # Offer the whiteboard sign on landing. The tag is written here, before
         # any image exists, so the landed→gate double transition cannot prompt
@@ -2004,7 +2014,7 @@ async def _notify_status_change(bot, chat_id: int, order_id: str, info: dict, ol
         if order_data:
             msg += _order_lines(order_data, order_data.get("flight_eta"))
         if _get_parking_client() is not None:
-            msg += "\n" + _allowance_line(datetime.now())
+            msg += "\n" + _allowance_line(datetime.now(), (order_data or {}).get("pickup_point"))
         await bot.send_message(chat_id=chat_id, text=msg)
     if new == "cancelled" and old != "cancelled":
         msg = "航班取消"
