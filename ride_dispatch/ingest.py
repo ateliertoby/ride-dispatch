@@ -3,6 +3,7 @@
 Single source of truth for bot (Telegram) and web (paste) entry points.
 """
 from .parser import Order, parse_order, parse_feizhu, parse_tongcheng, parse_space, parse_fenxiao
+from .service import is_flight_pickup
 
 
 def parse_any(text: str) -> tuple[Order, str]:
@@ -61,13 +62,32 @@ def parse_any(text: str) -> tuple[Order, str]:
     return order, source
 
 
-def parking_fee(order: Order, source: str) -> float:
+# Where a flight pickup meets the passenger, and what waiting there costs for
+# the first hour. 富豪 is the Regal Airport Hotel: outside HKIA's car parks, so
+# it is free and never appears as a car park visit. A stay past the first hour
+# is priced by HKIA and written back when the visit closes.
+PICKUP_POINTS = {"P1": 35.0, "P4": 32.0, "富豪": 0.0}
+DEFAULT_CAR_PARK = "P4"
+
+
+def _must_park(order: Order, source: str) -> bool:
     # 举牌 means meeting the passenger inside the terminal, so the driver enters
     # the car park whatever the channel. Pickups from 携程 always park too.
-    return 32.0 if (
+    return (
         (source == "携程" and order.service_type == "接机")
         or "举牌" in (order.additional_services or "")
-    ) else 0.0
+    )
+
+
+def pickup_point(order: Order, source: str) -> str | None:
+    """The planned meeting point of a flight pickup; None for any other order."""
+    if not is_flight_pickup(order.service_type):
+        return None
+    return DEFAULT_CAR_PARK if _must_park(order, source) else "富豪"
+
+
+def parking_fee(order: Order, source: str) -> float:
+    return PICKUP_POINTS[DEFAULT_CAR_PARK] if _must_park(order, source) else 0.0
 
 
 def banner_fee(additional_services: str | None) -> float:

@@ -133,6 +133,30 @@ def test_patch_rejects_bad_input(client):
 
 def test_patch_unknown_order_404(client):
     assert client.patch("/api/orders/NOPE", json={"price": 1}).status_code == 404
+
+
+def test_patch_pickup_point_sets_its_parking_fee(client):
+    seed_order()
+    assert client.patch("/api/orders/Q1", json={"pickup_point": "P1"}).status_code == 200
+    row = get_order_by_id(web.DB_PATH, "Q1")
+    assert row["pickup_point"] == "P1" and row["parking_fee"] == 35
+    assert client.patch("/api/orders/Q1", json={"pickup_point": "富豪"}).status_code == 200
+    row = get_order_by_id(web.DB_PATH, "Q1")
+    assert row["pickup_point"] == "富豪" and row["parking_fee"] == 0
+
+
+def test_patch_pickup_point_with_an_explicit_fee_keeps_the_fee(client):
+    seed_order()
+    res = client.patch("/api/orders/Q1", json={"pickup_point": "P1", "parking_fee": 70})
+    assert res.status_code == 200
+    row = get_order_by_id(web.DB_PATH, "Q1")
+    assert row["pickup_point"] == "P1" and row["parking_fee"] == 70
+
+
+def test_patch_rejects_an_unknown_pickup_point(client):
+    seed_order()
+    assert client.patch("/api/orders/Q1", json={"pickup_point": "P9"}).status_code == 400
+    assert get_order_by_id(web.DB_PATH, "Q1")["pickup_point"] is None
     assert client.patch("/api/orders/NOPE", json={"time": "10:00"}).status_code == 404
 
 

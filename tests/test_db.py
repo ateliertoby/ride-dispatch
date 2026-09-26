@@ -858,3 +858,25 @@ def test_get_settle_month_empty(db_path):
     assert data["settlements"] == []
     assert data["counts"] == {"ride": 0, "didi": 0, "uber": 0, "foodpanda": 0}
     assert data["totals"] == {"unsettled": 0, "awaiting": 0}
+
+
+def test_entry_plans_the_pickup_point(db_path):
+    from ride_dispatch.db import get_order_by_id
+    save_order(db_path, make_order(), telegram_msg_id=1, parking=32.0, source="携程")
+    save_order(db_path, make_order(order_id="TEST002"), telegram_msg_id=2, source="同程")
+    save_order(db_path, make_order(order_id="TEST003", service_type="送机"), telegram_msg_id=3,
+               source="携程")
+    assert get_order_by_id(db_path, "TEST001")["pickup_point"] == "P4"
+    assert get_order_by_id(db_path, "TEST002")["pickup_point"] == "富豪"
+    assert get_order_by_id(db_path, "TEST003")["pickup_point"] is None
+
+
+def test_update_from_message_keeps_the_pickup_point(db_path):
+    from ride_dispatch.db import get_order_by_id, update_order_fields, update_order_from_message
+    seed_active(db_path)
+    update_order_fields(db_path, "TEST001", {"pickup_point": "P1", "parking_fee": 35.0})
+    # The re-sent message would plan 富豪 on its own (同程, no 举牌).
+    assert update_order_from_message(db_path, make_order(dropoff="中環"),
+                                     telegram_msg_id=2, source="同程") == ["dropoff", "source"]
+    row = get_order_by_id(db_path, "TEST001")
+    assert row["pickup_point"] == "P1" and row["parking_fee"] == 35.0

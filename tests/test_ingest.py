@@ -1,4 +1,4 @@
-from ride_dispatch.ingest import parse_any, parking_fee, banner_fee
+from ride_dispatch.ingest import parse_any, parking_fee, banner_fee, pickup_point, PICKUP_POINTS
 
 XIECHENG_MSG = """服务类型: 接机
 接单车型: 经济5座
@@ -312,3 +312,22 @@ def test_parse_any_fenxiao_source_fallback():
 def test_fenxiao_no_parking_fee():
     order, source = parse_any(FENXIAO_MSG)
     assert parking_fee(order, source) == 0.0
+
+
+def test_pickup_point_plans_the_car_park_the_fee_rule_assumes():
+    order, source = parse_any(XIECHENG_MSG)
+    assert pickup_point(order, source) == "P4"
+    banner, bsource = parse_any(TONGCHENG_BANNER_MSG)
+    assert pickup_point(banner, bsource) == "P4"
+    # No terminal meet, so the passenger walks to the hotel.
+    plain, psource = parse_any(TONGCHENG_BANNER_MSG.rsplit("\n", 1)[0])
+    assert pickup_point(plain, psource) == "富豪"
+    for o, src in ((order, source), (banner, bsource), (plain, psource)):
+        assert parking_fee(o, src) == PICKUP_POINTS[pickup_point(o, src)]
+
+
+def test_pickup_point_is_only_for_flight_pickups():
+    dropoff, dsource = parse_any(XIECHENG_DROPOFF_MSG)
+    assert pickup_point(dropoff, dsource) is None
+    station, ssource = parse_any(JIEZHAN_MSG)
+    assert pickup_point(station, ssource) is None

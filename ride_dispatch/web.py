@@ -46,7 +46,7 @@ from .db import (
 )
 from .credits import CENT, guess_unpaid, offer, propose_batch, propose_credit
 from .flight import depart_hhmm, exit_urgency, normalize_flight_no, row_time
-from .ingest import parse_any, parking_fee, banner_fee
+from .ingest import parse_any, parking_fee, banner_fee, PICKUP_POINTS
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
 from . import statement
@@ -283,6 +283,15 @@ def api_order(order_id):
 def api_update_order(order_id):
     body = request.get_json(silent=True) or {}
     fields = {}
+    if "pickup_point" in body:
+        point = body["pickup_point"]
+        if point not in PICKUP_POINTS:
+            return jsonify({"error": f"pickup_point must be one of {sorted(PICKUP_POINTS)}"}), 400
+        # Choosing where to meet sets that place's first-hour charge; a stay
+        # that costs more is edited afterwards like any other amount, and an
+        # explicit parking_fee in the same body wins.
+        fields["pickup_point"] = point
+        fields["parking_fee"] = PICKUP_POINTS[point]
     for key in ("price", "tunnel_fee", "parking_fee", "banner_fee"):
         if key in body:
             amount, merr = _parse_money(body[key], key)

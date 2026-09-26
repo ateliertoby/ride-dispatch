@@ -193,6 +193,18 @@
     font-size: 14px; font-weight: 650; padding: 9px 16px;
   }
   .fr-waive:active { background: var(--key-press); }
+  .pp-row {
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line); padding: 10px 2px;
+  }
+  .pp-row .fk { color: var(--text-2); flex: 1; font-size: 16px; }
+  .pp-opt {
+    flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
+    background: var(--key-bg); color: var(--text-2);
+    font-size: 14px; font-weight: 650; padding: 9px 14px;
+  }
+  .pp-opt:active { background: var(--key-press); }
+  .pp-opt.on { background: var(--blue-bg); color: var(--blue); }
 
   .cancel-link {
     display: block; margin: 4px auto 0; padding: 10px 18px;
@@ -791,6 +803,19 @@ function detailView(sheet) {
     '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
   ).join('') + '</div>';
 
+  // Where a flight pickup meets the passenger. Choosing one also sets that
+  // place's first-hour parking charge (server-side); a car park visit linked to
+  // the order later overwrites both with what HKIA saw.
+  let pointRow = '';
+  if (p === 'ride' && isPickup) {
+    const cur = o.pickup_point || '';
+    const opts = PICKUP_POINTS.map(pt =>
+      '<button class="pp-opt' + (pt === cur ? ' on' : '') + '" onclick="setPickupPoint(\'' + pt + '\')">' + pt + '</button>');
+    // A car park HKIA reported that is not one of ours shows as it was named.
+    if (cur && !PICKUP_POINTS.includes(cur)) opts.push('<span class="pp-opt on">' + esc(cur) + '</span>');
+    pointRow = '<div class="pp-row"><span class="fk">上車點</span>' + opts.join('') + '</div>';
+  }
+
   const fields = editableFields(o).map(([key, fLabel]) => {
     let value, unset = false;
     if (key === 'time') {
@@ -807,11 +832,12 @@ function detailView(sheet) {
     // Waiving the parking fee is the everyday action (the pickup default often
     // turns out not to be charged), so it gets a one-tap pill; any other
     // amount is rare and goes through the numpad as usual.
+    const lead = key === 'parking_fee' ? pointRow : '';
     if (key === 'parking_fee' && o.parking_fee > 0) {
-      return '<div class="fr-split">' + row +
+      return lead + '<div class="fr-split">' + row +
         '<button class="fr-waive" onclick="waiveParking()">免</button></div>';
     }
-    return row;
+    return lead + row;
   }).join('');
 
   sheet.insertAdjacentHTML('beforeend',
@@ -845,6 +871,14 @@ function editField(key) {
 }
 
 function waiveParking() { patchOrder({ parking_fee: 0 }); }
+
+const PICKUP_POINTS = ['P1', 'P4', '富豪'];
+
+function setPickupPoint(pt) {
+  const o = orders.find(x => x.order_id === sheetOrderId);
+  if (!o || o.pickup_point === pt) return;
+  patchOrder({ pickup_point: pt });
+}
 
 // Returns false on failure so the numpad resets for retry.
 async function patchOrder(body) {

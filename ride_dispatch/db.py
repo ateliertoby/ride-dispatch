@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
-from .ingest import banner_fee
+from .ingest import banner_fee, pickup_point
 from .service import PLATFORMS, expected_of, needs_departure_reminder, platform_of
 from .statement import leg_amount
 
@@ -79,6 +79,10 @@ def init_db(db_path: str):
             "reminders_sent TEXT DEFAULT ''",
             "settlement_id INTEGER",
             "unpaid INTEGER DEFAULT 0",
+            # P1 / P4 / 富豪 for a flight pickup, NULL for anything else.
+            # Entry plans it, the operator can move it, and a car park visit
+            # linked to the order overwrites it with where the car really was.
+            "pickup_point TEXT",
         ]:
             try:
                 conn.execute(f"ALTER TABLE orders ADD COLUMN {col}")
@@ -227,7 +231,7 @@ _ORDER_COLS = (
     "pickup", "dropoff", "distance_km", "notes", "driver_notes",
     "additional_services", "passenger_exit_minutes",
     "third_party_contact", "more_contacts", "raw_message", "telegram_msg_id",
-    "parking_fee", "banner_fee", "source",
+    "parking_fee", "banner_fee", "source", "pickup_point",
 )
 
 _INSERT_SQL = (
@@ -263,6 +267,7 @@ def _order_params(order: Order, telegram_msg_id: int | None, parking: float, sou
         order.additional_services, order.passenger_exit_minutes,
         order.third_party_contact, order.more_contacts, order.raw_message,
         telegram_msg_id, parking, banner_fee(order.additional_services), source,
+        pickup_point(order, source),
     )
 
 
@@ -325,7 +330,8 @@ def update_cost(db_path: str, order_id: str, cost_type: str, amount: float):
         conn.commit()
 
 
-UPDATABLE_FIELDS = {"price", "tunnel_fee", "parking_fee", "banner_fee", "scheduled_time", "status"}
+UPDATABLE_FIELDS = {"price", "tunnel_fee", "parking_fee", "banner_fee", "scheduled_time", "status",
+                    "pickup_point"}
 
 # A settled batch's expected_amount is frozen at creation, so the fields it was
 # summed from — and cancellation, which would remove the order from the sum
@@ -365,9 +371,11 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
 # detail, so the fields the message carries follow the message and the values
 # the operator typed in are kept.  parking_fee is therefore absent from the
 # overwrite even though entry derives it: it is money the operator can edit
-# afterwards (update_cost), same as price.  banner_fee has no such edit worth
-# defending — it is a pure function of 附加服务 — so it rides along with the
-# rest and is re-derived from the new message.
+# afterwards (update_cost), same as price.  pickup_point stays out for the same
+# reason: the operator or a car park visit may have moved it since entry.
+# banner_fee has no such edit worth defending — it is a pure function of
+# 附加服务 — so it rides along with the rest and is re-derived from the new
+# message.
 #
 # A re-send does not have to repeat everything the first message carried: the
 # contact numbers in particular are often dropped from it.  An empty field
@@ -375,7 +383,7 @@ def update_order_fields(db_path: str, order_id: str, fields: dict) -> bool:
 # and out of the write, so the stored value survives.  raw_message and
 # telegram_msg_id are the exceptions and are always written: they describe this
 # entry of the order rather than the booking.
-_UPDATE_COLS = tuple(c for c in _ORDER_COLS if c != "parking_fee")
+_UPDATE_COLS = tuple(c for c in _ORDER_COLS if c not in ("parking_fee", "pickup_point"))
 
 _ALWAYS_UPDATE_COLS = ("raw_message", "telegram_msg_id")
 
