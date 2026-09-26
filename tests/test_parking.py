@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs
 
@@ -300,6 +301,42 @@ def test_pay_link_chains_store_and_gateway():
     assert url.startswith("https://www.paydollar.com/") and payment["payment_ref"] == "PPR0TEST0"
     assert [p for p, _ in calls] == ["/api/booking/storeOnlinePayment", "/api/booking/payDollarParametersForIntegration"]
     assert calls[1][1] == {"channel": 1, "function": "onlinePayment"}
+
+
+def _flaky(times, then):
+    """A route that times out `times` times, then answers with `then` (status, json)."""
+    left = {"n": times}
+
+    def route(request):
+        if left["n"]:
+            left["n"] -= 1
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(then[0], json=then[1])
+    return route
+
+
+def test_a_payment_call_retries_a_timeout():
+    transport, calls = _transport({"/api/booking/getOnlinePayInfo": _flaky(2, (200, FEE_FOR_EXIT))})
+    c = ParkingClient("AB1234", "x", transport=transport)
+    fee = asyncio.run(c.fee_for_exit(parse_status(INSIDE_UNPAID), datetime(2026, 8, 23, 19, 48)))
+    assert fee.fee == 32 and len(calls) == 3
+
+
+def test_a_payment_call_gives_up_after_three_timeouts_and_says_how():
+    transport, calls = _transport({"/api/booking/storeOnlinePayment": _flaky(9, (200, STORE_REPLY))})
+    c = ParkingClient("AB1234", "x", transport=transport)
+    with pytest.raises(ParkingError) as e:
+        asyncio.run(c.create_payment(parse_status(INSIDE_UNPAID), datetime(2026, 8, 23, 19, 48), 32, NOW))
+    assert len(calls) == 3
+    assert re.fullmatch(r"/api/booking/storeOnlinePayment: ReadTimeout after \d+\.\ds, 3 tries", str(e.value))
+
+
+def test_a_status_poll_does_not_retry():
+    # The next tick is the retry; holding the tick would only delay it.
+    transport, calls = _transport({"/api/booking/getOnlinePayInfo": _flaky(1, (200, INSIDE_UNPAID))})
+    with pytest.raises(ParkingError, match=r"ReadTimeout after .*, 1 try$"):
+        asyncio.run(ParkingClient("AB1234", "x", transport=transport).query())
+    assert len(calls) == 1
 
 
 def test_car_park_point_reads_the_code_or_the_name():

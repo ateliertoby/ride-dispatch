@@ -9,6 +9,7 @@ import base64
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -254,6 +255,18 @@ def is_configured() -> bool:
     return bool(CAR_PLATE)
 
 
+# HKIA's backend now and then takes longer than the timeout, mostly in the
+# evening. A status poll simply waits for the next tick, but a payment link has
+# the operator waiting on it, so each call behind a link gets this many attempts. A retried
+# storeOnlinePayment can leave an extra unpaid order at HKIA; nothing reads it.
+PAY_ATTEMPTS = 3
+
+
+def _describe(e: Exception) -> str:
+    # httpx timeouts carry an empty message, so the class is the only clue.
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
 class ParkingClient:
     def __init__(self, plate: str, email: str, transport=None, timeout: float = 15):
         self.plate = plate.strip().upper()
@@ -261,19 +274,24 @@ class ParkingClient:
         self._transport = transport
         self._timeout = timeout
 
-    async def _post(self, path: str, body: dict) -> dict:
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-                resp = await client.post(BASE_URL + path, json=body)
-        except httpx.HTTPError as e:
-            raise ParkingError(f"{path}: {e}") from e
+    async def _post(self, path: str, body: dict, attempts: int = 1) -> dict:
+        start = time.monotonic()
+        for n in range(1, attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+                    resp = await client.post(BASE_URL + path, json=body)
+                break
+            except httpx.HTTPError as e:
+                if n == attempts:
+                    raise ParkingError(f"{path}: {_describe(e)} after {time.monotonic() - start:.1f}s, "
+                                       f"{n} {'try' if n == 1 else 'tries'}") from e
         # A 412 carries the legitimate "not inside" body; the JSON decides.
         try:
             return resp.json()
         except ValueError as e:
             raise ParkingError(f"{path}: non-JSON reply (HTTP {resp.status_code})") from e
 
-    async def _query(self, schedule_exit=None, location=None, pv_nr=None) -> ParkingStatus:
+    async def _query(self, schedule_exit=None, location=None, pv_nr=None, attempts: int = 1) -> ParkingStatus:
         body = {
             "entryMethod": ENTRY_METHOD,
             "cardNumber": self.plate,
@@ -283,13 +301,13 @@ class ParkingClient:
             "channel": CHANNEL,
             "carPlateNo": self.plate,
         }
-        return parse_status(await self._post(QUERY_PATH, body))
+        return parse_status(await self._post(QUERY_PATH, body, attempts))
 
     async def query(self) -> ParkingStatus:
         return await self._query()
 
     async def fee_for_exit(self, status: ParkingStatus, scheduled_exit: datetime) -> ParkingStatus:
-        return await self._query(api_time(scheduled_exit), status.location, status.pv_nr)
+        return await self._query(api_time(scheduled_exit), status.location, status.pv_nr, PAY_ATTEMPTS)
 
     async def create_payment(self, status: ParkingStatus, scheduled_exit: datetime,
                              amount: float, now: datetime) -> dict:
@@ -307,7 +325,7 @@ class ParkingClient:
             "timeStamp": db_time(now),
             "PvNr": status.pv_nr,
         }
-        reply = await self._post(STORE_PATH, body)
+        reply = await self._post(STORE_PATH, body, PAY_ATTEMPTS)
         if reply.get("resultCode") != 200 or not reply.get("refNoForPay"):
             raise ParkingError(f"storeOnlinePayment: {reply!r}")
         return {
@@ -318,7 +336,8 @@ class ParkingClient:
         }
 
     async def gateway_params(self) -> dict:
-        reply = await self._post(GATEWAY_PATH, {"channel": int(CHANNEL), "function": "onlinePayment"})
+        reply = await self._post(GATEWAY_PATH, {"channel": int(CHANNEL), "function": "onlinePayment"},
+                                 PAY_ATTEMPTS)
         if not reply.get("paymentGatwayUrl") or not reply.get("merchantId"):
             raise ParkingError(f"gateway params: {reply!r}")
         return reply
