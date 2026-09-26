@@ -984,6 +984,6 @@ def test_car_park_1_visit_without_a_reading_is_never_free(db_path, tg, monkeypat
 
 def test_allowance_line_for_a_pickup_planned_at_car_park_1(db_path):
     now = datetime(2026, 8, 23, 19, 0)
-    assert bot._allowance_line(now, "P1") == "P1 冇免費，入閘即收錢"
+    assert bot._allowance_line(now, "P1") == "P1 冇免費，入閘即收錢；bot 睇唔到 P1 出入，泊超過 1 粒鐘要自己改停車費"
     assert bot._allowance_line(now, "P4") == "停車場 免費可用"
     assert bot._allowance_line(now, "富豪") == "停車場 免費可用"

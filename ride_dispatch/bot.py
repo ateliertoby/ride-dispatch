@@ -23,7 +23,7 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
                       db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS,
-                      car_park_point, hourly_fee, has_allowance)
+                      car_park_point, hourly_fee, has_allowance, TRACKED_CAR_PARKS)
 from .phone import format_phone_e164
 from .service import expected_of, is_flight_pickup, label as service_label
 from . import statement
@@ -1390,10 +1390,14 @@ def _when(dt: datetime, now: datetime, day_always: bool = False) -> str:
 
 
 def _allowance_line(now: datetime, point: str | None = None) -> str:
-    # The free half hour is Car Park 4's alone: a pickup planned at another car
-    # park is told it pays from entry instead of being offered it.
+    # A pickup planned at a car park without the free half hour is told it pays
+    # from entry instead of being offered it, and, where the lookup cannot see
+    # that car park, that no entry or exit push is coming.
     if point and point.startswith("P") and not has_allowance(point):
-        return f"{point} 冇免費，入閘即收錢"
+        line = f"{point} 冇免費，入閘即收錢"
+        if point not in TRACKED_CAR_PARKS:
+            line += f"；bot 睇唔到 {point} 出入，泊超過 1 粒鐘要自己改停車費"
+        return line
     entries = _free_entries(now)
     if free_available(entries, now):
         return "停車場 免費可用"

@@ -320,11 +320,18 @@ def test_hourly_fee_is_the_car_parks_own_tariff():
     assert hourly_fee(None) is None
 
 
-def test_only_car_park_4_has_the_free_half_hour():
+def test_the_free_half_hour_is_car_park_3_and_4s():
     from ride_dispatch.parking import has_allowance
     assert has_allowance("P4")
+    assert has_allowance("P3")
     assert not has_allowance("P1")
     assert not has_allowance(None)
     # With no reading, a short stay reads as free only where the gate can open for nothing.
     assert classify(False, 10, None, allowance=True) == "free"
     assert classify(False, 10, None, allowance=False) == "gate"
+
+
+def test_car_park_3_is_named_from_hkias_display_name():
+    # HKIA codes Car Park 3 as CP3, which does not start with its number.
+    from ride_dispatch.parking import car_park_point
+    assert car_park_point("CP3", "Car Park 3") == "P3"

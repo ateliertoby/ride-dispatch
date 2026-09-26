@@ -131,9 +131,14 @@ def car_park_point(location: str | None, location_name: str | None) -> str | Non
     return None
 
 
-# Only Car Park 4 gives the once-a-day free half hour; Car Park 1 charges from
-# the moment the car enters. A car park not named here is assumed to charge.
-ALLOWANCE_CAR_PARKS = frozenset({"P4"})
+# The free half hour is shared by Car Park 3 and Car Park 4, once in any 24
+# hours; Car Park 1 charges from the moment the car enters. A car park not
+# named here is assumed to charge.
+ALLOWANCE_CAR_PARKS = frozenset({"P3", "P4"})
+# HKIA's online payment service, and so the plate lookup behind it, covers
+# Car Park 3 and 4 only: a visit to Car Park 1 never shows up here, so nothing
+# about it is detected, pushed or written back.
+TRACKED_CAR_PARKS = frozenset({"P3", "P4"})
 
 
 def has_allowance(point: str | None) -> bool:
