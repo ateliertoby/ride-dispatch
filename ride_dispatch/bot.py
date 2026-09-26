@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
@@ -561,20 +562,18 @@ async def handle_callback(update: Update, context):
             await query.answer()
             await query.message.reply_text("未設定 CAR_PLATE。")
             return
-        # The two gateway calls can take up to 15 s each, so the tapped
-        # message itself has to change before the first one goes out;
-        # otherwise the operator cannot tell the tap registered.
+        # The HKIA calls behind a link can take a while, retries included, so
+        # the tapped message itself has to change before the first one goes
+        # out; otherwise the operator cannot tell the tap registered.
         _parking_pay_busy.add(session_id)
         try:
             await query.answer("攞緊 link，等幾秒")
             await query.message.edit_reply_markup(reply_markup=_pay_busy_button())
             now = datetime.now()
             try:
-                status = await client.query()
-                if not status.inside:
+                if not await _send_pay_link(context.application.bot, query.message.chat_id,
+                                            session, _session_status(session), now):
                     await query.message.reply_text("架車已經唔喺停車場。")
-                    return
-                await _send_pay_link(context.application.bot, query.message.chat_id, session, status, now)
             except ParkingError as e:
                 _parking_logger.warning("pay link failed: %s", e)
                 await query.message.reply_text("出唔到 link，再撳。")
@@ -1432,13 +1431,18 @@ async def _send_pay_link(bot, chat_id: int, session: dict, status: ParkingStatus
     """Generate a fresh PayDollar link for the plan at this minute and send it.
 
     Returns True once the message is out; the caller decides what to mark.
+    False when parking is off or the price query finds the car gone: that
+    query names the visit, so it doubles as the check that it is still open.
     """
     client = _get_parking_client()
     if client is None:
         return False
+    started = time.monotonic()
     entry = _session_entry(session)
     _, exit_at = pay_plan(entry, now)
     fee = await client.fee_for_exit(status, exit_at)
+    if not fee.inside:
+        return False
     amount = fee.fee if fee.fee is not None else 0
     url, payment = await client.pay_link(status, exit_at, amount, now)
     grace = exit_at + timedelta(minutes=GRACE_MINUTES)
@@ -1449,7 +1453,15 @@ async def _send_pay_link(bot, chat_id: int, session: dict, status: ParkingStatus
     )
     update_parking_session(DB_PATH, session["id"], payment_ref=payment["payment_ref"],
                            scheduled_exit=db_time(exit_at), paid_amount=amount, link_sent_at=db_time(now))
+    _parking_logger.info("pay link sent pv=%s amount=%s exit=%s in %.1fs",
+                         status.pv_nr, f"{amount:g}", exit_at.strftime("%H:%M"), time.monotonic() - started)
     return True
+
+
+def _session_status(session: dict) -> ParkingStatus:
+    """The open visit as its row records it, to name it in a price query."""
+    return ParkingStatus(inside=True, pv_nr=session["pv_nr"], location=session.get("location"),
+                         location_name=session.get("location_name"), entry_time=session["entry_time"])
 
 
 def _pay_button(session_id: int) -> InlineKeyboardMarkup:

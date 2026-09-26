@@ -52,8 +52,11 @@ OUT = ParkingStatus(inside=False)
 class FakeClient:
     plate = "AB1234"
 
-    def __init__(self, replies):
+    def __init__(self, replies, fee_replies=None):
         self.replies = list(replies)
+        # Replies for fee_for_exit, consumed first; the default answer is a $32
+        # quote for a car still inside.
+        self.fee_replies = list(fee_replies or [])
         self.links = 0
 
     async def query(self):
@@ -63,6 +66,11 @@ class FakeClient:
         return r
 
     async def fee_for_exit(self, status, scheduled_exit):
+        if self.fee_replies:
+            r = self.fee_replies.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
         return ParkingStatus(inside=True, pv_nr=status.pv_nr, location="P4O", location_name="Car Park 4",
                              entry_time=status.entry_time, park_minutes=status.park_minutes,
                              paid=False, fee=32, scheduled_exit=scheduled_exit.strftime("%Y-%m-%d %H:%M"))
@@ -276,7 +284,8 @@ def _callback(data, chat_id=123):
 
 def test_pay_callback_sends_link_and_records(db_path, tg, monkeypatch):
     landed_order(db_path)
-    client = FakeClient([inside(1), inside(10)])
+    # One reply for the tick only: a tap that spent a status query would run dry.
+    client = FakeClient([inside(1)])
     monkeypatch.setattr(bot, "_parking_client", client)
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
     run(tg, ENTRY + timedelta(minutes=1))
@@ -301,13 +310,39 @@ def test_pay_callback_when_not_inside_or_failed(db_path, tg, monkeypatch):
     q.answer.assert_awaited()
     assert "搵唔到" in q.message.reply_text.call_args.args[0]
 
-    client = FakeClient([inside(1), ParkingError("down")])
+    client = FakeClient([inside(1)], fee_replies=[ParkingError("down")])
     monkeypatch.setattr(bot, "_parking_client", client)
     run(tg, ENTRY + timedelta(minutes=1))
     sid = get_open_parking_session(db_path)["id"]
     upd, ctx, q = _callback(f"park:pay:{sid}")
     asyncio.run(bot.handle_callback(upd, ctx))
     assert "再撳" in q.message.reply_text.call_args.args[0]
+
+
+def test_pay_callback_when_the_car_has_already_left(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    client = FakeClient([inside(1)], fee_replies=[OUT])
+    monkeypatch.setattr(bot, "_parking_client", client)
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    assert client.links == 0
+    assert q.message.reply_text.call_args.args[0] == "架車已經唔喺停車場。"
+    assert _markups(q) == ["park:busy", f"park:pay:{sid}"]
+
+
+def test_a_sent_link_is_logged_with_its_timing(db_path, tg, monkeypatch, caplog):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1)]))
+    run(tg, ENTRY + timedelta(minutes=1))
+    sid = get_open_parking_session(db_path)["id"]
+    upd, ctx, q = _callback(f"park:pay:{sid}")
+    with caplog.at_level("INFO", logger="parking"):
+        asyncio.run(bot.handle_callback(upd, ctx))
+    assert any(r.getMessage().startswith("pay link sent pv=700001 amount=32 ") for r in caplog.records)
 
 
 def _markups(q):
@@ -321,17 +356,17 @@ def test_pay_callback_swaps_button_before_the_gateway_and_restores_after(db_path
     seen_at_query = {}
 
     class Watching(FakeClient):
-        async def query(self):
-            # Snapshot what the operator's screen shows when the first gateway call goes out.
+        async def fee_for_exit(self, status, scheduled_exit):
+            # Snapshot what the operator's screen shows when the first HKIA call goes out.
             seen_at_query["answer"] = q.answer.await_args.args[0]
             seen_at_query["markups"] = _markups(q)
             seen_at_query["busy"] = set(bot._parking_pay_busy)
-            return await super().query()
+            return await super().fee_for_exit(status, scheduled_exit)
 
     monkeypatch.setattr(bot, "_parking_client", FakeClient([inside(1)]))
     run(tg, ENTRY + timedelta(minutes=1))
     sid = get_open_parking_session(db_path)["id"]
-    client = Watching([inside(10)])
+    client = Watching([])
     monkeypatch.setattr(bot, "_parking_client", client)
     upd, ctx, q = _callback(f"park:pay:{sid}")
     asyncio.run(bot.handle_callback(upd, ctx))
@@ -353,11 +388,11 @@ def test_second_tap_during_a_fetch_answers_busy_and_opens_no_second_order(db_pat
             super().__init__(replies)
             self.gate = None
 
-        async def query(self):
+        async def fee_for_exit(self, status, scheduled_exit):
             await self.gate.wait()
-            return await super().query()
+            return await super().fee_for_exit(status, scheduled_exit)
 
-    client = Slow([inside(10)])
+    client = Slow([])
     monkeypatch.setattr(bot, "_parking_client", client)
     first = _callback(f"park:pay:{sid}")
     second = _callback(f"park:pay:{sid}")
@@ -392,7 +427,7 @@ def test_busy_button_tap_only_answers(db_path, monkeypatch):
 def test_failed_fetch_restores_the_button_and_clears_busy(db_path, tg, monkeypatch):
     landed_order(db_path)
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
-    client = FakeClient([inside(1), ParkingError("down")])
+    client = FakeClient([inside(1)], fee_replies=[ParkingError("down")])
     monkeypatch.setattr(bot, "_parking_client", client)
     run(tg, ENTRY + timedelta(minutes=1))
     sid = get_open_parking_session(db_path)["id"]
