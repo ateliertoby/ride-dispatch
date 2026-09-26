@@ -8,6 +8,7 @@ information right now", never as a reason to stop the flight poller.
 import base64
 import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -16,6 +17,7 @@ import httpx
 from dotenv import load_dotenv
 
 from .flight import landing_datetime
+from .ingest import PICKUP_POINTS
 from .service import is_flight_pickup
 
 # The config below is read at import time and this module is imported before
@@ -31,9 +33,6 @@ load_dotenv()
 FREE_MINUTES = 30
 FREE_WINDOW_HOURS = 24     # rolling, from the free visit's entry time
 HOUR_MINUTES = 60
-# Published hourly tariff. Used only to preview a cost before any link is
-# generated; every amount actually sent to the gateway comes from the API.
-HOURLY_FEE = 32
 GRACE_MINUTES = 30         # granted after the paid-until time
 AUTO_LINK_MINUTE = 50      # unpaid this long inside -> send a link unprompted
 ARM_BEFORE_MINUTES = 30    # poll from this long before predicted landing
@@ -115,6 +114,30 @@ def parse_status(body) -> ParkingStatus:
             scheduled_exit=sched[:16] if sched else None,
         )
     raise ParkingError(f"unexpected reply: {body!r}")
+
+
+# HKIA's code (P4O) and its display name (Car Park 4) both carry the car park
+# number; either one is enough to name it.
+_CODE_RE = re.compile(r"P(\d+)")
+_NAME_RE = re.compile(r"Car\s*Park\s*(\d+)", re.IGNORECASE)
+
+
+def car_park_point(location: str | None, location_name: str | None) -> str | None:
+    """Our name for the car park a visit is in (P1, P4...), None if unrecognised."""
+    for pattern, text in ((_CODE_RE, location), (_NAME_RE, location_name)):
+        m = pattern.match((text or "").strip())
+        if m:
+            return f"P{int(m.group(1))}"
+    return None
+
+
+def hourly_fee(point: str | None) -> float | None:
+    """Published first-hour tariff of a car park, None where it is not known.
+
+    Used only to preview a cost before any link is generated; every amount
+    actually sent to the gateway or written to an order comes from the API.
+    """
+    return PICKUP_POINTS.get(point) if point else None
 
 
 def free_available(free_entry_times: list[datetime], now: datetime) -> bool:

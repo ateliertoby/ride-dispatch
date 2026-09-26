@@ -16,13 +16,14 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
                       db_seconds, from_db_seconds,
-                      FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS, HOURLY_FEE)
+                      FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS,
+                      car_park_point, hourly_fee)
 from .phone import format_phone_e164
 from .service import expected_of, is_flight_pickup, label as service_label
 from . import statement
@@ -1404,7 +1405,9 @@ def _entry_message(session: dict, status: ParkingStatus, now: datetime) -> str:
         lines.append(f"免費可用，{(entry + timedelta(minutes=FREE_MINUTES)).strftime('%H:%M')} 前出閘")
     else:
         hours, exit_at = pay_plan(entry, now)
-        lines.append(f"免費已用，泊 {hours} 粒鐘 ${HOURLY_FEE * hours:g} 到 {exit_at.strftime('%H:%M')}")
+        rate = hourly_fee(car_park_point(status.location, status.location_name))
+        cost = f" ${rate * hours:g}" if rate is not None else ""
+        lines.append(f"免費已用，泊 {hours} 粒鐘{cost} 到 {exit_at.strftime('%H:%M')}")
     if session.get("order_id"):
         o = get_order_by_id(DB_PATH, session["order_id"])
         if o:
@@ -1547,6 +1550,30 @@ def _stayed_minutes(session: dict, gone_at: datetime) -> int:
     return max(0, int((end - _session_entry(session)).total_seconds() // 60))
 
 
+def _visit_point(session: dict) -> str | None:
+    """Where the car waited, in the order's terms; HKIA's own name for a car
+    park we have no name for, rather than a guess."""
+    return (car_park_point(session.get("location"), session.get("location_name"))
+            or session.get("location_name") or session.get("location"))
+
+
+def _visit_cost(session: dict, kind: str) -> float | None:
+    """What a finished visit cost the order, None where nobody knows.
+
+    A payment carries its own amount: the link's, or the last price HKIA quoted
+    before a payment made elsewhere turned the visit paid. At the gate the
+    driver pays HKIA's price for leaving then, and the last reading taken
+    inside is that price as of at most one tick before the exit.
+    """
+    if kind == "free":
+        return 0.0
+    if kind == "paid":
+        amount = session.get("paid_amount")
+        return float(amount) if amount else None
+    fee = session.get("last_fee")
+    return float(fee) if fee is not None else None
+
+
 async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now: datetime):
     entry = _session_entry(session)
     stayed = _stayed_minutes(session, gone_at)
@@ -1570,11 +1597,21 @@ async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now:
             tail = f"閘口找數{note}"
     msg = f"已出閘 {exit_at.strftime('%H:%M')}，泊 {stayed} 分鐘 | {tail}"
     order_id = session.get("order_id")
-    if order_id and kind == "free":
-        update_cost(DB_PATH, order_id, "parking", 0)
-        msg += f"\n#{order_id[-4:]} 停車費已改 $0"
-    elif order_id and kind == "paid" and session.get("paid_amount"):
-        update_cost(DB_PATH, order_id, "parking", float(session["paid_amount"]))
+    if order_id:
+        # The visit is what happened, so it overwrites the order's plan: the
+        # meeting point and, wherever the amount is known, the parking cost.
+        point = _visit_point(session)
+        cost = _visit_cost(session, kind)
+        fields, said = {}, []
+        if point:
+            fields["pickup_point"] = point
+            said.append(point)
+        if cost is not None:
+            fields["parking_fee"] = cost
+            said.append(f"停車費已改 ${cost:g}")
+        if fields:
+            update_order_fields(DB_PATH, order_id, fields)
+            msg += f"\n#{order_id[-4:]} " + " ".join(said)
     await bot.send_message(chat_id=chat_id, text=msg,
                            reply_markup=_verdict_buttons(session["id"], kind))
 
@@ -1634,6 +1671,12 @@ async def _check_parking(bot, chat_id: int, now: datetime):
     if status.paid and not session.get("paid"):
         update_parking_session(DB_PATH, session["id"], paid=1)
         session["paid"] = 1
+        # Paid somewhere other than our link: the session still holds the
+        # reading taken on the previous tick, the last price quoted before the
+        # payment, which is what the payment came to.
+        if not session.get("paid_amount") and session.get("last_fee"):
+            update_parking_session(DB_PATH, session["id"], paid_amount=session["last_fee"])
+            session["paid_amount"] = session["last_fee"]
         msg = f"已收到付款 ${(session.get('paid_amount') or 0):g}" if session.get("paid_amount") else "已收到付款"
         if session.get("scheduled_exit"):
             # Only a payment made through our own link has a known paid-until

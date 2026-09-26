@@ -894,3 +894,81 @@ def test_fast_ticks_bracket_the_exit_to_half_a_minute(db_path, tg, ctx, poll_glo
     assert row["exit_time"] == "2026-08-23 18:49"
     # Two fast ticks from the first miss, so the push lands ~60s after the car left.
     assert "已出閘 18:49，泊 2 分鐘" in texts(tg)[-1]
+
+
+def at_p1(minutes: int, fee: float | None = 35, paid: bool = False, pv_nr: int = 31,
+          location: str = "P1O", name: str = "Car Park 1") -> ParkingStatus:
+    return ParkingStatus(inside=True, pv_nr=pv_nr, location=location, location_name=name,
+                         entry_time=ENTRY.strftime("%Y-%m-%d %H:%M"), park_minutes=minutes, paid=paid, fee=fee)
+
+
+def test_gate_close_writes_the_car_park_and_hkias_price(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    assert get_order_by_id(db_path, "O1")["pickup_point"] == "P4"
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(62, fee=70), OUT, OUT]))
+    for m in (62, 63, 64):
+        run(tg, ENTRY + timedelta(minutes=m))
+    o = get_order_by_id(db_path, "O1")
+    assert o["pickup_point"] == "P1" and o["parking_fee"] == 70
+    assert "#O1 P1 停車費已改 $70" in texts(tg)[-1]
+
+
+def test_free_close_records_the_car_park_too(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(20, fee=0), OUT, OUT]))
+    for m in (20, 21, 22):
+        run(tg, ENTRY + timedelta(minutes=m))
+    o = get_order_by_id(db_path, "O1")
+    assert o["pickup_point"] == "P1" and o["parking_fee"] == 0
+    assert "#O1 P1 停車費已改 $0" in texts(tg)[-1]
+
+
+def test_payment_made_elsewhere_keeps_the_last_quoted_price(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client",
+                        FakeClient([at_p1(20), at_p1(25, fee=0, paid=True), OUT, OUT]))
+    for m in (20, 25, 26, 27):
+        run(tg, ENTRY + timedelta(minutes=m))
+    row = recent_parking_sessions(db_path, 1)[0]
+    assert row["paid"] == 1 and row["paid_amount"] == 35
+    assert any("已收到付款 $35" in t for t in texts(tg))
+    o = get_order_by_id(db_path, "O1")
+    assert o["pickup_point"] == "P1" and o["parking_fee"] == 35
+
+
+def test_close_without_a_reading_keeps_the_planned_fee(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(40, fee=None), OUT, OUT]))
+    for m in (40, 41, 42):
+        run(tg, ENTRY + timedelta(minutes=m))
+    o = get_order_by_id(db_path, "O1")
+    assert o["pickup_point"] == "P1" and o["parking_fee"] == 32
+
+
+def test_unrecognised_car_park_keeps_hkias_name(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    from ride_dispatch.db import open_parking_session, close_parking_session
+    sid = open_parking_session(db_path, pv_nr=1, plate="AB1234", location="P4O", location_name="Car Park 4",
+                               entry_time="2026-08-23 13:36", order_id=None)
+    close_parking_session(db_path, sid, exit_time="2026-08-23 13:50", free=1)
+    visit = [at_p1(1, fee=40, location="T2X", name="T2 Car Park"),
+             at_p1(30, fee=40, location="T2X", name="T2 Car Park"), OUT, OUT]
+    monkeypatch.setattr(bot, "_parking_client", FakeClient(visit))
+    for m in (1, 30, 31, 32):
+        run(tg, ENTRY + timedelta(minutes=m))
+    t = texts(tg)
+    # No tariff known for it, so the entry preview names no price.
+    assert "免費已用，泊 1 粒鐘 到 19:48" in t[0]
+    o = get_order_by_id(db_path, "O1")
+    assert o["pickup_point"] == "T2 Car Park" and o["parking_fee"] == 40
+
+
+def test_entry_preview_uses_the_car_parks_tariff(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    from ride_dispatch.db import open_parking_session, close_parking_session
+    sid = open_parking_session(db_path, pv_nr=1, plate="AB1234", location="P4O", location_name="Car Park 4",
+                               entry_time="2026-08-23 13:36", order_id=None)
+    close_parking_session(db_path, sid, exit_time="2026-08-23 13:50", free=1)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([at_p1(1)]))
+    run(tg, ENTRY + timedelta(minutes=1))
+    assert "免費已用，泊 1 粒鐘 $35 到 19:48" in texts(tg)[0]

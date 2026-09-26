@@ -300,3 +300,21 @@ def test_pay_link_chains_store_and_gateway():
     assert url.startswith("https://www.paydollar.com/") and payment["payment_ref"] == "PPR0TEST0"
     assert [p for p, _ in calls] == ["/api/booking/storeOnlinePayment", "/api/booking/payDollarParametersForIntegration"]
     assert calls[1][1] == {"channel": 1, "function": "onlinePayment"}
+
+
+def test_car_park_point_reads_the_code_or_the_name():
+    from ride_dispatch.parking import car_park_point
+    assert car_park_point("P4O", "Car Park 4") == "P4"
+    assert car_park_point("P1O", "Car Park 1") == "P1"
+    assert car_park_point(None, "Car Park 1") == "P1"
+    assert car_park_point("X9", "carpark 1") == "P1"
+    assert car_park_point(None, None) is None
+    assert car_park_point("T2X", "T2 Car Park") is None
+
+
+def test_hourly_fee_is_the_car_parks_own_tariff():
+    from ride_dispatch.parking import hourly_fee
+    assert hourly_fee("P1") == 35
+    assert hourly_fee("P4") == 32
+    assert hourly_fee("P2") is None
+    assert hourly_fee(None) is None
