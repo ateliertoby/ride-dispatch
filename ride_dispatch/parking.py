@@ -260,6 +260,9 @@ def is_configured() -> bool:
 # the operator waiting on it, so each call behind a link gets this many attempts. A retried
 # storeOnlinePayment can leave an extra unpaid order at HKIA; nothing reads it.
 PAY_ATTEMPTS = 3
+# The PayDollar merchant settings are the same for every link; refetched daily in
+# case HKIA rotates them.
+GATEWAY_TTL = 24 * 3600
 
 
 def _describe(e: Exception) -> str:
@@ -273,6 +276,8 @@ class ParkingClient:
         self.email = email
         self._transport = transport
         self._timeout = timeout
+        self._gateway: dict | None = None
+        self._gateway_at = 0.0
 
     async def _post(self, path: str, body: dict, attempts: int = 1) -> dict:
         start = time.monotonic()
@@ -336,10 +341,13 @@ class ParkingClient:
         }
 
     async def gateway_params(self) -> dict:
+        if self._gateway and time.monotonic() - self._gateway_at < GATEWAY_TTL:
+            return self._gateway
         reply = await self._post(GATEWAY_PATH, {"channel": int(CHANNEL), "function": "onlinePayment"},
                                  PAY_ATTEMPTS)
         if not reply.get("paymentGatwayUrl") or not reply.get("merchantId"):
             raise ParkingError(f"gateway params: {reply!r}")
+        self._gateway, self._gateway_at = reply, time.monotonic()
         return reply
 
     async def pay_link(self, status: ParkingStatus, scheduled_exit: datetime,

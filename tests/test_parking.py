@@ -339,6 +339,17 @@ def test_a_status_poll_does_not_retry():
     assert len(calls) == 1
 
 
+def test_gateway_parameters_are_fetched_once():
+    transport, calls = _transport({"/api/booking/storeOnlinePayment": (200, STORE_REPLY),
+                                   "/api/booking/payDollarParametersForIntegration": (200, GATEWAY_REPLY)})
+    c = ParkingClient("AB1234", "me@example.com", transport=transport)
+    for _ in range(2):
+        asyncio.run(c.pay_link(parse_status(INSIDE_UNPAID), datetime(2026, 8, 23, 19, 48), 32, NOW))
+    assert [p for p, _ in calls] == ["/api/booking/storeOnlinePayment",
+                                     "/api/booking/payDollarParametersForIntegration",
+                                     "/api/booking/storeOnlinePayment"]
+
+
 def test_car_park_point_reads_the_code_or_the_name():
     from ride_dispatch.parking import car_park_point
     assert car_park_point("P4O", "Car Park 4") == "P4"
