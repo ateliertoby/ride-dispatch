@@ -61,6 +61,13 @@
   }
   .key:active { background: var(--key-press); }
   .key.fn { font-size: 18px; color: var(--text-2); }
+  /* A field a batch's frozen total was summed from: its value stays readable
+     and the pencil gives way to why it cannot be edited. */
+  .field-row.locked { cursor: default; }
+  .field-row.locked:active { background: none; }
+  .field-row.locked .chev { font-size: 12px; }
+  .cancel-note { text-align: center; margin: 4px auto 0; padding: 10px 18px; font-size: 13px; color: var(--text-3); }
+
   /* Every numpad screen follows one rule: the keypad is bottommost (nothing
      tappable below 0/⌫ — pressing ⌫ means "not confirming", so confirm must
      never sit beside it), confirm sits above the keypad behind a structural

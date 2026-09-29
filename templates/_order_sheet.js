@@ -16,6 +16,13 @@
 // Views close through the page's own sheetHead and popView, the way that page
 // closes any other view.
 
+// A batch's expected total was frozen from these fields, and cancelling would
+// take the order out of that total, so the server refuses both on a batched
+// order (db.BATCH_LOCKED_FIELDS).  The sheet says so before the tap.
+const BATCH_LOCKED = new Set(['price', 'tunnel_fee', 'banner_fee']);
+const BATCH_LOCKED_MSG = '已結算嘅單要先撤銷結算';
+function isBatched(o) { return o.settlement_id != null; }
+
 function editableFields(o) {
   const p = platform(o);
   if (p === 'didi') return [['price', '車費'], ['tunnel_fee', '隧道費'], ['time', '時間']];
@@ -30,6 +37,7 @@ function detailView(sheet) {
   const p = platform(o);
   const isPickup = isFlightPickup(o.service_type);
   const label = svcLabel(o.service_type);
+  const locked = isBatched(o);
 
   const rows = orderHost.rowsBefore ? orderHost.rowsBefore(o) : [];
   if (p === 'ride') {
@@ -82,10 +90,11 @@ function detailView(sheet) {
       if (key === 'price' && !v) { value = '未入價'; unset = true; }
       else value = '$' + $(v || 0);
     }
-    const row = '<button class="field-row" onclick="editField(\'' + key + '\')">' +
+    const frozen = locked && BATCH_LOCKED.has(key);
+    const row = '<button class="field-row' + (frozen ? ' locked' : '') + '" onclick="editField(\'' + key + '\')">' +
       '<span class="fk">' + fLabel + '</span>' +
       '<span class="fv' + (unset ? ' unset' : '') + '">' + esc(value) + '</span>' +
-      '<span class="chev">&#9998;</span></button>';
+      '<span class="chev">' + (frozen ? '已結算' : '&#9998;') + '</span></button>';
     // Waiving the parking fee is the everyday action (the pickup default often
     // turns out not to be charged), so it gets a one-tap pill; any other
     // amount is rare and goes through the numpad as usual.
@@ -103,13 +112,16 @@ function detailView(sheet) {
       orderHost.subtitle ? orderHost.subtitle(o) : '#' + esc(shortId(o.order_id))) +
     info + fields +
     (p === 'ride' ? '<a class="tg-link" href="https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '') +
-    '<button class="cancel-link" onclick="openCancelConfirm()">取消訂單</button>'
+    (locked
+      ? '<div class="cancel-note">' + BATCH_LOCKED_MSG + '先取消得</div>'
+      : '<button class="cancel-link" onclick="openCancelConfirm()">取消訂單</button>')
   );
 }
 
 function editField(key) {
   const o = orderHost.order();
   if (!o) return;
+  if (isBatched(o) && BATCH_LOCKED.has(key)) { toast(BATCH_LOCKED_MSG); return; }
   const fLabel = editableFields(o).find(f => f[0] === key)[1];
   if (key === 'time') {
     orderHost.push(numpadView({
