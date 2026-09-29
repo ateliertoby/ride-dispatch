@@ -101,6 +101,19 @@ def expected_of(order: dict) -> float:
     return float(price + extra - (order.get('penalty_fee') or 0))
 
 
+def owed_of(order: dict) -> float:
+    """What the batch that holds this order's trip is owed for it.
+
+    The platform can pay a 舉牌 line on a statement that holds the trip back,
+    and that money belongs to the batch it arrived on.  `paid_ahead` is what
+    other batches already carry for this order, so the one that finally takes
+    the trip is owed the rest — the same figure the platform prints for the
+    trip line.  An order dict without the key counts nothing as paid ahead.
+    JS twin: owedOf() in templates/_shared.js — keep in sync.
+    """
+    return expected_of(order) - (order.get('paid_ahead') or 0)
+
+
 def label(service_type: str | None) -> str:
     """Traditional Chinese display label for a service type."""
     service_type = _norm(service_type)

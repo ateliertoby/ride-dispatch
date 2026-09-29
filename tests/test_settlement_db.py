@@ -267,7 +267,121 @@ def test_init_db_adds_the_adjustments_table_to_an_old_database(tmp_path):
     conn = sqlite3.connect(path)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(settlement_adjustments)")]
     conn.close()
-    assert cols == ["id", "settlement_id", "order_ref", "date", "amount"]
+    assert cols == ["id", "settlement_id", "order_ref", "date", "amount", "ahead"]
+
+
+def test_init_db_adds_the_ahead_flag_to_existing_adjustments(tmp_path):
+    """Every line recorded before the flag existed was a line of its own
+    transfer, never a part of a trip paid ahead of it."""
+    path = str(tmp_path / "orders.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE settlement_adjustments (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                 "settlement_id INTEGER NOT NULL, order_ref TEXT, date TEXT, amount REAL NOT NULL)")
+    conn.execute("INSERT INTO settlement_adjustments (settlement_id, order_ref, date, amount) "
+                 "VALUES (1, 'X9', '2026-08-23', -30.0)")
+    conn.commit()
+    conn.close()
+
+    init_db(path)
+    init_db(path)  # the ALTER must stay a no-op on an already migrated database
+
+    conn = sqlite3.connect(path)
+    assert conn.execute("SELECT ahead FROM settlement_adjustments").fetchall() == [(0,)]
+    conn.close()
+
+
+# ---- 舉牌先結 (a 舉牌 line paid ahead of its trip) ----
+
+AHEAD = [{"order_ref": "B1", "date": "2026-08-23", "amount": 40.0, "ahead": True}]
+
+
+def seed_held(db_path):
+    """A 接機 with a 舉牌 whose trip the platform held back, and a leg of its own."""
+    seed(db_path, "B1", "2026-08-23 22:00:00", 300.0, service_type="接机", additional_services="举牌")
+    seed(db_path, "A1", "2026-08-25 10:00:00", 210.0)
+
+
+def held_row(db_path):
+    return next(o for o in settlement_candidates(db_path, ["2026-08-23"], now=NOW)
+                if o["order_id"] == "B1")
+
+
+def test_a_banner_paid_ahead_is_recorded_and_its_trip_stays_owed(db_path):
+    seed_held(db_path)
+    sid = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    batch = get_settlement(db_path, sid)
+    assert batch["expected_amount"] == 250.0
+    assert batch["adjustments"] == AHEAD
+    held = held_row(db_path)
+    assert held["settlement_id"] is None
+    assert held["paid_ahead"] == 40.0 and held["ahead_batch"] == sid
+    # What is left to chase is the trip alone.
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["totals"]["unsettled"] == 300.0
+
+
+def test_an_order_nothing_was_paid_ahead_of_carries_zero(db_path):
+    seed_held(db_path)
+    held = held_row(db_path)
+    assert held["paid_ahead"] == 0 and held["ahead_batch"] is None
+
+
+def test_the_batch_that_takes_the_trip_is_owed_only_what_was_not_paid_ahead(db_path):
+    seed_held(db_path)
+    create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    later = create_settlement(db_path, "ride", ["B1"], 300.0, "2026-08-28", now=NOW)
+    assert get_settlement(db_path, later)["expected_amount"] == 300.0
+
+
+@pytest.mark.parametrize("prepare, legs, message", [
+    (lambda p: None, ["A1", "B1"], "B1: 張單喺呢個 batch 入面"),
+    (lambda p: create_settlement(p, "ride", ["B1"], 340.0, "2026-08-24", now=NOW), ["A1"],
+     "B1: 已經結算咗"),
+    (lambda p: cancel_order(p, "B1"), ["A1"], "B1: 已取消"),
+    (lambda p: create_settlement(p, "ride", ["C1"], 250.0, "2026-08-24", now=NOW,
+                                 adjustments=AHEAD), ["A1"], "B1: 舉牌已經先結咗"),
+])
+def test_a_banner_is_only_paid_ahead_of_a_trip_still_waiting_for_its_batch(db_path, prepare, legs, message):
+    """Any other order would never net it off: the line would be counted twice
+    or against nothing, so the batch is refused whole, like a bad leg."""
+    seed_held(db_path)
+    seed(db_path, "C1", "2026-08-24 10:00:00", 210.0)
+    prepare(db_path)
+    with sqlite3.connect(db_path) as conn:
+        before = conn.execute("SELECT count(*) FROM settlements").fetchone()[0]
+    with pytest.raises(ValueError, match=message):
+        create_settlement(db_path, "ride", legs, 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM settlements").fetchone()[0] == before
+
+
+def test_a_banner_cannot_be_paid_ahead_of_an_order_the_book_does_not_have(db_path):
+    seed_held(db_path)
+    with pytest.raises(ValueError, match="ZZ: 搵唔到單"):
+        create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW,
+                          adjustments=[{"order_ref": "ZZ", "date": "2026-08-23", "amount": 40.0,
+                                        "ahead": True}])
+
+
+def test_undoing_the_batch_that_paid_ahead_gives_the_trip_its_banner_back(db_path):
+    seed_held(db_path)
+    sid = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    assert delete_settlement(db_path, sid) is True
+    held = held_row(db_path)
+    assert held["paid_ahead"] == 0 and held["ahead_batch"] is None
+
+
+def test_the_batch_that_paid_ahead_cannot_be_undone_under_the_trips_batch(db_path):
+    """The trip's batch froze its figure net of the 舉牌, so taking the 舉牌 away
+    under it would leave that figure wrong — the reason a batched leg's fees
+    are locked.  Undoing the trip's batch first releases it."""
+    seed_held(db_path)
+    ahead = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    later = create_settlement(db_path, "ride", ["B1"], 300.0, "2026-08-28", now=NOW)
+    with pytest.raises(ValueError, match=f"#{later}"):
+        delete_settlement(db_path, ahead)
+    assert get_settlement(db_path, ahead)["adjustments"] == AHEAD
+    assert delete_settlement(db_path, later) is True
+    assert delete_settlement(db_path, ahead) is True
 
 
 def test_init_db_adds_the_penalty_column_to_an_old_database(tmp_path):

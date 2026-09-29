@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
 from .ingest import banner_fee, pickup_point
-from .service import PLATFORMS, expected_of, needs_departure_reminder, platform_of
+from .service import PLATFORMS, needs_departure_reminder, owed_of, platform_of
 from .statement import leg_amount
 
 COARSE_WINDOW_HOURS = 24
@@ -169,15 +169,23 @@ def init_db(db_path: str):
         # printed it and need not name a row in orders: the whole point of the
         # table is money whose order is not one of ours.  The amounts join the
         # batch's expected_amount at creation and are frozen with it.
+        # `ahead` marks a 舉牌 the platform paid while holding its trip back.
+        # The trip is still owed, and whichever batch takes it later is owed
+        # the trip net of this line (service.owed_of).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settlement_adjustments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 settlement_id INTEGER NOT NULL,
                 order_ref TEXT,
                 date TEXT,
-                amount REAL NOT NULL
+                amount REAL NOT NULL,
+                ahead INTEGER NOT NULL DEFAULT 0
             )
         """)
+        try:
+            conn.execute("ALTER TABLE settlement_adjustments ADD COLUMN ahead INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         # One row per car park visit. pv_nr is HKIA's own visit number, so a
         # bot restart mid-visit finds the open row again instead of opening
         # a second one. `free` is derived exactly once, at close, from paid
@@ -669,12 +677,22 @@ def update_flight_info(db_path: str, order_id: str, scheduled: str, eta: str | N
 
 # ---- Settlement (埋數) ----
 
+# What other batches already carry for an order — the 舉牌 lines paid ahead of
+# its trip — and the batch that carries them.  Selected with the order rather
+# than looked up beside it, so owed_of sees it wherever the row goes.
+_AHEAD_COLS = (
+    "(SELECT coalesce(sum(a.amount), 0) FROM settlement_adjustments a "
+    "WHERE a.order_ref = orders.order_id AND a.ahead = 1) AS paid_ahead, "
+    "(SELECT max(a.settlement_id) FROM settlement_adjustments a "
+    "WHERE a.order_ref = orders.order_id AND a.ahead = 1) AS ahead_batch"
+)
+
 # Columns the settle page needs per order; the batch total is recomputed from
 # price/banner_fee/tunnel_fee/penalty_fee, so all four travel with every row.
 _SETTLE_ORDER_COLS = (
     "order_id, scheduled_time, service_type, flight_number, "
     "pickup, dropoff, price, banner_fee, tunnel_fee, penalty_fee, settlement_id, "
-    "coalesce(unpaid, 0) AS unpaid"
+    "coalesce(unpaid, 0) AS unpaid, " + _AHEAD_COLS
 )
 
 # Only a finished, priced, not-yet-batched leg can enter a batch.  The clock is
@@ -741,7 +759,11 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
     carry — {order_ref, date, amount}, the amount signed as printed.  They are
     money on this transfer, so they join expected_amount the way a leg does,
     and they are written in this transaction: a fine recorded against a batch
-    that failed to be created would be money taken off nothing.
+    that failed to be created would be money taken off nothing.  A line with
+    `ahead` set is a 舉牌 paid ahead of a trip the platform held back; the
+    batch that later takes the trip nets it off, so it is refused unless its
+    order is an active trip no batch holds and nothing was paid ahead of yet.
+    Each leg is summed net of what other batches already carry for it.
 
     `statement` is what the platform's statement said (stored as JSON, shown
     beside the system's numbers in batch detail); `image` is the screenshot
@@ -780,6 +802,25 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
         for order_id in penalties:
             if order_id not in seen:
                 raise ValueError(f"{order_id}: 判罰唔喺呢個 batch 入面")
+        # A line paid ahead has to name a trip still waiting for its batch:
+        # any other order would count it twice or never net it off.
+        for a in adjustments:
+            if not a.get("ahead"):
+                continue
+            ref = a["order_ref"]
+            row = conn.execute(
+                f"SELECT status, settlement_id, {_AHEAD_COLS} FROM orders WHERE order_id = ?", (ref,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"{ref}: 搵唔到單")
+            if (row["status"] or "active") != "active":
+                raise ValueError(f"{ref}: 已取消")
+            if ref in seen:
+                raise ValueError(f"{ref}: 張單喺呢個 batch 入面")
+            if row["settlement_id"] is not None:
+                raise ValueError(f"{ref}: 已經結算咗")
+            if row["paid_ahead"]:
+                raise ValueError(f"{ref}: 舉牌已經先結咗")
         for order_id, amount in penalties.items():
             conn.execute(
                 "UPDATE orders SET penalty_fee = coalesce(penalty_fee, 0) + ? WHERE order_id = ?",
@@ -790,8 +831,10 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
         # rows keeps the one definition of what an order is worth.
         expected = 0.0
         for order_id in order_ids:
-            row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
-            expected += expected_of(dict(row))
+            row = conn.execute(
+                f"SELECT *, {_AHEAD_COLS} FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            expected += owed_of(dict(row))
         expected = round(expected + sum(a["amount"] for a in adjustments), 2)
         cur = conn.execute(
             "INSERT INTO settlements (platform, expected_amount, confirmed_amount, settled_on, statement) "
@@ -806,9 +849,10 @@ def create_settlement(db_path: str, platform: str, order_ids: list[str],
             [settlement_id, *order_ids],
         )
         conn.executemany(
-            "INSERT INTO settlement_adjustments (settlement_id, order_ref, date, amount) "
-            "VALUES (?, ?, ?, ?)",
-            [(settlement_id, a["order_ref"], a["date"], a["amount"]) for a in adjustments],
+            "INSERT INTO settlement_adjustments (settlement_id, order_ref, date, amount, ahead) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(settlement_id, a["order_ref"], a["date"], a["amount"], 1 if a.get("ahead") else 0)
+             for a in adjustments],
         )
         conn.commit()
         if image is not None:
@@ -833,6 +877,11 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
     paid stop being owed by a batch that no longer exists.  Its adjustments go
     with it as well — they were lines of this transfer and there is no transfer
     left for them to belong to.
+
+    Raises ValueError, writing nothing, while a 舉牌 this batch paid ahead has
+    had its trip taken by another batch: that batch froze its figure net of
+    the 舉牌, the same reason a batched leg's fees are locked.  Undoing that
+    batch first releases this one.
     """
     with _conn(db_path) as conn:
         # The file name has to be read before the row goes: it is the only
@@ -842,6 +891,15 @@ def delete_settlement(db_path: str, settlement_id: int) -> bool:
         ).fetchone()
         if row is None:
             return False
+        held = conn.execute(
+            "SELECT a.order_ref, o.settlement_id FROM settlement_adjustments a "
+            "JOIN orders o ON o.order_id = a.order_ref "
+            "WHERE a.settlement_id = ? AND a.ahead = 1 AND o.settlement_id IS NOT NULL",
+            (settlement_id,),
+        ).fetchone()
+        if held is not None:
+            later = held["settlement_id"]
+            raise ValueError(f"{held['order_ref']}: 行程已喺批次 #{later}，要先撤銷 #{later}")
         image_name = row["statement_image"]
         conn.execute(
             "UPDATE orders SET settlement_id = NULL, unpaid = 0 WHERE settlement_id = ?",
@@ -908,14 +966,17 @@ def _batch_adjustments(conn, settlement_ids: list[int]) -> dict[int, list[dict]]
     if not settlement_ids:
         return {}
     rows = conn.execute(
-        "SELECT settlement_id, order_ref, date, amount FROM settlement_adjustments "
+        "SELECT settlement_id, order_ref, date, amount, ahead FROM settlement_adjustments "
         f"WHERE settlement_id IN ({', '.join('?' * len(settlement_ids))}) ORDER BY id",
         settlement_ids,
     ).fetchall()
     grouped: dict[int, list[dict]] = {sid: [] for sid in settlement_ids}
     for row in rows:
-        grouped[row["settlement_id"]].append(
-            {"order_ref": row["order_ref"], "date": row["date"], "amount": row["amount"]})
+        # Present only where true, the same shape reconcile hands to the batch.
+        line = {"order_ref": row["order_ref"], "date": row["date"], "amount": row["amount"]}
+        if row["ahead"]:
+            line["ahead"] = True
+        grouped[row["settlement_id"]].append(line)
     return grouped
 
 
@@ -1319,7 +1380,7 @@ def get_settle_month(db_path: str, month: str, platform: str,
             p = platform_of(row["service_type"])
             counts[p] += 1
             if p == platform:
-                unsettled += expected_of(dict(row))
+                unsettled += owed_of(dict(row))
 
         # Waiting for money is what a batch is still owed, not what it is
         # worth: a batch paid short contributes only its shortfall.  paid_on is

@@ -635,6 +635,25 @@ def test_settle_carries_the_batchs_own_lines(client):
     assert batch["expected_amount"] == 540.0
 
 
+R1_AHEAD = [{"order_ref": "R1", "date": "2026-07-01", "amount": 40.0, "ahead": True}]
+
+
+def test_settle_carries_what_a_trip_was_paid_ahead_so_the_page_can_net_it(client):
+    """owedOf() in the browser is the twin of service.py:owed_of: the day's
+    amber and the leg's figure are what is still to come, so the part the
+    platform paid ahead has to travel with the order."""
+    seed_ride("R1")
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    ahead = create_batch(["R2"], confirmed=340, adjustments=R1_AHEAD)
+    data = settle(client)
+    r1, r2 = data["orders"]
+    assert r1["paid_ahead"] == 40.0 and r1["ahead_batch"] == ahead
+    assert r2["paid_ahead"] == 0 and r2["ahead_batch"] is None
+    assert data["totals"]["unsettled"] == 500.0
+    assert data["settlements"][0]["adjustments"] == R1_AHEAD
+    assert data["settlements"][0]["expected_amount"] == 340.0
+
+
 def test_settle_totals_follow_the_batch(client):
     seed_ride("R1")
     seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
@@ -1083,6 +1102,18 @@ def test_delete_settlement_endpoint(client):
     assert data["settlements"] == []
     assert data["orders"][0]["settlement_id"] is None
     assert data["counts"]["ride"] == 1
+
+
+def test_undoing_a_batch_whose_banner_another_batch_netted_is_refused(client):
+    """The refusal names the batch to undo first, so the operator can act on it."""
+    seed_ride("R1")
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    ahead = create_batch(["R2"], confirmed=340, adjustments=R1_AHEAD)
+    later = create_batch(["R1"], confirmed=500, settled_on="2026-07-05")
+    res = client.delete(f"/api/settlements/{ahead}")
+    assert res.status_code == 409
+    assert f"#{later}" in res.get_json()["error"]
+    assert len(settle(client)["settlements"]) == 2
 
 
 def test_delete_settlement_unknown_id(client):

@@ -554,7 +554,12 @@ def api_deallocate_credit(settlement_id, credit_id):
 
 @app.delete("/api/settlements/<int:settlement_id>")
 def api_delete_settlement(settlement_id):
-    if not delete_settlement(DB_PATH, settlement_id):
+    try:
+        found = delete_settlement(DB_PATH, settlement_id)
+    except ValueError as e:
+        # Names the batch that has to be undone first.
+        return jsonify({"error": str(e)}), 409
+    if not found:
         return jsonify({"error": "settlement not found"}), 404
     return jsonify({"ok": True})
 
