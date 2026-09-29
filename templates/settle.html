@@ -13,6 +13,7 @@
 <title>埋數 · Ride Dispatch</title>
 <style>
 {% include "_shared.css" %}
+{% include "_order_sheet.css" %}
   /* This page has native date inputs, whose built-in widgets follow
      color-scheme rather than the tokens. */
   :root { color-scheme: dark; }
@@ -491,6 +492,7 @@
 <script>
 'use strict';
 {% include "_shared.js" %}
+{% include "_order_sheet.js" %}
 
 // ---- state ----
 // /api/settle answers one month at a time, but the calendar is a continuous
@@ -858,6 +860,10 @@ async function load(seed) {
   remerge(payloads[payloads.length - 1]);
   dropStaleFocus();
   render();
+  // An open order sheet shows the order itself, which the month payload does
+  // not carry, so it is fetched again with the rest.
+  const ov = orderView();
+  if (ov) await fetchOrder(ov);
   repaintOpenView();
 }
 
@@ -1452,7 +1458,16 @@ function paintView(keepScroll) {
   if (!v) return;
   const el = document.getElementById('sheet');
   const top = keepScroll ? el.scrollTop : 0;
-  el.innerHTML = '<div class="grab"></div>' + viewHtml(v);
+  // The order's own sheet and the views it stacks (its numpad, its cancel
+  // confirm) are _order_sheet.js, which fills the element itself.
+  const draw = v.kind === 'fn' ? v.render : v.kind === 'order' && v.order ? detailView : null;
+  el.classList.remove('np-sheet');
+  if (draw) {
+    el.innerHTML = '<div class="grab"></div>';
+    draw(el);
+  } else {
+    el.innerHTML = '<div class="grab"></div>' + viewHtml(v);
+  }
   el.scrollTop = top;
   el.classList.add('show');
   document.getElementById('scrim').classList.add('show');
@@ -1615,86 +1630,35 @@ function dayViewHtml(v) {
 }
 
 // ---- order sheet ----
-// The leg read as itself: who and where, and the money in the terms the
-// platform pays it. The month payload carries settle columns only, so the
-// order is fetched per open and kept on the view; the fetch is what the sheet
-// waits on, and a repaint must not fire it again.
+// The same sheet the dashboard opens (_order_sheet.js), so an order found
+// while settling is corrected where it was found.  The month payload carries
+// settle columns only, so the order itself is fetched per open and kept on
+// the view; the fetch is what the sheet waits on.
 async function openOrder(orderId) {
   const v = { kind: 'order', id: orderId, order: null, err: '' };
   pushView(v);
-  try {
-    const res = await fetch('/api/orders/' + encodeURIComponent(orderId));
-    const body = await res.json().catch(() => ({}));
-    if (res.ok) v.order = body;
-    else v.err = body.error || ('HTTP ' + res.status);
-  } catch (e) {
-    v.err = '讀唔到';
-  }
+  await fetchOrder(v);
   // The operator can have moved on while the fetch was in flight.
   if (curView() === v) paintView();
 }
-
+async function fetchOrder(v) {
+  try {
+    const res = await fetch('/api/orders/' + encodeURIComponent(v.id));
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) { v.order = body; v.err = ''; }
+    else { v.order = null; v.err = body.error || ('HTTP ' + res.status); }
+  } catch (e) {
+    v.err = '讀唔到';
+  }
+}
+function orderView() {
+  for (let i = views.length - 1; i >= 0; i--) if (views[i].kind === 'order') return views[i];
+  return null;
+}
+// Drawn only until the order has arrived, or when it could not be read.
 function orderViewHtml(v) {
-  const o = v.order;
-  if (!o) {
-    return sheetHead('單 ' + esc(tailId(v.id)), '') +
-      (v.err ? '<div class="order-err">' + esc(v.err) + '</div>'
-             : '<div class="empty">讀緊…</div>');
-  }
-  const d = orderDate(o);
-  // Labels are escaped where they come from the order: a contact's own label
-  // is the platform's free text, the rest are this page's own words.
-  const rows = [['單號', '<span class="oid" data-copy="' + esc(o.order_id) + '">' +
-    esc(groupId(o.order_id)) + '</span>']];
-  rows.push(['時間', esc([orderTime(o), svcLabel(o.service_type), o.flight_number]
-    .filter(Boolean).join(' · '))]);
-  if (o.pickup) rows.push(['路線', esc(o.pickup) +
-    '<br><span class="oarrow">&rarr;</span> ' + esc(o.dropoff)]);
-  if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
-  for (const [cl, cv] of collectContactLines(o)) {
-    rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
-  }
-  if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
-  if (o.price) rows.push(['價錢', money(o.price)]);
-  // Only the fees this order carries, and the net under them: with no fee or
-  // fine to move the figure, the net would only repeat the fare.
-  const fees = [];
-  if (o.banner_fee) fees.push(['橫額', money(o.banner_fee)]);
-  if (o.tunnel_fee) fees.push(['隧道', money(o.tunnel_fee)]);
-  if (o.parking_fee) fees.push(['停車', money(o.parking_fee)]);
-  if (o.penalty_fee) fees.push(['判罰', money(-o.penalty_fee), 'fine']);
-  if (fees.length) fees.push(['淨收', money(expectedOf(o))]);
-  const html = rows.concat(fees).map(r =>
-    '<div class="sum-row"><span class="k">' + r[0] + '</span>' +
-    '<span class="v' + (r[2] ? ' ' + r[2] : '') + '">' + r[1] + '</span></div>').join('');
-
-  // Where this leg's money has got to. A batched leg hands the operator on to
-  // the batch, which is the only place the rest of that answer is.
-  const b = batchOf(o.order_id);
-  const settle = b
-    ? '<button class="sum-row link" data-bl="' + b.id + '"><span class="k">結算</span>' +
-      '<span class="v">批次 ' + esc(batchLabel(b)) + ' · ' + esc(batchTag(b)) +
-      '<span class="c">&rsaquo;</span></span></button>' +
-      (o.unpaid ? '<div class="sub-note warn">未過數</div>' : '')
-    : '<div class="sum-row"><span class="k">結算</span><span class="v">' +
-      esc(dayTag(o)[0]) + '</span></div>';
-
-  // The other place part of this leg's money went: a 舉牌 paid ahead of a
-  // trip the platform held back sits on the batch it arrived with.
-  const s = settleRowOf(o.order_id);
-  const aheadB = s && s.paid_ahead > 0 ? batchById(s.ahead_batch) : null;
-  const ahead = !(s && s.paid_ahead > 0) ? ''
-    : aheadB
-      ? '<button class="sum-row link" data-bl="' + aheadB.id + '"><span class="k">舉牌先結</span>' +
-        '<span class="v">' + money(s.paid_ahead) + ' · 批次 ' + esc(batchLabel(aheadB)) + ' · ' +
-        esc(batchTag(aheadB)) + '<span class="c">&rsaquo;</span></span></button>'
-      : '<div class="sum-row"><span class="k">舉牌先結</span><span class="v">' +
-        money(s.paid_ahead) + ' · 批次 #' + esc(s.ahead_batch) + '</span></div>';
-
-  return sheetHead(esc(orderLabel(o)),
-      esc(mdLabel(d)) + ' 星期' + weekday(d) + ' · ' + esc(platLabel(platform(o)))) +
-    '<div class="sum-rows order-rows">' + html + settle + ahead + '</div>' +
-    '<button class="ghost-btn" data-back="1">收埋</button>';
+  return sheetHead('單 ' + esc(tailId(v.id)), '') +
+    (v.err ? '<div class="order-err">' + esc(v.err) + '</div>' : '<div class="empty">讀緊…</div>');
 }
 // The settle columns the order endpoint does not carry live on the loaded
 // rows, the same place batchOf reads the leg's batch from.
@@ -1702,6 +1666,67 @@ function settleRowOf(id) {
   return data.orders.find(o => o.order_id === id) ||
     data.settlements.flatMap(b => b.orders).find(o => o.order_id === id) || null;
 }
+function batchLinkHtml(b, lead) {
+  return '<button class="info-link" data-bl="' + b.id + '">' + lead + '批次 ' +
+    esc(batchLabel(b)) + ' · ' + esc(batchTag(b)) + ' &rsaquo;</button>';
+}
+
+const orderHost = {
+  order() { const v = orderView(); return v ? v.order : null; },
+  push(render) { pushView({ kind: 'fn', render }); },
+  async patch(body) {
+    const v = orderView();
+    try {
+      await apiWrite('PATCH', '/api/orders/' + encodeURIComponent(v.id), body);
+    } catch (e) {
+      toast(e.message);
+      return false;
+    }
+    // Back to the order before the reload redraws it, so the numpad is not
+    // drawn once more with the old figure.
+    if (curView().kind === 'fn') views.pop();
+    await load();
+    return true;
+  },
+  cancelled(id) {
+    // Out of the order and everything stacked on it, back to where it was
+    // opened from, whose rows no longer hold it.
+    const v = orderView();
+    while (views.length && curView() !== v) views.pop();
+    views.pop();
+    toast('已取消 #' + shortId(id));
+    if (!views.length) closeSheet();
+    load();
+  },
+  gone() {
+    // The order could not be read again (cancelled elsewhere, say): back to
+    // its own view, which says so.
+    const v = orderView();
+    while (views.length && curView() !== v) views.pop();
+    paintView();
+  },
+  subtitle: o => '#' + esc(shortId(o.order_id)) + ' · ' + esc(mdLabel(orderDate(o))) + ' 星期' +
+    weekday(orderDate(o)),
+  // The whole number, to copy: statements and the platform name a leg by it.
+  rowsBefore: o => [['單號', '<span class="oid" data-copy="' + esc(o.order_id) + '">' +
+    esc(groupId(o.order_id)) + '</span>']],
+  rowsAfter(o) {
+    const rows = [];
+    const fees = (o.banner_fee || 0) + (o.tunnel_fee || 0) + (o.penalty_fee || 0);
+    if (fees && !(o.penalty_fee > 0)) rows.push(['淨收', money(expectedOf(o))]);
+    const b = batchOf(o.order_id);
+    rows.push(['結算', b ? batchLinkHtml(b, '') + (o.unpaid ? ' · 未過數' : '') : esc(dayTag(o)[0])]);
+    // The other place part of this leg's money went: a 舉牌 paid ahead of a
+    // trip the platform held back sits on the batch it arrived with.
+    const s = settleRowOf(o.order_id);
+    if (s && s.paid_ahead > 0) {
+      const ahead = batchById(s.ahead_batch);
+      rows.push(['舉牌', ahead ? batchLinkHtml(ahead, money(s.paid_ahead) + ' 先結 · ')
+                               : money(s.paid_ahead) + ' 先結 · 批次 #' + esc(s.ahead_batch)]);
+    }
+    return rows;
+  },
+};
 
 // ---- batch sheet ----
 // Read money first: the confirmed figure and where its payment has got to are

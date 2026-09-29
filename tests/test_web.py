@@ -931,13 +931,25 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     an action hidden behind one would otherwise never be counted.
 
     'od' is the day row opening the order it stands for: the row carries the
-    reconciliation view, the sheet behind it carries the order."""
+    reconciliation view, the sheet behind it carries the order.  'k' and 's'
+    are the keys and steppers of that sheet's numpad, the dashboard's own."""
     page = client.get("/settle").get_data(as_text=True)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
-        "fold", "od", "upbatch", "upguess", "uptick", "upsave",
+        "fold", "k", "od", "s", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
+
+
+def test_both_pages_open_the_same_order_sheet(client):
+    """An order found while settling is corrected in the sheet the dashboard
+    opens: one component that both pages include, each supplying only its
+    host, so the two cannot drift apart."""
+    for path in ("/", "/settle"):
+        page = client.get(path).get_data(as_text=True)
+        assert page.count("function detailView(") == 1
+        assert page.count("function numpadView(") == 1
+        assert page.count("const orderHost = {") == 1
 
 
 def test_allocating_the_whole_batch_pays_it(client):
