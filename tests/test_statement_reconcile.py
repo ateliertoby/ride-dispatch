@@ -2,7 +2,7 @@ from datetime import datetime
 
 from ride_dispatch.statement import (
     Statement, StatementDay, StatementRow, reconcile, levenshtein, dates_of, corrected_json,
-    penalties_of,
+    penalties_of, format_report, confirm_label,
 )
 
 NOW = datetime(2026, 8, 26, 12, 0)
@@ -13,10 +13,11 @@ def row(date, oid, amount, **kw):
 
 
 def order(oid, scheduled, price=210.0, banner=0.0, status="active", settlement_id=None, service_type="送机",
-          penalty=None):
+          penalty=None, paid_ahead=0.0, ahead_batch=None):
     return {"order_id": oid, "scheduled_time": scheduled, "service_type": service_type, "flight_number": "",
             "pickup": "", "dropoff": "", "price": price, "banner_fee": banner, "tunnel_fee": 0.0,
-            "settlement_id": settlement_id, "status": status, "penalty_fee": penalty}
+            "settlement_id": settlement_id, "status": status, "penalty_fee": penalty,
+            "paid_ahead": paid_ahead, "ahead_batch": ahead_batch}
 
 
 def stmt(days, total=None, account="YY0000"):
@@ -494,6 +495,112 @@ def test_a_fine_on_a_leg_of_this_batch_stays_on_the_order():
     r = reconcile(penalty_stmt(), [order("A1", "2026-08-23 09:00:00", 280.0)], NOW)
     assert r.entries[0].kind == "penalty" and r.adjustments == []
     assert penalties_of(r) == {"A1": 97.38}
+
+
+# ---- 舉牌先結: a 舉牌 line paid ahead of its trip ----
+
+# A 接機 with a 舉牌 on the 23rd, and a leg of its own on the 25th.
+HELD = order("B1", "2026-08-23 22:00:00", 300.0, banner=40.0, service_type="接机")
+LATER_LEG = order("A1", "2026-08-25 10:00:00", 210.0)
+
+
+def ahead_stmt():
+    """The platform held the trip back and paid its 舉牌 line anyway."""
+    return stmt([day("2026-08-23", [row("2026-08-23", "B1", 40.0)], 1, 40.0),
+                 day("2026-08-25", [row("2026-08-25", "A1", 210.0)], 1, 210.0)], total=250.0)
+
+
+def test_a_lone_banner_line_is_paid_ahead_and_its_trip_stays_unsettled():
+    """The 舉牌 is money on this transfer, so the batch carries it; the trip
+    was held back, so the order is not a leg of the batch and stays owed."""
+    r = reconcile(ahead_stmt(), [HELD, LATER_LEG], NOW)
+    assert [e.kind for e in r.entries] == ["ahead", "matched"]
+    assert r.settle_ids == ["A1"]
+    assert r.adjustments == [{"order_ref": "B1", "date": "2026-08-23", "amount": 40.0, "ahead": True}]
+    assert r.expected == 250.0 and r.confirmed == 250.0 and r.diff == 0
+    assert r.missing == []
+    # The trip is still to come, which is something to chase: not clean.
+    assert r.can_settle and not r.clean
+
+
+def test_the_card_names_the_banner_paid_ahead_and_the_trip_still_held():
+    r = reconcile(ahead_stmt(), [HELD, LATER_LEG], NOW)
+    report = format_report(r)
+    assert "  舉牌先結  #…B1  $40 · 行程 $300 抽起 — 記入今次" in report
+    assert "系統應收 $250 · 差額 $0" in report
+    assert confirm_label(r) == "照平台數確認 + 記帳項 · 1 程 · $250（差額 $0）"
+
+
+def test_the_trip_that_follows_is_owed_only_what_was_not_paid_ahead():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "B1", 300.0)], 1, 300.0)], total=300.0)
+    held = order("B1", "2026-08-23 22:00:00", 300.0, banner=40.0, service_type="接机",
+                 paid_ahead=40.0, ahead_batch=7)
+    r = reconcile(s, [held], NOW)
+    assert [e.kind for e in r.entries] == ["matched"]
+    assert r.settle_ids == ["B1"] and r.adjustments == []
+    assert r.expected == 300.0 and r.diff == 0 and r.clean
+
+
+def test_a_fine_on_the_trip_that_follows_nets_against_what_is_still_owed():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "B1", 300.0), row("2026-08-23", "B1", -30.0)],
+                  2, 270.0)], total=270.0)
+    held = order("B1", "2026-08-23 22:00:00", 300.0, banner=40.0, service_type="接机",
+                 paid_ahead=40.0, ahead_batch=7)
+    r = reconcile(s, [held], NOW)
+    assert [e.kind for e in r.entries] == ["penalty"]
+    assert penalties_of(r) == {"B1": 30.0}
+    assert r.expected == 270.0 and r.diff == 0
+
+
+def test_a_second_read_of_a_banner_already_paid_ahead_records_nothing():
+    """Re-sending the image after the confirm: the 舉牌 is already on batch #7
+    and the trip is still owed, so there is nothing new to write."""
+    held = order("B1", "2026-08-23 22:00:00", 300.0, banner=40.0, service_type="接机",
+                 paid_ahead=40.0, ahead_batch=7)
+    leg = order("A1", "2026-08-25 10:00:00", 210.0, settlement_id=7)
+    r = reconcile(ahead_stmt(), [held, leg], NOW)
+    assert [e.kind for e in r.entries] == ["already_ahead", "already_settled"]
+    assert r.entries[0].settlement_id == 7
+    assert r.settle_ids == [] and r.adjustments == [] and not r.can_settle
+    assert "  舉牌先結  #…B1  $40 已喺批次 #7 · 行程 $300 抽起" in format_report(r)
+
+
+def test_a_held_trip_left_off_a_later_statement_is_owed_net_of_its_banner():
+    s = stmt([day("2026-08-23", [row("2026-08-23", "A1", 210.0)], 1, 210.0)], total=210.0)
+    held = order("B1", "2026-08-23 22:00:00", 300.0, banner=40.0, service_type="接机",
+                 paid_ahead=40.0, ahead_batch=7)
+    r = reconcile(s, [order("A1", "2026-08-23 10:00:00", 210.0), held], NOW)
+    assert [o["order_id"] for o in r.missing] == ["B1"]
+    assert "  抽起  #…B1  $300（今次冇計）" in format_report(r)
+
+
+def test_a_banner_sized_line_on_an_order_without_a_banner_is_an_amount_diff():
+    """Only the order's own 舉牌 fee can say what the line is: a trip that
+    carries none has no part the platform could have paid ahead."""
+    bare = order("B1", "2026-08-23 22:00:00", 300.0, service_type="接机")
+    r = reconcile(ahead_stmt(), [bare, LATER_LEG], NOW)
+    assert [e.kind for e in r.entries] == ["amount_diff", "matched"]
+    assert sorted(r.settle_ids) == ["A1", "B1"] and r.adjustments == []
+
+
+def test_a_banner_beside_a_trip_line_priced_at_zero_is_not_paid_ahead():
+    """The trip line is on the statement, so nothing was held back: the
+    platform paid the trip nothing, which is a discrepancy to chase."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "B1", 0.0), row("2026-08-23", "B1", 40.0)],
+                  2, 40.0)], total=40.0)
+    r = reconcile(s, [HELD], NOW)
+    assert [e.kind for e in r.entries] == ["amount_diff"]
+    assert r.settle_ids == ["B1"] and r.adjustments == []
+
+
+def test_a_statement_of_nothing_but_a_banner_paid_ahead_makes_no_batch():
+    """The line is recorded on a batch, and with no leg there is no batch to
+    record it on: the card says so rather than promising a write."""
+    s = stmt([day("2026-08-23", [row("2026-08-23", "B1", 40.0)], 1, 40.0)], total=40.0)
+    r = reconcile(s, [HELD], NOW)
+    assert [e.kind for e in r.entries] == ["ahead"]
+    assert r.settle_ids == [] and r.adjustments == [] and not r.can_settle
+    assert "  舉牌先結  #…B1  $40 · 行程 $300 抽起 — 要人手處理" in format_report(r)
 
 
 def test_corrected_json_rewrites_fuzzy_ids():

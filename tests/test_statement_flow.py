@@ -31,17 +31,17 @@ def db_path():
     yield path
 
 
-def make_order(order_id, scheduled):
-    return Order(order_id=order_id, service_type="送机", vehicle_type="经济5座",
+def make_order(order_id, scheduled, service_type="送机", additional_services=""):
+    return Order(order_id=order_id, service_type=service_type, vehicle_type="经济5座",
                  passenger_name="TEST/USER", scheduled_time=scheduled,
                  passenger_phone="86 13800000000", overseas_phone="", flight_number="",
                  pickup="尖沙咀", dropoff="香港国际机场 T1", distance_km=30, notes="",
-                 driver_notes="", additional_services="", passenger_exit_minutes=None,
+                 driver_notes="", additional_services=additional_services, passenger_exit_minutes=None,
                  third_party_contact="", more_contacts="", raw_message="raw")
 
 
-def seed(db_path, oid, scheduled, price=210.0):
-    save_order(db_path, make_order(oid, scheduled), telegram_msg_id=1, parking=0.0, source="携程")
+def seed(db_path, oid, scheduled, price=210.0, **kw):
+    save_order(db_path, make_order(oid, scheduled, **kw), telegram_msg_id=1, parking=0.0, source="携程")
     update_price(db_path, oid, price)
 
 
@@ -274,6 +274,32 @@ def test_confirm_propagates_the_refusal_that_names_the_order(db_path):
     with pytest.raises(ValueError, match="A1"):
         statement_flow.confirm(db_path, p, None, NOW)
     assert len(open_batches(db_path, "ride")) == 1
+
+
+def test_a_banner_paid_ahead_and_its_trip_settle_in_the_batches_that_paid_them(db_path):
+    """The platform pays a 舉牌 line on one statement and the trip it held back
+    on a later one.  Each batch is owed exactly what its statement paid, and
+    the order ends in the batch that paid its trip."""
+    seed(db_path, "B1", f"{TWO_DAYS} 22:00:00", 300.0, service_type="接机", additional_services="举牌")
+    seed(db_path, "A1", f"{YESTERDAY} 10:00:00", 210.0)
+    first = stmt_for({TWO_DAYS: [("B1", 40.0)], YESTERDAY: [("A1", 210.0)]}, 250.0)
+    p = statement_flow.prepare(db_path, first, NOW)
+    assert p.confirm_label == "照平台數確認 + 記帳項 · 1 程 · $250（差額 $0）"
+    done = statement_flow.confirm(db_path, p, None, NOW)
+    batch = get_settlement(db_path, done.settlement_id)
+    assert batch["expected_amount"] == 250.0
+    assert [o["order_id"] for o in batch["orders"]] == ["A1"]
+    assert get_order_by_id(db_path, "B1")["settlement_id"] is None
+    assert "已記帳項 +$40 · 1 行" in done.text
+
+    # Sending the same image again has nothing left to write.
+    assert not statement_flow.prepare(db_path, first, NOW).can_settle
+
+    p = statement_flow.prepare(db_path, stmt_for({TWO_DAYS: [("B1", 300.0)]}, 300.0), NOW)
+    assert p.confirm_label == "確認結算 · 1 程 · $300"
+    done = statement_flow.confirm(db_path, p, None, NOW)
+    assert get_settlement(db_path, done.settlement_id)["expected_amount"] == 300.0
+    assert get_order_by_id(db_path, "B1")["settlement_id"] == done.settlement_id
 
 
 # ---- unreadable images ----

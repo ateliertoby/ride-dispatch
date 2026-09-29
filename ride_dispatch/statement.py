@@ -17,7 +17,7 @@ import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
-from .service import expected_of
+from .service import owed_of
 
 
 # ---- what the platform said ----
@@ -79,7 +79,7 @@ class Entry:
     order_id: str               # corrected id when matched, else statement_id
     date: str
     platform_amount: float
-    expected: float | None      # expected_of(order) when an order was found
+    expected: float | None      # owed_of(order) when an order was found
     order: dict | None
     settlement_id: int | None = None
     fuzzy: bool = False
@@ -151,14 +151,31 @@ def _late_fine(e: "Entry") -> bool:
             and not _same(e.platform_amount, e.expected))
 
 
-def _as_adjustments(order_ref: str, rows: list[StatementRow]) -> list[dict]:
+def _as_adjustments(order_ref: str, rows: list[StatementRow], ahead: bool = False) -> list[dict]:
     """Statement lines as the batch will record them, one row per printed line.
 
     The platform's own structure is kept rather than netted: a 判罰 and the
     免責 line that cancels it are two facts, and a pair that happens to net to
-    zero must still be readable as the pair it was.
+    zero must still be readable as the pair it was.  `ahead` marks a 舉牌 paid
+    ahead of its trip, which the batch that later takes the trip nets off.
     """
-    return [{"order_ref": order_ref, "date": r.date, "amount": r.amount} for r in rows]
+    lines = [{"order_ref": order_ref, "date": r.date, "amount": r.amount} for r in rows]
+    if ahead:
+        for line in lines:
+            line["ahead"] = True
+    return lines
+
+
+def _banner_only(order: dict, rows: list[StatementRow]) -> bool:
+    """Whether an order's lines are its 舉牌 and nothing else.
+
+    The category chip that would name the line is unreadable, so this is the
+    arithmetic the card can stand behind: one line, for exactly the 舉牌 fee
+    the order carries.  A trip line printed at zero beside it is a trip the
+    platform paid nothing for, not one it held back.
+    """
+    banner = order.get("banner_fee") or 0
+    return banner > 0 and len(rows) == 1 and _same(rows[0].amount, banner)
 
 
 # A near miss is allowed the same two edits wherever it is measured — over a
@@ -352,7 +369,7 @@ def leg_amount(batch: dict, order: dict) -> float:
             if r.get("order_id") == order["order_id"]]
     if rows:
         return round(sum(r["amount"] for r in rows), 2)
-    return expected_of(order)
+    return owed_of(order)
 
 
 def _settleable(order: dict, now: datetime) -> str | None:
@@ -413,7 +430,7 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
         order, fuzzy = bound[sid]
         oid = order["order_id"]
         matched_ids.add(oid)
-        exp = expected_of(order)
+        exp = owed_of(order)
         base = dict(statement_id=sid, order_id=oid, date=date, platform_amount=amount,
                     expected=exp, order=order, fuzzy=fuzzy, penalty=neg)
         if (order.get("status") or "active") != "active":
@@ -431,6 +448,16 @@ def reconcile(stmt: Statement, orders: list[dict], now: datetime) -> Reconciliat
                 adjustments += _as_adjustments(oid, [r for r in lines[sid] if r.amount < 0])
         elif (reason := _settleable(order, now)) is not None:
             entries.append(Entry("not_ready", reason=reason, **base))
+        elif not _same(amount, exp) and _banner_only(order, lines[sid]):
+            # The platform held the trip back and paid its 舉牌 anyway.  The
+            # 舉牌 is money on this transfer, so this batch records it; the
+            # trip is not, so the order stays out of the batch and is owed the
+            # rest.  One already paid ahead is this statement read again.
+            if order.get("paid_ahead"):
+                entries.append(Entry("already_ahead", settlement_id=order.get("ahead_batch"), **base))
+            else:
+                entries.append(Entry("ahead", **base))
+                adjustments += _as_adjustments(oid, lines[sid], ahead=True)
         else:
             if _same(amount, exp):
                 # Covers both "no penalty" and "the fine is already recorded":
@@ -1067,6 +1094,8 @@ def read_image(data: bytes) -> Statement:
 # such a borrowed word rather than a kind of its own.
 _KIND_LABEL = {
     "adjustment": "判罰",
+    "ahead": "舉牌先結",
+    "already_ahead": "舉牌先結",
     "amount_diff": "金額唔同",
     "already_settled": "已結算",
     "cancelled": "已取消",
@@ -1172,6 +1201,14 @@ def format_report(rec: Reconciliation) -> str:
                 detail = f"平台 {money_str(e.platform_amount)} · 系統 {money_str(e.expected)}"
                 if e.penalty < 0:
                     detail += f"（內含判罰 {_signed(e.penalty)}）"
+            elif e.kind == "ahead":
+                # Without a batch to record it on, the 舉牌 has nowhere to go.
+                held_back = money_str(round(e.expected - e.platform_amount, 2))
+                detail = (f"{money_str(e.platform_amount)} · 行程 {held_back} 抽起 "
+                          + (kept or "— 要人手處理"))
+            elif e.kind == "already_ahead":
+                detail = (f"{money_str(e.platform_amount)} 已喺批次 #{e.settlement_id} · "
+                          f"行程 {money_str(e.expected)} 抽起")
             elif _late_fine(e):
                 # A fine on an order whose batch is already frozen, and the
                 # platform's figure says it is not one this system has taken
@@ -1192,7 +1229,7 @@ def format_report(rec: Reconciliation) -> str:
             lines.append(f"  {label}  {short_id(e.statement_id)}  {detail}")
             lines.append(f"  {e.statement_id}")
         for o in held:
-            lines.append(f"  抽起  {short_id(o['order_id'])}  {money_str(expected_of(o))}（今次冇計）")
+            lines.append(f"  抽起  {short_id(o['order_id'])}  {money_str(owed_of(o))}（今次冇計）")
             lines.append(f"  {o['order_id']}")
     lines.append("")
     if rec.checksum == "fail":
@@ -1310,10 +1347,10 @@ def fallback_report(orders: list[dict]) -> str:
     for date in sorted(by_date):
         rows = by_date[date]
         lines.append("")
-        lines.append(f"{_md(date)} · {len(rows)} 程 · {money_str(sum(expected_of(o) for o in rows))}")
+        lines.append(f"{_md(date)} · {len(rows)} 程 · {money_str(sum(owed_of(o) for o in rows))}")
         for o in rows:
             t = o["scheduled_time"][11:16]
-            lines.append(f"  {t} {short_id(o['order_id'])} {money_str(expected_of(o))}")
+            lines.append(f"  {t} {short_id(o['order_id'])} {money_str(owed_of(o))}")
             lines.append(f"  {o['order_id']}")
     if len(lines) == 1:
         lines.append("（冇）")
