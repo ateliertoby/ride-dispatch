@@ -255,6 +255,8 @@
      rather than warning about one — same shape as .oplat, the colour of money
      going out. */
   .ofine { color: var(--red); font-size: 0.85em; margin-left: 4px; }
+  /* A 舉牌 paid ahead is money that has arrived, on another batch. */
+  .oahead { color: var(--green); font-size: 0.85em; margin-left: 4px; }
   /* A leg the platform held back and paid later is a record, not a warning:
      same shape as the 未過數 mark, the colour of money that has arrived. */
   .omark.paid { background: var(--paid-bg); color: var(--green); }
@@ -574,9 +576,8 @@ function dayInfo(dateStr) {
   const list = ordersOn(dateStr);
   let total = 0, loose = 0;
   for (const o of list) {
-    const amt = expectedOf(o);
-    total += amt;
-    if (!batchOf(o.order_id)) loose += amt;
+    total += expectedOf(o);
+    if (!batchOf(o.order_id)) loose += owedOf(o);
   }
   return { n: list.length, total, loose };
 }
@@ -1457,9 +1458,9 @@ function orderRowHtml(o, mode, opts) {
   let right;
   if (mode === 'day') {
     const tag = dayTag(o);
-    const amt = expectedOf(o);
+    const amt = owedOf(o);
     right = '<span class="oend">' + (amt ? '<span class="oa">' + money(amt) + '</span>' : '') +
-      '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span></span>';
+      '<span class="otag ' + tag[1] + '">' + esc(tag[0]) + '</span>' + aheadTag(o) + '</span>';
   } else if (tick) {
     // The figure to tick against is the platform's, because the outstanding
     // amount the ticks have to add up to is the platform's own arithmetic.
@@ -1470,14 +1471,17 @@ function orderRowHtml(o, mode, opts) {
     const mark = !o.price ? '未入價' : (o.scheduled_time >= NOW ? '未完成' : '');
     // In batch detail the platform's own figure is shown when it disagrees;
     // an equal figure would only repeat the number.
-    const platNote = plat !== undefined && Math.abs(plat - expectedOf(o)) >= 0.005
+    const platNote = plat !== undefined && Math.abs(plat - owedOf(o)) >= 0.005
       ? ' · <span class="oplat">平台 $' + $(plat) + '</span>' : '';
     // The fine is why the leg is worth less than its fare; both figures are
     // already net, so this only names the deduction.
     const penNote = (o.penalty_fee || 0) > 0
       ? ' · <span class="ofine">判罰 ' + money(-o.penalty_fee) + '</span>' : '';
+    // Likewise the 舉牌 another batch carries: the leg is owed the rest here.
+    const aheadNote = (o.paid_ahead || 0) > 0
+      ? ' · <span class="oahead">舉牌 ' + money(o.paid_ahead) + ' 先結</span>' : '';
     right = mark ? '<span class="omark">' + mark + '</span>'
-                 : '<span class="oa">' + money(expectedOf(o)) + penNote + platNote + '</span>';
+                 : '<span class="oa">' + money(owedOf(o)) + penNote + aheadNote + platNote + '</span>';
     // A leg the platform held back says when its money finally came, so the
     // list keeps the record the flags were kept for.
     if (opts && opts.madeUp) right = '<span class="omark paid">補收 ' + esc(opts.madeUp) +
@@ -1524,6 +1528,12 @@ function orderListHtml(b, rows, tickSet) {
 // ---- day sheet ----
 // A read of the day: what it earned, where each leg's money has got to, and
 // the batches it belongs to. Nothing is written from here.
+// A 舉牌 paid ahead of a held-back trip has already arrived on another batch,
+// so the leg's figure is the rest and this line names the part that came.
+function aheadTag(o) {
+  return (o.paid_ahead || 0) > 0
+    ? '<span class="otag paid">舉牌 ' + money(o.paid_ahead) + ' 先結</span>' : '';
+}
 function dayTag(o) {
   const b = batchOf(o.order_id);
   if (b) {
@@ -1641,10 +1651,28 @@ function orderViewHtml(v) {
     : '<div class="sum-row"><span class="k">結算</span><span class="v">' +
       esc(dayTag(o)[0]) + '</span></div>';
 
+  // The other place part of this leg's money went: a 舉牌 paid ahead of a
+  // trip the platform held back sits on the batch it arrived with.
+  const s = settleRowOf(o.order_id);
+  const aheadB = s && s.paid_ahead > 0 ? batchById(s.ahead_batch) : null;
+  const ahead = !(s && s.paid_ahead > 0) ? ''
+    : aheadB
+      ? '<button class="sum-row link" data-bl="' + aheadB.id + '"><span class="k">舉牌先結</span>' +
+        '<span class="v">' + money(s.paid_ahead) + ' · 批次 ' + esc(batchLabel(aheadB)) + ' · ' +
+        esc(batchTag(aheadB)) + '<span class="c">&rsaquo;</span></span></button>'
+      : '<div class="sum-row"><span class="k">舉牌先結</span><span class="v">' +
+        money(s.paid_ahead) + ' · 批次 #' + esc(s.ahead_batch) + '</span></div>';
+
   return sheetHead(esc(orderLabel(o)),
       esc(mdLabel(d)) + ' 星期' + weekday(d) + ' · ' + esc(platLabel(platform(o)))) +
-    '<div class="sum-rows order-rows">' + html + settle + '</div>' +
+    '<div class="sum-rows order-rows">' + html + settle + ahead + '</div>' +
     '<button class="ghost-btn" data-back="1">收埋</button>';
+}
+// The settle columns the order endpoint does not carry live on the loaded
+// rows, the same place batchOf reads the leg's batch from.
+function settleRowOf(id) {
+  return data.orders.find(o => o.order_id === id) ||
+    data.settlements.flatMap(b => b.orders).find(o => o.order_id === id) || null;
 }
 
 // ---- batch sheet ----
@@ -1690,15 +1718,16 @@ function batchPropHtml(p, c) {
 
 // The lines the batch carries itself: money on the transfer that no leg of it
 // could hold -- a 判罰 booked against a trip outside the batch, the 免責 line
-// that cancels it. The platform's own line structure is kept, so a pair that
-// nets to zero still reads as the pair it was.
+// that cancels it, a 舉牌 paid ahead of a trip the platform held back. The
+// platform's own line structure is kept, so a pair that nets to zero still
+// reads as the pair it was.
 function adjustmentsHtml(b) {
   const rows = b.adjustments || [];
   if (!rows.length) return '';
   const total = round2(rows.reduce((sum, a) => sum + a.amount, 0));
   return '<div class="prop-sec"><div class="prop-head">帳項 · ' + money(total) + '</div>' +
-    rows.map(a => '<div class="sum-row"><span class="k">' + esc(tailId(a.order_ref)) +
-      ' · ' + esc(mdSlash(a.date)) + '</span><span class="v">' +
+    rows.map(a => '<div class="sum-row"><span class="k">' + (a.ahead ? '舉牌先結 ' : '') +
+      esc(tailId(a.order_ref)) + ' · ' + esc(mdSlash(a.date)) + '</span><span class="v">' +
       (a.amount < 0 ? '&minus;' : '+') + '$' + $(Math.abs(a.amount)) + '</span></div>').join('') +
     '</div>';
 }

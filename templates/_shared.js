@@ -146,6 +146,12 @@ function expectedOf(o) {
   if (p === 'foodpanda') return (o.price || 0) - pen;
   return (o.price || 0) + (o.tunnel_fee || 0) - pen;   // didi, uber: the toll is reimbursed
 }
+// JS twin of service.py:owed_of — keep in sync. What the batch that takes this
+// leg's trip is owed for it: the 舉牌 other batches carry, paid ahead of a trip
+// the platform held back, comes off. Only the settle payload carries paid_ahead.
+function owedOf(o) {
+  return expectedOf(o) - (o.paid_ahead || 0);
+}
 // JS port of service.py — display-time classification only.  Keep the service
 // types listed here in step with that module.
 const _QUICK_TYPES = new Set(['滴滴', 'Uber', 'foodpanda']);
