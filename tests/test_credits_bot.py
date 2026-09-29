@@ -713,6 +713,13 @@ def test_allocate_is_only_called_by_a_tapped_callback():
                                        ("web.py", "api_allocate_credit")}
 
 
+def test_allocate_all_is_only_called_by_the_settle_page():
+    """Paying a whole group is the same decision as paying one batch, taken
+    once for the group the page shows.  A new call site has to be added here
+    deliberately."""
+    assert _call_sites("allocate_all") == {("web.py", "api_allocate_credit_all")}
+
+
 def test_mark_unpaid_is_only_called_from_the_web_handler():
     """Naming the legs a short payment left out is a dashboard operation, not a
     chat interaction.  A new call site has to be added here deliberately."""

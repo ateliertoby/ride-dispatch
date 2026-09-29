@@ -921,7 +921,8 @@ def test_the_writes_a_batch_accepts_are_undo_unpaid_and_allocation(client):
         "/api/settlements/<int:settlement_id>/unpaid",
         "/api/settlements/<int:settlement_id>/allocations/<int:credit_id>"}
     assert {r for r, _ in writes if r.startswith("/api/credits")} == {
-        "/api/credits/<int:credit_id>/allocate"}
+        "/api/credits/<int:credit_id>/allocate",
+        "/api/credits/<int:credit_id>/allocate-all"}
 
 
 def test_settle_page_exposes_only_the_actions_that_remain(client):
@@ -1026,6 +1027,60 @@ def test_credits_carry_the_batches_they_could_pay(client):
         "dates": ["2026-07-20", "2026-07-21", "2026-07-22"], "orders": 14, "exact": True}]
     # A spent credit and an archived one have nothing left to offer.
     assert by_id[first]["proposals"] == [] and by_id[gone]["proposals"] == []
+
+
+def seed_group(amount=1050.0):
+    """Three statements confirmed on one working day and the one transfer
+    that paid them all."""
+    ids = []
+    for oid, day, price in (("G1", "20", 460.0), ("G2", "21", 250.0), ("G3", "22", 340.0)):
+        seed_ride(oid, scheduled=f"2026-07-{day} 09:00:00", price=price, banner=0.0)
+        ids.append(create_batch([oid], confirmed=price, settled_on="2026-07-23"))
+    return ids, seed_credit(amount=amount, value_date="2026-07-25", ref="G")
+
+
+def test_credits_carry_the_group_one_transfer_pays_whole(client):
+    ids, cid = seed_group()
+    credit = client.get("/api/credits").get_json()["credits"][0]
+    assert credit["combo"] == {"ids": ids, "total": 1050.0}
+    # Each batch is still offered on its own as well.
+    assert sorted(p["id"] for p in credit["proposals"]) == ids
+
+
+def test_credits_without_a_group_carry_no_combo(client):
+    seed_ride("R1")
+    create_batch(["R1"], confirmed=540, settled_on="2026-07-03")
+    seed_credit(amount=540.0)
+    assert client.get("/api/credits").get_json()["credits"][0]["combo"] is None
+
+
+def test_allocate_all_endpoint_pays_the_group_in_one_tap(client):
+    ids, cid = seed_group()
+    res = client.post(f"/api/credits/{cid}/allocate-all", json={"settlement_ids": ids})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert [b["id"] for b in body["batches"]] == ids
+    assert all(b["state"] == "paid" for b in body["batches"])
+    assert body["credit"]["remaining"] == 0.0
+    assert client.get("/api/credits").get_json()["credits"][0]["combo"] is None
+
+
+def test_allocate_all_endpoint_refuses_a_group_the_credit_cannot_cover(client):
+    ids, cid = seed_group(amount=1000.0)
+    res = client.post(f"/api/credits/{cid}/allocate-all", json={"settlement_ids": ids})
+    assert res.status_code == 400
+    assert "唔夠 3 個批次" in res.get_json()["error"]
+
+
+def test_allocate_all_endpoint_404_and_bad_body(client):
+    ids, cid = seed_group()
+    url = f"/api/credits/{cid}/allocate-all"
+    assert client.post("/api/credits/999/allocate-all", json={"settlement_ids": ids}).status_code == 404
+    assert client.post(url, json={"settlement_ids": ids + [999]}).status_code == 404
+    assert client.post(url, json={}).status_code == 400
+    assert client.post(url, json={"settlement_ids": []}).status_code == 400
+    assert client.post(url, json={"settlement_ids": [str(ids[0])]}).status_code == 400
+    assert client.post(url, json={"settlement_ids": [True]}).status_code == 400
 
 
 def test_allocate_endpoint_closes_the_batch_and_keeps_the_held_back_legs(client):

@@ -1120,6 +1120,50 @@ def _load_batch(conn, settlement_id: int) -> dict:
                          _batch_adjustments(conn, [settlement_id])[settlement_id])
 
 
+def _open_credit(conn, credit_id: int) -> dict:
+    """The credit money can still come off, inside a transaction."""
+    row = conn.execute(f"{_CREDIT_SQL} WHERE c.id = ?", (credit_id,)).fetchone()
+    if row is None:
+        raise ValueError("搵唔到入數")
+    credit = _credit_dict(conn, row)
+    if credit["archived_reason"]:
+        raise ValueError("入數已收埋")
+    return credit
+
+
+def _allocate_in(conn, credit_id: int, settlement_id: int, amount: float | None) -> None:
+    """One allocation inside the caller's transaction; the caller commits.
+
+    The credit is read afresh each time, so allocations earlier in the same
+    transaction have already come off what it can still pay.
+    """
+    credit = _open_credit(conn, credit_id)
+    batch = _load_batch(conn, settlement_id)
+    if batch["platform"] != credit["platform"]:
+        raise ValueError("唔同平台")
+    if any(a["credit_id"] == credit_id for a in batch["allocations"]):
+        raise ValueError("已經對過呢筆入數")
+    outstanding = batch["outstanding"]
+    if outstanding <= CENT:
+        raise ValueError("批次已收齊")
+    remaining = credit["remaining"]
+    if amount is None:
+        amount = min(remaining, outstanding)
+    # A non-positive amount can only mean the credit has nothing left to
+    # give, which is the same refusal as trying to give more than it has.
+    if amount <= CENT or amount > remaining + CENT:
+        raise ValueError(f"入數剩 ${remaining:g} 唔夠")
+    if amount > outstanding + CENT:
+        raise ValueError(f"批次淨係差 ${outstanding:g}")
+    conn.execute(
+        "INSERT INTO credit_allocations (credit_id, settlement_id, amount) VALUES (?, ?, ?)",
+        (credit_id, settlement_id, round(amount, 2)),
+    )
+    if round(outstanding - amount, 2) <= CENT:
+        conn.execute("UPDATE settlements SET paid_on = ? WHERE id = ?",
+                     (credit["value_date"], settlement_id))
+
+
 def allocate(db_path: str, credit_id: int, settlement_id: int,
              amount: float | None = None) -> dict:
     """Put part or all of a credit against a batch; returns the batch afterwards.
@@ -1131,45 +1175,50 @@ def allocate(db_path: str, credit_id: int, settlement_id: int,
     them.  Checks and write share one connection, so money allocated in between
     cannot be allocated twice.
 
-    paid_on is written here and nowhere else, at the moment the batch is whole,
-    and it is the bank's own value date rather than when anybody noticed.  The
-    unpaid flags are left alone: they name the legs the platform held back on
-    this statement, which stays true once the make-up payment lands, and are
-    what lets the day sheet say which legs that last allocation paid for.
+    paid_on is written by an allocation and nowhere else, at the moment the
+    batch is whole, and it is the bank's own value date rather than when
+    anybody noticed.  The unpaid flags are left alone: they name the legs the
+    platform held back on this statement, which stays true once the make-up
+    payment lands, and are what lets the day sheet say which legs that last
+    allocation paid for.
     """
     with _conn(db_path) as conn:
-        row = conn.execute(f"{_CREDIT_SQL} WHERE c.id = ?", (credit_id,)).fetchone()
-        if row is None:
-            raise ValueError("搵唔到入數")
-        credit = _credit_dict(conn, row)
-        if credit["archived_reason"]:
-            raise ValueError("入數已收埋")
-        batch = _load_batch(conn, settlement_id)
-        if batch["platform"] != credit["platform"]:
-            raise ValueError("唔同平台")
-        if any(a["credit_id"] == credit_id for a in batch["allocations"]):
-            raise ValueError("已經對過呢筆入數")
-        outstanding = batch["outstanding"]
-        if outstanding <= CENT:
-            raise ValueError("批次已收齊")
-        remaining = credit["remaining"]
-        if amount is None:
-            amount = min(remaining, outstanding)
-        # A non-positive amount can only mean the credit has nothing left to
-        # give, which is the same refusal as trying to give more than it has.
-        if amount <= CENT or amount > remaining + CENT:
-            raise ValueError(f"入數剩 ${remaining:g} 唔夠")
-        if amount > outstanding + CENT:
-            raise ValueError(f"批次淨係差 ${outstanding:g}")
-        conn.execute(
-            "INSERT INTO credit_allocations (credit_id, settlement_id, amount) VALUES (?, ?, ?)",
-            (credit_id, settlement_id, round(amount, 2)),
-        )
-        if round(outstanding - amount, 2) <= CENT:
-            conn.execute("UPDATE settlements SET paid_on = ? WHERE id = ?",
-                         (credit["value_date"], settlement_id))
+        _allocate_in(conn, credit_id, settlement_id, amount)
         conn.commit()
         return _load_batch(conn, settlement_id)
+
+
+def allocate_all(db_path: str, credit_id: int, settlement_ids: list[int]) -> list[dict]:
+    """Pay several batches in full from one credit in one write; returns them afterwards.
+
+    One transfer pays every statement confirmed on the same working day, so the
+    matcher proposes such a group whole and one tap takes it.  The group is
+    refused whole unless the credit covers every batch in it: a group that
+    half-landed would leave a part payment nobody chose.  Each refusal names
+    its batch, because the operator tapped the group, not that batch.
+    """
+    if not settlement_ids:
+        raise ValueError("冇批次")
+    if len(set(settlement_ids)) != len(settlement_ids):
+        raise ValueError("批次重複")
+    with _conn(db_path) as conn:
+        credit = _open_credit(conn, credit_id)
+        owed = 0.0
+        for sid in settlement_ids:
+            batch = _load_batch(conn, sid)
+            if batch["outstanding"] <= CENT:
+                raise ValueError(f"批次 #{sid} 已收齊")
+            owed += batch["outstanding"]
+        if round(owed, 2) > credit["remaining"] + CENT:
+            raise ValueError(f"入數剩 ${credit['remaining']:g}，"
+                             f"唔夠 {len(settlement_ids)} 個批次 ${round(owed, 2):g}")
+        for sid in settlement_ids:
+            try:
+                _allocate_in(conn, credit_id, sid, None)
+            except ValueError as e:
+                raise ValueError(f"批次 #{sid}：{e}") from None
+        conn.commit()
+        return [_load_batch(conn, sid) for sid in settlement_ids]
 
 
 def deallocate(db_path: str, settlement_id: int, credit_id: int | None = None) -> int:

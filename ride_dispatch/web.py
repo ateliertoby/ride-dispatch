@@ -22,6 +22,7 @@ from .db import (
     init_db,
     resolve_db_path,
     allocate,
+    allocate_all,
     count_active_orders,
     deallocate,
     delete_settlement,
@@ -352,14 +353,24 @@ def _batch_proposals(batch: dict) -> list[dict]:
             for c in offer(m, unallocated_credits(DB_PATH, batch["platform"]))]
 
 
-def _credit_proposals(credit: dict, platform: str) -> list[dict]:
-    """The batches a credit could pay, best first.  The mirror of the above."""
+def _credit_proposals(credit: dict, platform: str) -> tuple[list[dict], dict | None]:
+    """The batches a credit could pay, best first, and the group it pays whole.
+
+    The mirror of the above.  A matcher answer of several batches is one
+    transfer paying a whole group, so it also travels as one proposal the page
+    can take with one tap; its batches stay offered one by one as well.
+    """
     m = propose_credit(DB_PATH, credit["id"])
-    return [{"id": b["id"], "outstanding": b["outstanding"],
-             "confirmed_amount": b["confirmed_amount"],
-             "dates": sorted({(o["scheduled_time"] or "")[:10] for o in b["orders"]}),
-             "orders": len(b["orders"]), "exact": b["id"] in m.exact}
-            for b in offer(m, open_batches(DB_PATH, platform))]
+    proposals = [{"id": b["id"], "outstanding": b["outstanding"],
+                  "confirmed_amount": b["confirmed_amount"],
+                  "dates": sorted({(o["scheduled_time"] or "")[:10] for o in b["orders"]}),
+                  "orders": len(b["orders"]), "exact": b["id"] in m.exact}
+                 for b in offer(m, open_batches(DB_PATH, platform))]
+    combo = None
+    if m.reason == "subset" and len(m.exact) > 1:
+        owed = {p["id"]: p["outstanding"] for p in proposals}
+        combo = {"ids": list(m.exact), "total": round(sum(owed[i] for i in m.exact), 2)}
+    return proposals, combo
 
 
 @app.get("/api/settle")
@@ -501,9 +512,9 @@ def api_credits():
         counts[c["state"]] += 1
         if c["state"] in ("open", "partial"):
             sums["open"] += c["remaining"]
-            c["proposals"] = _credit_proposals(c, platform)
+            c["proposals"], c["combo"] = _credit_proposals(c, platform)
         else:
-            c["proposals"] = []
+            c["proposals"], c["combo"] = [], None
             if c["state"] == "done":
                 sums["done"] += c["amount"]
     return jsonify({
@@ -512,7 +523,7 @@ def api_credits():
         "sums": {k: round(v, 2) for k, v in sums.items()},
         "credits": [{k: c[k] for k in ("id", "ref", "amount", "value_date", "payer", "allocated",
                                        "remaining", "state", "archived_reason", "memo",
-                                       "batches", "proposals")} for c in credits],
+                                       "batches", "proposals", "combo")} for c in credits],
     })
 
 
@@ -541,6 +552,31 @@ def api_allocate_credit(credit_id):
     batch["proposals"] = _batch_proposals(batch)
     batch["credit"] = get_credit(DB_PATH, credit_id)
     return jsonify(batch)
+
+
+@app.post("/api/credits/<int:credit_id>/allocate-all")
+def api_allocate_credit_all(credit_id):
+    """Pay a whole group of batches from a credit with one tap.
+
+    The page offers the group the matcher found; the ids come back as the
+    request names them and nothing is added, so the tap still decides.  Every
+    batch is paid in full or none is.
+    """
+    body = request.get_json(silent=True) or {}
+    ids = body.get("settlement_ids")
+    if (not isinstance(ids, list) or not ids
+            or any(not isinstance(i, int) or isinstance(i, bool) for i in ids)):
+        return jsonify({"error": "settlement_ids required"}), 400
+    if get_credit(DB_PATH, credit_id) is None:
+        return jsonify({"error": "credit not found"}), 404
+    if any(get_settlement(DB_PATH, i) is None for i in ids):
+        return jsonify({"error": "settlement not found"}), 404
+    try:
+        batches = allocate_all(DB_PATH, credit_id, ids)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"batches": [_decorate_batch(b) for b in batches],
+                    "credit": get_credit(DB_PATH, credit_id)})
 
 
 @app.delete("/api/settlements/<int:settlement_id>/allocations/<int:credit_id>")

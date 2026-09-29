@@ -5,7 +5,7 @@ import pytest
 from ride_dispatch.db import (
     init_db, save_order, save_quick_order, update_price, create_settlement, delete_settlement,
     get_settlement, get_settle_month, insert_credit, get_credit, unallocated_credits,
-    open_batches, allocate, deallocate, mark_unpaid, archive_credit, unarchive_credit,
+    open_batches, allocate, allocate_all, deallocate, mark_unpaid, archive_credit, unarchive_credit,
     archive_credits_before,
 )
 from ride_dispatch.parser import Order
@@ -273,6 +273,73 @@ def test_one_credit_spreads_over_several_batches(db_path):
     assert [x["id"] for x in c] == [cid] and c[0]["remaining"] == 420.0
     assert c[0]["allocations"] == [{"settlement_id": s1, "amount": 1450.0},
                                    {"settlement_id": s2, "amount": 1080.0}]
+
+
+def three_batches(db_path):
+    """Three statements confirmed on one working day, paid by one transfer."""
+    for oid, day, price in (("A1", "20", 460.0), ("A2", "21", 250.0), ("A3", "22", 340.0)):
+        seed(db_path, oid, f"2026-08-{day} 09:00:00", price=price)
+    return [batch(db_path, "A1", confirmed=460.0), batch(db_path, "A2", confirmed=250.0),
+            batch(db_path, "A3", confirmed=340.0)]
+
+
+def test_one_tap_pays_a_whole_group_from_one_credit(db_path):
+    ids = three_batches(db_path)
+    cid = insert_credit(db_path, credit(amount=1050.0, value_date="2026-08-28"))
+    out = allocate_all(db_path, cid, ids)
+    assert [b["id"] for b in out] == ids
+    assert all(b["state"] == "paid" and b["paid_on"] == "2026-08-28" for b in out)
+    c = get_credit(db_path, cid)
+    assert c["remaining"] == 0.0
+    assert c["allocations"] == [{"settlement_id": ids[0], "amount": 460.0},
+                                {"settlement_id": ids[1], "amount": 250.0},
+                                {"settlement_id": ids[2], "amount": 340.0}]
+
+
+def assert_nothing_allocated(db_path, cid, ids):
+    assert get_credit(db_path, cid)["allocations"] == []
+    assert all(get_settlement(db_path, sid)["paid_on"] is None for sid in ids)
+
+
+def test_a_group_the_credit_cannot_cover_is_refused_whole(db_path):
+    """A group that half-landed would leave a part payment nobody chose."""
+    ids = three_batches(db_path)
+    cid = insert_credit(db_path, credit(amount=1000.0, value_date="2026-08-28"))
+    with pytest.raises(ValueError, match=r"入數剩 \$1000，唔夠 3 個批次 \$1050"):
+        allocate_all(db_path, cid, ids)
+    assert_nothing_allocated(db_path, cid, ids)
+
+
+def test_a_group_with_one_bad_batch_is_refused_whole_and_names_it(db_path):
+    ids = three_batches(db_path)
+    earlier = insert_credit(db_path, credit(ref="R0", amount=250.0))
+    allocate(db_path, earlier, ids[1])
+    cid = insert_credit(db_path, credit(amount=1050.0, value_date="2026-08-28"))
+    with pytest.raises(ValueError, match=f"批次 #{ids[1]} 已收齊"):
+        allocate_all(db_path, cid, ids)
+    assert_nothing_allocated(db_path, cid, [ids[0], ids[2]])
+
+    save_quick_order(db_path, "U1", "Uber", "2026-08-23 10:00:00", 100.0, 0.0, source="Uber")
+    usid = create_settlement(db_path, "uber", ["U1"], 100.0, "2026-08-26", now=NOW)
+    with pytest.raises(ValueError, match=f"批次 #{usid}：唔同平台"):
+        allocate_all(db_path, cid, [ids[0], usid])
+    assert_nothing_allocated(db_path, cid, [ids[0], ids[2]])
+
+
+def test_a_group_needs_batches_named_once_each_and_a_live_credit(db_path):
+    ids = three_batches(db_path)
+    cid = insert_credit(db_path, credit(amount=1050.0))
+    with pytest.raises(ValueError, match="冇批次"):
+        allocate_all(db_path, cid, [])
+    with pytest.raises(ValueError, match="批次重複"):
+        allocate_all(db_path, cid, [ids[0], ids[0]])
+    with pytest.raises(ValueError, match="搵唔到批次"):
+        allocate_all(db_path, cid, [ids[0], 999])
+    with pytest.raises(ValueError, match="搵唔到入數"):
+        allocate_all(db_path, 999, ids)
+    archive_credit(db_path, cid, "manual: test", "2026-08-27")
+    with pytest.raises(ValueError, match="收埋"):
+        allocate_all(db_path, cid, ids)
 
 
 def test_undoing_a_batch_gives_the_money_back_and_forgets_its_unpaid_legs(db_path):
