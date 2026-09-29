@@ -162,6 +162,21 @@ function svcLabel(st) {
   if (_QUICK_TYPES.has(st)) return st;
   return '單程';
 }
+function isFlightPickup(st) { return st === '接机'; }
+// Badge class encodes trip direction.
+function svcBadge(o) {
+  const p = platform(o);
+  if (p !== 'ride') return p;
+  const st = o.service_type;
+  if (st === '接机' || st === '接站') return 'pickup';
+  if (st === '送机') return 'dropoff';
+  return 'transfer';
+}
+// The tail an order is known by on screen: a quick order's own suffix, else
+// the last six digits.
+function shortId(id) {
+  return id.includes('_') ? id.split('_').pop() : id.slice(-6);
+}
 function orderTime(o) {
   const t = (o.scheduled_time || '').split(' ')[1];
   return t ? t.slice(0, 5) : '';

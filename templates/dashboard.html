@@ -13,26 +13,15 @@
 <title>Ride Dispatch</title>
 <style>
 {% include "_shared.css" %}
-  /* Tokens only this page uses: service-badge and row-state colours. */
+{% include "_order_sheet.css" %}
+  /* Tokens only this page uses: row-state colours. */
   :root {
-    --pickup-bg: rgba(77,163,255,.16);  --pickup-fg: #6ab2ff;
-    --dropoff-bg: rgba(255,159,74,.16); --dropoff-fg: #ffb066;
-    --didi-bg: rgba(61,220,132,.14);    --didi-fg: #52d98b;
-    --uber-bg: rgba(186,140,255,.16);   --uber-fg: #c9a2ff;
-    --fp-bg: rgba(255,63,133,.16);      --fp-fg: #ff6ba3;
-    --transfer-bg: rgba(150,160,175,.14); --transfer-fg: #a8b1c0;
     --urgent-bg: rgba(255,97,97,.14);
     --tight-bg: rgba(255,176,46,.14);
     --next-bg: rgba(61,220,132,.06);
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --pickup-bg: #e8f4fd;  --pickup-fg: #0a84ff;
-      --dropoff-bg: #fff3e0; --dropoff-fg: #f57c00;
-      --didi-bg: #e8f5e9;    --didi-fg: #2e9e52;
-      --uber-bg: #f3e5f5;    --uber-fg: #8e24aa;
-      --fp-bg: #fce4ef;      --fp-fg: #d70f64;
-      --transfer-bg: #f0f1f3; --transfer-fg: #666;
       --urgent-bg: #fdeaea;
       --tight-bg: #fff8e1;
       --next-bg: #edfaf2;
@@ -141,17 +130,6 @@
   }
   .now .now-line { flex: 1; height: 1px; background: var(--red); opacity: .55; }
 
-  .badge {
-    font-size: 12px; font-weight: 650; padding: 3px 8px;
-    border-radius: 6px; display: inline-block;
-  }
-  .badge.pickup { background: var(--pickup-bg); color: var(--pickup-fg); }
-  .badge.dropoff { background: var(--dropoff-bg); color: var(--dropoff-fg); }
-  .badge.didi { background: var(--didi-bg); color: var(--didi-fg); }
-  .badge.uber { background: var(--uber-bg); color: var(--uber-fg); }
-  .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
-  .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
-
   /* ---- sheet ---- */
   /* Paste panel drops from the top: it opens right under the finger that
      tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
@@ -166,68 +144,9 @@
   }
   .drop.show { transform: translateY(0); }
   @media (prefers-reduced-motion: reduce) {
-    .drop, .np-pad, .np-amount-row .step, .np-amount-row .numpad-display, .np-links-opt { transition: none; }
-    .paste-preview .sum-row, .np-links, .np-amount-row, .np-sheet .np-ok { animation: none; }
+    .drop { transition: none; }
+    .paste-preview .sum-row { animation: none; }
   }
-  .info { padding: 10px 0 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-  .info-row { display: flex; gap: 10px; font-size: 14px; line-height: 1.65; }
-  .info-row .k { color: var(--text-3); flex-shrink: 0; width: 3.2em; }
-  .info-row .v { color: var(--text); word-break: break-all; }
-  .info-row .v a { color: var(--pickup-fg); text-decoration: none; }
-
-  .field-row {
-    display: flex; align-items: center; width: 100%;
-    background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 14px 2px; font-size: 16px; cursor: pointer; text-align: left;
-  }
-  .field-row:active { background: var(--surface-press); }
-  .field-row .fk { color: var(--text-2); flex: 1; }
-  .field-row .fv { font-weight: 650; font-variant-numeric: tabular-nums; }
-  .field-row .fv.unset { color: var(--amber); font-weight: 500; }
-  .field-row .chev { color: var(--text-3); margin-left: 10px; font-size: 14px; }
-  .fr-split { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
-  .fr-split .field-row { border-bottom: none; }
-  .fr-waive {
-    flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
-    background: var(--key-bg); color: var(--green);
-    font-size: 14px; font-weight: 650; padding: 9px 16px;
-  }
-  .fr-waive:active { background: var(--key-press); }
-  .pp-row {
-    display: flex; align-items: center; gap: 8px;
-    border-bottom: 1px solid var(--line); padding: 10px 2px;
-  }
-  .pp-row .fk { color: var(--text-2); flex: 1; font-size: 16px; }
-  .pp-opt {
-    flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
-    background: var(--key-bg); color: var(--text-2);
-    font-size: 14px; font-weight: 650; padding: 9px 14px;
-  }
-  .pp-opt:active { background: var(--key-press); }
-  .pp-opt.on { background: var(--blue-bg); color: var(--blue); }
-
-  .cancel-link {
-    display: block; margin: 4px auto 0; padding: 10px 18px;
-    background: none; border: none; cursor: pointer;
-    color: var(--red); font-size: 13px; font-weight: 500; opacity: .75;
-  }
-  .cancel-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
-  .tg-link { display: block; text-align: center; margin-top: 10px; font-size: 13px; color: var(--text-3); text-decoration: none; padding: 8px; }
-
-  .numpad-display {
-    text-align: center; font-size: 40px; font-weight: 700;
-    font-variant-numeric: tabular-nums; padding: 18px 0 6px; letter-spacing: 1px;
-    min-height: 74px;
-  }
-  .numpad-display .dim { color: var(--text-3); }
-  .numpad-hint { text-align: center; font-size: 13px; color: var(--text-3); min-height: 20px; }
-  .numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 0 4px; }
-  .key {
-    background: var(--key-bg); border: none; border-radius: 12px;
-    font-size: 24px; font-weight: 550; padding: 15px 0; cursor: pointer;
-  }
-  .key:active { background: var(--key-press); }
-  .key.fn { font-size: 18px; color: var(--text-2); }
   .paste-box {
     width: 100%; margin-top: 12px; padding: 12px;
     background: var(--key-bg); color: var(--text);
@@ -259,74 +178,9 @@
     animation: row-in .25s both;
     animation-delay: calc(var(--i, 0) * 25ms);
   }
-  /* Every numpad screen follows one rule: the keypad is bottommost (nothing
-     tappable below 0/⌫ — pressing ⌫ means "not confirming", so confirm must
-     never sit beside it), confirm sits above the keypad behind a structural
-     gap, and only when no keypad is on screen does confirm take the bottom
-     thumb position. Confirm is a decision control, not part of the input
-     cluster: full-width inverted primary versus the grey key grid, and a
-     separate element outside the keypad unit. */
-  /* Pay layout: the panel is sized by its content and flows top-down — no
-     full-screen stretch, no dead space between the preview and the action
-     cluster. It is still a flex column capped at the viewport so on short
-     screens the preview shrinks and scrolls internally rather than the panel
-     itself scrolling. (A scrolling, CSS-transformed panel mis-registers taps
-     on iOS Safari.) */
-  .np-sheet { display: flex; flex-direction: column; }
+  /* In the numpad's pay layout the preview is what shrinks and scrolls, never
+     the panel around it. */
   .np-sheet .paste-preview { flex: 0 1 auto; max-height: none; min-height: 66px; }
-  .np-sheet .np-ok { flex-shrink: 0; }
-  .np-sheet .numpad-display { flex-shrink: 0; }
-  /* The action cluster rises in as one unit after the preview rows have
-     staggered in, so the stage lands with a settle beat instead of popping */
-  @keyframes cluster-in { from { opacity: 0; transform: translateY(8px); } }
-  .np-links, .np-amount-row, .np-sheet .np-ok {
-    animation: cluster-in .25s .12s both;
-  }
-  .np-links {
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    flex-shrink: 0; color: var(--text-3); font-size: 13px;
-  }
-  .np-links button {
-    background: none; border: none; color: var(--text-3); font-size: 13px;
-    padding: 14px 6px; cursor: pointer; text-decoration: underline;
-  }
-  .np-links-opt {
-    display: inline-flex; align-items: center; gap: 6px;
-    max-width: 130px; overflow: hidden; white-space: nowrap;
-    transition: max-width .3s cubic-bezier(.32,.72,.35,1), opacity .2s;
-  }
-  .np-links-opt.gone { max-width: 0; opacity: 0; pointer-events: none; }
-  /* The price lives in one place: the centre of the stepper row, flanked by
-     its adjustment keys. Expanding the keypad collapses the steppers and the
-     same element grows into the plain numpad display — the amount never
-     moves between elements or renders twice. */
-  .np-amount-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-  .np-amount-row .numpad-display {
-    flex: 1; min-height: 0; padding: 12px 0; font-size: 32px;
-    transition: font-size .3s cubic-bezier(.32,.72,.35,1);
-  }
-  .np-amount-row .step {
-    background: var(--key-bg); border: none; border-radius: 12px; cursor: pointer;
-    font-size: 17px; font-weight: 600; color: var(--text-2);
-    padding: 12px 0; width: 76px; flex-shrink: 0;
-    transition: max-width .3s cubic-bezier(.32,.72,.35,1), opacity .2s, padding .3s cubic-bezier(.32,.72,.35,1);
-    max-width: 76px; overflow: hidden;
-  }
-  .np-amount-row .step:active { background: var(--key-press); }
-  .np-amount-row.expanded .step { max-width: 0; padding-left: 0; padding-right: 0; opacity: 0; pointer-events: none; }
-  .np-amount-row.expanded .numpad-display { font-size: 40px; }
-  /* Keypad slides up from the screen edge and pushes confirm upward — the
-     same causality as the iOS keyboard displacing content. 0fr→1fr keeps the
-     easing exact without measuring heights. */
-  .np-pad {
-    display: grid; grid-template-rows: 0fr;
-    transition: grid-template-rows .3s cubic-bezier(.32,.72,.35,1), opacity .25s;
-    opacity: 0; flex-shrink: 0;
-  }
-  .np-pad.open { grid-template-rows: 1fr; opacity: 1; }
-  .np-pad > div { overflow: hidden; }
-  .np-pad .numpad { padding-top: 16px; }
-  .sug-tag { font-size: 12px; font-weight: 650; color: var(--green); vertical-align: 5px; letter-spacing: 0; margin-left: 4px; }
   .dup-warn {
     background: rgba(255,97,97,.12); color: var(--red);
     border-radius: 10px; padding: 10px 12px; font-size: 14px;
@@ -363,6 +217,7 @@
 <script>
 'use strict';
 {% include "_shared.js" %}
+{% include "_order_sheet.js" %}
 
 // ---- state ----
 let cur = fmtDate(new Date());
@@ -381,16 +236,6 @@ const TYPE_META = {
 };
 
 // ---- utils ----
-function isFlightPickup(st) { return st === '接机'; }
-// Badge class encodes trip direction.
-function svcBadge(o) {
-  const p = platform(o);
-  if (p !== 'ride') return p;
-  const st = o.service_type;
-  if (st === '接机' || st === '接站') return 'pickup';
-  if (st === '送机') return 'dropoff';
-  return 'transfer';
-}
 // When an order counts as done: pickups (接机) at service time + 60min —
 // service time = flight ETA (or scheduled arrival) + passenger exit minutes,
 // falling back to the booked time when there is no flight data; every other
@@ -423,9 +268,6 @@ function doneAt(o) {
 function isDone(o) {
   const d = doneAt(o);
   return d ? Date.now() > d.getTime() : false;
-}
-function shortId(id) {
-  return id.includes('_') ? id.split('_').pop() : id.slice(-6);
 }
 // ---- nav / load ----
 function go(d) {
@@ -741,17 +583,11 @@ function sheetHead(title, sub) {
 }
 
 // ---- detail view ----
+// The sheet itself is _order_sheet.js, which the settle page opens too; this
+// page hosts it on the bottom sheet's view stack.
 function openDetail(orderId) {
   sheetOrderId = orderId;
   openSheet(detailView);
-}
-
-function editableFields(o) {
-  const p = platform(o);
-  if (p === 'didi') return [['price', '車費'], ['tunnel_fee', '隧道費'], ['time', '時間']];
-  if (p === 'uber') return [['price', '總收入'], ['tunnel_fee', '通行費'], ['time', '時間']];
-  if (p === 'foodpanda') return [['price', '價錢'], ['time', '時間']];
-  return [['price', '價錢'], ['tunnel_fee', '隧道費'], ['parking_fee', '停車費'], ['banner_fee', '舉牌費'], ['time', '時間']];
 }
 
 // Settlement state, from the batch columns /api/orders joins in. Money moves
@@ -764,120 +600,6 @@ function settleLabel(o) {
   if (o.settlement_paid_on) return '已收 ' + mdSlash(o.settlement_paid_on);
   if (o.settlement_settled_on) return '等過數 · 結算 ' + mdSlash(o.settlement_settled_on);
   return '未結算';
-}
-
-function detailView(sheet) {
-  const o = orders.find(x => x.order_id === sheetOrderId);
-  if (!o) { closeSheet(); return; }
-  const p = platform(o);
-  const isPickup = isFlightPickup(o.service_type);
-  const label = svcLabel(o.service_type);
-
-  let info = '';
-  const rows = [];
-  if (p === 'ride') {
-    if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
-    for (const [cl, cv] of collectContactLines(o)) {
-      rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
-    }
-    if (o.flight_number) {
-      let f = esc(o.flight_number);
-      if (o.flight_status === 'gate' && o.flight_gate) f += ' · 已到閘 ' + esc(o.flight_gate);
-      else if (o.flight_status === 'landed' && o.flight_eta) f += ' · 已降落 ' + esc(o.flight_eta);
-      else if (o.flight_eta) f += ' · 預計 ' + esc(o.flight_eta);
-      else if (o.flight_scheduled) f += ' · 預定 ' + esc(o.flight_scheduled);
-      rows.push(['航班', f]);
-    }
-    if (o.vehicle_type) rows.push(['車型', esc(o.vehicle_type)]);
-    if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span style="color:var(--text-3)">&rarr;</span> ' + esc(o.dropoff)]);
-    if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
-  }
-  // What the platform took back, and what the trip is worth after it.  The row
-  // above shows the gross, so without this the sheet would not explain why the
-  // settlement figure is smaller.
-  if (o.penalty_fee > 0) {
-    rows.push(['判罰', esc(money(-o.penalty_fee) + '（淨收 ' + money(expectedOf(o)) + '）')]);
-  }
-  rows.push(['結算', esc(settleLabel(o))]);
-  info = '<div class="info">' + rows.map(r =>
-    '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
-  ).join('') + '</div>';
-
-  // Where a flight pickup meets the passenger. Choosing one also sets that
-  // place's first-hour parking charge (server-side); a car park visit linked to
-  // the order later overwrites both with what HKIA saw.
-  let pointRow = '';
-  if (p === 'ride' && isPickup) {
-    const cur = o.pickup_point || '';
-    const opts = PICKUP_POINTS.map(pt =>
-      '<button class="pp-opt' + (pt === cur ? ' on' : '') + '" onclick="setPickupPoint(\'' + pt + '\')">' + pt + '</button>');
-    // A car park HKIA reported that is not one of ours shows as it was named.
-    if (cur && !PICKUP_POINTS.includes(cur)) opts.push('<span class="pp-opt on">' + esc(cur) + '</span>');
-    pointRow = '<div class="pp-row"><span class="fk">上車點</span>' + opts.join('') + '</div>';
-  }
-
-  const fields = editableFields(o).map(([key, fLabel]) => {
-    let value, unset = false;
-    if (key === 'time') {
-      value = orderTime(o);
-    } else {
-      const v = o[key];
-      if (key === 'price' && !v) { value = '未入價'; unset = true; }
-      else value = '$' + $(v || 0);
-    }
-    const row = '<button class="field-row" onclick="editField(\'' + key + '\')">' +
-      '<span class="fk">' + fLabel + '</span>' +
-      '<span class="fv' + (unset ? ' unset' : '') + '">' + esc(value) + '</span>' +
-      '<span class="chev">&#9998;</span></button>';
-    // Waiving the parking fee is the everyday action (the pickup default often
-    // turns out not to be charged), so it gets a one-tap pill; any other
-    // amount is rare and goes through the numpad as usual.
-    const lead = key === 'parking_fee' ? pointRow : '';
-    if (key === 'parking_fee' && o.parking_fee > 0) {
-      return lead + '<div class="fr-split">' + row +
-        '<button class="fr-waive" onclick="waiveParking()">免</button></div>';
-    }
-    return lead + row;
-  }).join('');
-
-  sheet.insertAdjacentHTML('beforeend',
-    sheetHead('<span class="badge ' + svcBadge(o) + '">' + label + '</span> ' +
-      '<span style="font-variant-numeric:tabular-nums">' + esc(orderTime(o)) + '</span>',
-      '#' + esc(shortId(o.order_id))) +
-    info + fields +
-    (p === 'ride' ? '<a class="tg-link" href="https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '') +
-    '<button class="cancel-link" onclick="openCancelConfirm()">取消訂單</button>'
-  );
-}
-
-function editField(key) {
-  const o = orders.find(x => x.order_id === sheetOrderId);
-  if (!o) return;
-  const fLabel = editableFields(o).find(f => f[0] === key)[1];
-  if (key === 'time') {
-    pushView(numpadView({
-      title: '改時間', hint: '而家 ' + orderTime(o), mode: 'time',
-      onConfirm: v => patchOrder({ time: v }),
-    }));
-  } else {
-    const quick = key === 'parking_fee' && o.parking_fee > 0
-      ? { label: '免停車費', onTap: () => patchOrder({ parking_fee: 0 }) }
-      : null;
-    pushView(numpadView({
-      title: '改' + fLabel, hint: '而家 $' + $(o[key] || 0), mode: 'money', quick,
-      onConfirm: v => patchOrder({ [key]: v }),
-    }));
-  }
-}
-
-function waiveParking() { patchOrder({ parking_fee: 0 }); }
-
-const PICKUP_POINTS = ['P1', 'P4', '富豪'];
-
-function setPickupPoint(pt) {
-  const o = orders.find(x => x.order_id === sheetOrderId);
-  if (!o || o.pickup_point === pt) return;
-  patchOrder({ pickup_point: pt });
 }
 
 // Returns false on failure so the numpad resets for retry.
@@ -893,168 +615,18 @@ async function patchOrder(body) {
   return true;
 }
 
-// Cancellation confirms in its own pushed view rather than an armed state on
-// the same button: load() only refreshes the stack root, so a stacked view
-// survives the SSE-driven detail re-renders that would wipe any in-place
-// armed state mid-decision, and no disarm timer is needed at all.
-function openCancelConfirm() { pushView(cancelConfirmView); }
-
-function cancelConfirmView(sheet) {
-  const o = orders.find(x => x.order_id === sheetOrderId);
-  if (!o) { closeSheet(); return; }
-  const lines = [
-    orderTime(o) + (o.passenger_name ? ' · ' + o.passenger_name : ''),
-    o.pickup ? o.pickup + ' → ' + o.dropoff : '',
-  ].filter(Boolean).map(esc).join('<br>');
-  sheet.insertAdjacentHTML('beforeend',
-    sheetHead('取消訂單', '#' + esc(shortId(o.order_id))) +
-    '<div class="cancel-info">' + lines + '</div>' +
-    '<button class="primary-btn danger" id="cancelGo">確認取消</button>' +
-    '<button class="ghost-btn" onclick="popView()">返回</button>'
-  );
-  sheet.querySelector('#cancelGo').addEventListener('click', async function () {
-    this.disabled = true;
-    this.textContent = '取消緊…';
-    const id = sheetOrderId;
-    try {
-      await apiWrite('PATCH', '/api/orders/' + encodeURIComponent(id), { status: 'cancelled' });
-    } catch (e) {
-      toast(e.message);
-      this.disabled = false;
-      this.textContent = '確認取消';
-      return;
-    }
+const orderHost = {
+  order: () => orders.find(x => x.order_id === sheetOrderId),
+  push: view => pushView(view),
+  patch: patchOrder,
+  cancelled(id) {
     closeSheet();
     toast('已取消 #' + shortId(id));
     load();
-  });
-}
-
-// ---- numpad ----
-// mode: 'money' (digits + dot) | 'time' (HHMM)
-// onConfirm may be async; returning false means "stay here and reset for retry"
-// One element order for every caller: display → confirm → gap → keypad, the
-// keypad bottommost (see the layout-rule comment in the CSS).
-// layout 'pay' (paste pricing): the host becomes a flex column (.np-sheet)
-// with the parsed preview on top and a links row (manual-entry toggle, skip).
-// suggest: prefill the amount, flank it with −/+$10 steppers, and keep the
-// keypad collapsed behind the 自己入價 toggle; the first typed key replaces
-// the prefill wholesale (typing means "I'm entering my own number").
-// skip: secondary action in the links row; its handler may return false to
-// re-enable the button for retry.
-function numpadView({ title, sub, hint, mode, onConfirm, quick, above, layout, suggest, skip }) {
-  let input = suggest != null ? String(suggest) : '';
-  let pristine = suggest != null;
-  const pay = layout === 'pay';
-  function view(sheet) {
-    const suggested = pay && suggest != null;
-    if (pay) sheet.classList.add('np-sheet');
-    const padHtml =
-      '<div class="np-pad' + (suggested ? '' : ' open') + '" id="npPad"><div>' +
-      '<div class="numpad" id="npKeys"></div></div></div>';
-    sheet.insertAdjacentHTML('beforeend',
-      sheetHead(esc(title), sub || '') +
-      (above || '') +
-      (pay
-        ? '<div class="np-links">' +
-            (suggested ? '<span class="np-links-opt" id="npOpt"><button id="npPadToggle">自己入價</button><span>·</span></span>' : '') +
-            (skip ? '<button id="npSkip">' + esc(skip.label) + '</button>' : '') +
-          '</div>' +
-          '<div class="np-amount-row' + (suggested ? '' : ' expanded') + '" id="npRow">' +
-            (suggested ? '<button class="step" data-s="-10">&minus;$10</button>' : '') +
-            '<div class="numpad-display" id="npDisplay"></div>' +
-            (suggested ? '<button class="step" data-s="10">+$10</button>' : '') +
-          '</div>' +
-          '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
-          padHtml
-        : '<div class="numpad-display" id="npDisplay"></div>' +
-          '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
-          (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
-          '<button class="primary-btn" id="npOk" disabled>確認</button>' +
-          padHtml)
-    );
-    const keys = mode === 'money'
-      ? ['1','2','3','4','5','6','7','8','9','.','0','⌫']
-      : ['1','2','3','4','5','6','7','8','9','','0','⌫'];
-    // Lookups must be scoped to the host: both the drop panel and the bottom
-    // sheet can hold a numpad's markup at the same time (one of them hidden),
-    // so document-wide ids would resolve to the wrong copy.
-    const keysEl = sheet.querySelector('#npKeys');
-    keysEl.innerHTML = keys.map(k =>
-      k === '' ? '<div></div>' :
-      '<button class="key' + (k === '⌫' || k === '.' ? ' fn' : '') + '" data-k="' + k + '">' + k + '</button>'
-    ).join('');
-
-    const display = sheet.querySelector('#npDisplay');
-    const ok = sheet.querySelector('#npOk');
-
-    function valid() {
-      if (mode === 'money') return input !== '' && input !== '.' && !isNaN(parseFloat(input));
-      if (input.length !== 4) return false;
-      return +input.slice(0, 2) <= 23 && +input.slice(2) <= 59;
-    }
-    function paint() {
-      if (mode === 'money') {
-        display.innerHTML = (input ? '$' + esc(input) : '<span class="dim">$0</span>') +
-          (suggest != null && input === String(suggest) ? '<span class="sug-tag">建議</span>' : '');
-      } else {
-        const dim = '<span class="dim">&#8211;</span>';
-        const digit = i => i < input.length ? esc(input[i]) : dim;
-        display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
-      }
-      ok.disabled = !valid();
-    }
-    keysEl.addEventListener('click', e => {
-      const k = e.target.dataset && e.target.dataset.k;
-      if (!k) return;
-      if (pristine) { input = ''; pristine = false; }  // typing over a prefill starts fresh (⌫ clears it outright)
-      if (k === '⌫') input = input.slice(0, -1);
-      else if (k === '.') { if (!input.includes('.')) input += input ? '.' : '0.'; }
-      else {
-        if (mode === 'time' && input.length >= 4) return;
-        if (mode === 'money' && input.length >= 7) return;
-        input += k;
-      }
-      paint();
-    });
-    ok.addEventListener('click', async () => {
-      if (!valid()) return;
-      ok.disabled = true;
-      const value = mode === 'money' ? parseFloat(input)
-        : input.slice(0, 2) + ':' + input.slice(2);
-      const result = await onConfirm(value);
-      if (result === false) {
-        // retry keeps a usable state: back to the suggestion when there is
-        // one, since the keypad may still be tucked away
-        input = suggest != null ? String(suggest) : '';
-        pristine = suggest != null;
-        paint();
-      }
-    });
-    const rowEl = sheet.querySelector('#npRow');
-    if (rowEl) rowEl.addEventListener('click', e => {
-      const s = e.target.dataset && e.target.dataset.s;
-      if (!s) return;
-      input = String(Math.max(0, (parseFloat(input) || 0) + Number(s)));
-      paint();
-    });
-    const padToggle = sheet.querySelector('#npPadToggle');
-    if (padToggle) padToggle.addEventListener('click', () => {
-      rowEl.classList.add('expanded');
-      sheet.querySelector('#npPad').classList.add('open');
-      sheet.querySelector('#npOpt').classList.add('gone');
-    });
-    const skipEl = sheet.querySelector('#npSkip');
-    if (skip && skipEl) skipEl.addEventListener('click', async function () {
-      this.disabled = true;
-      if (await skip.onTap() === false) this.disabled = false;
-    });
-    const quickEl = sheet.querySelector('#npQuick');
-    if (quick && quickEl) quickEl.addEventListener('click', quick.onTap);
-    paint();
-  }
-  return view;
-}
+  },
+  gone: () => closeSheet(),
+  rowsAfter: o => [['結算', esc(settleLabel(o))]],
+};
 
 // ---- add flow ----
 // The whole flow (paste form → preview/price, or quick-type → time → price →
