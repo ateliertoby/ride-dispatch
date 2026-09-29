@@ -477,7 +477,7 @@
 <div class="cal">
   <!-- The colour key is read once and sits above the strip: the strip has no
        end to put it after, since scrolling to either end loads another month. -->
-  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結</div>
+  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結／舉牌先結</div>
   <div class="sent" id="sentTop"></div>
   <div class="weeks" id="grid"></div>
   <div class="sent" id="sentBot"></div>
@@ -689,6 +689,25 @@ function groupId(id) {
 function batchDates(b) {
   return [...new Set(b.orders.map(orderDate))].sort();
 }
+// A 舉牌 paid ahead of a trip the platform held back sits on the held trip's
+// day, which none of the batch's own legs may reach; the calendar still has to
+// show that part of the day's money went into the batch.
+function aheadLines(b) { return (b.adjustments || []).filter(a => a.ahead); }
+function batchSpan(b) {
+  return [...new Set([...batchDates(b), ...aheadLines(b).map(a => a.date)])].sort();
+}
+// The runs a batch covers, and the one carrying its amount: the latest run
+// with a leg in it.  Every other run points at that one.
+function spanRuns(b) {
+  const legDays = new Set(batchDates(b));
+  const runs = runsOf(batchSpan(b));
+  const main = [...runs].reverse().find(run => run.some(d => legDays.has(d))) ||
+    runs[runs.length - 1];
+  return { runs, main, legDays };
+}
+function aheadIn(b, run) {
+  return round2(aheadLines(b).filter(a => run.includes(a.date)).reduce((sum, a) => sum + a.amount, 0));
+}
 // A batch's dates are not assumed contiguous: the platform holds a problem leg
 // back and settles it with a later statement. The latest run is the statement's
 // own days; every earlier run is a leg it picked up.
@@ -710,10 +729,15 @@ function runShortLabel(run) {
   return (+a.slice(8)) + (a === z ? '' : '–' + (+z.slice(8))) + '日';
 }
 function heldLabel(b) {
-  const runs = runsOf(batchDates(b)).slice(0, -1);
-  if (!runs.length) return '';
-  return '連 ' + runs.map(run =>
-    runShortLabel(run) + ' ' + b.orders.filter(o => run.includes(orderDate(o))).length + ' 程').join(' · ');
+  const { runs, main } = spanRuns(b);
+  const held = runs.filter(run => run !== main);
+  if (!held.length) return '';
+  return '連 ' + held.map(run => {
+    const legs = b.orders.filter(o => run.includes(orderDate(o))).length;
+    const ahead = aheadIn(b, run);
+    return runShortLabel(run) + ' ' + [legs ? legs + ' 程' : '', ahead ? '舉牌 $' + $(ahead) : '']
+      .filter(Boolean).join(' + ');
+  }).join(' · ');
 }
 
 // ---- load ----
@@ -949,20 +973,23 @@ function weekEvents(week) {
   week.forEach((d, i) => idx.set(d, i));
   const out = [];
   for (const b of data.settlements) {
-    const runs = runsOf(batchDates(b));
-    const point = runs[runs.length - 1][0];
-    runs.forEach((run, ri) => {
+    const { runs, main, legDays } = spanRuns(b);
+    const point = main[0];
+    runs.forEach(run => {
       const at = run.filter(d => idx.has(d)).map(d => idx.get(d));
       if (!at.length) return;
       const start = Math.min(...at), end = Math.max(...at);
-      const makeup = ri < runs.length - 1;
+      const makeup = run !== main;
       // The label rides the run's first segment only, so a wrapped bar is
       // not read as two batches of the same amount.
       const head = idx.get(run[0]) === start;
+      // A day with only a 舉牌 paid ahead has no leg the pointer could stand
+      // for, so it names the money it put into the batch.
+      const ahead = makeup && !run.some(d => legDays.has(d)) ? '$' + $(aheadIn(b, run)) : '';
       out.push({
         type: 'bar', start, cols: end - start + 1, batch: b,
         makeup, point, from: run[0], head,
-        label: !head ? '' : makeup ? makeupLabel(point, run[0]) : barLabel(b),
+        label: !head ? '' : makeup ? ahead + makeupLabel(point, run[0]) : barLabel(b),
         // Squared off whenever the run carries on past this segment, so the
         // pieces read as one bar wrapping. The strip is continuous, so the only
         // thing that cuts a bar is the week wrap -- a batch straddling a month
@@ -1240,11 +1267,13 @@ function pokeEdges() {
 // every batch some credit paid, whatever the strip has loaded; the book carries
 // them for a batch no credit has been put against yet.
 function batchDatesOf(id) {
+  // A loaded batch knows the days of the 舉牌 it paid ahead as well.
+  const own = batchById(id);
+  if (own) return batchSpan(own);
   for (const c of ledger.credits) {
     for (const b of c.batches) if (b.id === id) return b.dates;
   }
-  const own = batchById(id);
-  return own ? batchDates(own) : [];
+  return [];
 }
 
 function focusSets() {
@@ -1565,10 +1594,9 @@ function dayTag(o) {
 function batchesOn(dateStr) {
   const seen = new Set();
   const out = [];
-  for (const o of ordersOn(dateStr)) {
-    const b = batchOf(o.order_id);
-    if (b && !seen.has(b.id)) { seen.add(b.id); out.push(b); }
-  }
+  const add = b => { if (b && !seen.has(b.id)) { seen.add(b.id); out.push(b); } };
+  for (const o of ordersOn(dateStr)) add(batchOf(o.order_id));
+  for (const b of data.settlements) if (aheadLines(b).some(a => a.date === dateStr)) add(b);
   return out;
 }
 function openDay(dateStr) {
