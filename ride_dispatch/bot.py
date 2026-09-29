@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_settlement, get_credit, unallocated_credits, open_batches, allocate, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
@@ -432,87 +432,32 @@ async def handle_callback(update: Update, context):
         await query.message.edit_reply_markup(reply_markup=None)
         await query.answer("已結算")
         text = done.settled_reply
-        markup = None
         if done.allocation_line:
             text += "\n" + done.allocation_line
         # A credit the card named and the confirm could still spend is settled
         # business; anything else leaves the batch looking for money, so the
-        # reply offers whichever side is still open.
+        # reply names whichever side is still open.  The match itself is made
+        # on the settle page.
         if done.credit_id is None:
             offered = credits.offer(credits.propose_batch(DB_PATH, done.settlement_id),
                                     unallocated_credits(DB_PATH, "ride"))
             if offered:
-                text += "\n等緊過數 · 可能係："
                 # The batch was just created, so it is owed all of itself: a
-                # credit smaller than that says on its own button what a tap
-                # would leave outstanding.
-                markup = credit_choice_markup(offered, done.settlement_id,
-                                              prepared.rec.confirmed or 0.0)
+                # credit smaller than that says what it would leave outstanding.
+                text += "\n" + credits.batch_offer_text(offered, prepared.rec.confirmed or 0.0)
         else:
-            leftover = _leftover_offer(done.credit_id)
+            leftover = _leftover_line(done.credit_id)
             if leftover:
-                text += "\n" + leftover[0]
-                markup = leftover[1]
+                text += "\n" + leftover
         if done.short_line:
             text += "\n" + done.short_line
-        await query.message.reply_text(text, reply_markup=markup)
+        await query.message.reply_text(text, reply_markup=None)
 
-    elif query.data.startswith("credit:link:"):
-        _, _, credit_id, settlement_id = query.data.split(":")
-        credit_id, settlement_id = int(credit_id), int(settlement_id)
-        prefix = ""
-        batch = None
-        # Read before the write: a completing allocation clears the flags, and
-        # the reply is where the operator learns those legs finally arrived.
-        cleared = _owed_legs(settlement_id)
-        try:
-            batch = allocate(DB_PATH, credit_id, settlement_id)
-            put = next(a["amount"] for a in batch["allocations"] if a["credit_id"] == credit_id)
-            credit = get_credit(DB_PATH, credit_id)
-            prefix = (f"已對 批次 #{settlement_id} · {statement.money_str(put)} · "
-                      f"剩 {statement.money_str(credit['remaining'])}\n")
-            await query.answer("已對")
-        except ValueError as e:
-            # The card is a snapshot: another tap, a statement, or the feed may
-            # have spent the credit since it was drawn.  Say why, then redraw.
-            credit = get_credit(DB_PATH, credit_id)
-            await query.answer(str(e))
-            if credit is None:
-                return
-        # The redraw only offers what is left of the credit.  propose_credit
-        # answers with nothing for a credit that is archived or fully
-        # allocated, which is exactly what such a card should offer.
-        m = credits.propose_credit(DB_PATH, credit_id)
-        offered = credits.offer(m, open_batches(DB_PATH, credit["platform"]))
-        text = credits.credit_card_text(credit, m, offered)
-        if credit["remaining"] > credits.CENT:
-            text = prefix + text
-        await query.message.edit_text(text, reply_markup=credit_card_markup(credit, offered))
-        if batch is not None:
-            await _report_allocation(query.message, batch, cleared)
-
-    elif query.data.startswith("credit:pick:"):
-        # The batch side of the same allocation.  These buttons sit under the
-        # settled reply, so a tap appends to it rather than redrawing it as a
-        # card: the confirmation line under them is quoted back to the platform.
-        _, _, credit_id, settlement_id = query.data.split(":")
-        credit_id, settlement_id = int(credit_id), int(settlement_id)
-        cleared = _owed_legs(settlement_id)
-        try:
-            batch = allocate(DB_PATH, credit_id, settlement_id)
-        except ValueError as e:
-            await query.answer(str(e))
-            return
-        await query.answer("已對")
-        text = query.message.text + "\n" + credits.allocation_line(batch, cleared)
-        markup = None
-        leftover = _leftover_offer(credit_id)
-        if leftover:
-            text += "\n" + leftover[0]
-            markup = leftover[1]
-        if batch["state"] == "partial":
-            text += "\n" + credits.short_allocation_line(batch)
-        await query.message.edit_text(text, reply_markup=markup)
+    elif query.data.startswith(("credit:link:", "credit:pick:")):
+        # Cards sent before matching moved to the settle page still carry
+        # these buttons.  A tap takes them off and says where matching is now.
+        await query.message.edit_reply_markup(reply_markup=None)
+        await query.answer(credits.ON_THE_WEB)
 
     elif query.data.startswith("credit:archive:"):
         # The statement proved this money is for legs the system never had, so
@@ -921,10 +866,7 @@ async def handle_credits(update: Update, context):
         if credit is None:
             await msg.reply_text(f"搵唔到入數 #{args[0]}")
             return
-        m = credits.propose_credit(DB_PATH, credit["id"])
-        offered = credits.offer(m, open_batches(DB_PATH, credit["platform"]))
-        await msg.reply_text(credits.detail_text(credit, DB_PATH),
-                             reply_markup=credit_card_markup(credit, offered))
+        await msg.reply_text(credits.detail_text(credit, DB_PATH))
         return
 
     if args[0] == "archive" and len(args) >= 3 and args[1] == "before" and _DATE_RE.match(args[2]):
@@ -1097,67 +1039,15 @@ def _kick_poll(context):
     context.application.job_queue.run_once(_poll_tick, 5, job_kwargs=_JOB_KWARGS)
 
 
-def credit_card_markup(credit: dict, offered: list[dict]) -> InlineKeyboardMarkup | None:
-    """A credit card's buttons: one per batch it could put money against.
-
-    Each label says what a tap would do, because a credit that cannot cover a
-    batch pays part of it rather than nothing.
-    """
-    if credit["remaining"] <= credits.CENT or not offered:
-        return None
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(credits.offer_batch_label(b, credit["remaining"]),
-                              callback_data=f"credit:link:{credit['id']}:{b['id']}")]
-        for b in offered
-    ])
-
-
-def credit_choice_markup(candidates: list[dict], settlement_id: int,
-                         outstanding: float | None = None) -> InlineKeyboardMarkup | None:
-    """The card seen from the batch's side: which credit paid this batch.
-
-    Its own callback, not the credit card's: these buttons hang off the settled
-    reply, which carries the line the operator pastes back to the platform and
-    must survive the tap.
-    """
-    if not candidates:
-        return None
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(credits.credit_label(c, outstanding),
-                              callback_data=f"credit:pick:{c['id']}:{settlement_id}")]
-        for c in candidates
-    ])
-
-
-def _owed_legs(settlement_id: int) -> list[str]:
-    """The legs the platform has said it has not paid for, as things stand."""
-    batch = get_settlement(DB_PATH, settlement_id)
-    return [o["order_id"] for o in batch["orders"] if o["unpaid"]] if batch else []
-
-
-def _leftover_offer(credit_id: int):
-    """What the change on a credit could pay for, as text and buttons, or None.
-
-    This is how a make-up payment bundled into a bigger transfer reaches the
-    batch that is short: the tap that spends the first part of the credit is
-    also what asks about the rest.
-    """
+def _leftover_line(credit_id: int) -> str | None:
+    """The change on a credit that some batch could still take, or None."""
     credit = get_credit(DB_PATH, credit_id)
     if credit is None or credit["remaining"] <= credits.CENT:
         return None
     m = credits.propose_credit(DB_PATH, credit_id)
-    offered = credits.offer(m, open_batches(DB_PATH, credit["platform"]))
-    if not offered:
+    if not credits.offer(m, open_batches(DB_PATH, credit["platform"])):
         return None
-    return credits.leftover_text(credit), credit_card_markup(credit, offered)
-
-
-async def _report_allocation(message, batch: dict, cleared: list[str]):
-    """Say what an allocation did to the batch, and ask about what it left owing."""
-    line = credits.allocation_line(batch, cleared)
-    if batch["state"] == "partial":
-        line += "\n" + credits.short_allocation_line(batch)
-    await message.reply_text(line)
+    return credits.leftover_text(credit)
 
 
 async def _check_credits(bot, chat_id: int):
@@ -1192,9 +1082,7 @@ async def _check_credits(bot, chat_id: int):
         try:
             m = credits.propose_credit(DB_PATH, c["id"])
             offered = credits.offer(m, open_batches(DB_PATH, c["platform"]))
-            await bot.send_message(chat_id=chat_id,
-                                   text=credits.credit_card_text(c, m, offered),
-                                   reply_markup=credit_card_markup(c, offered))
+            await bot.send_message(chat_id=chat_id, text=credits.credit_card_text(c, m, offered))
         except Exception:
             logger.exception("credit %s not handled", c["ref"])
 

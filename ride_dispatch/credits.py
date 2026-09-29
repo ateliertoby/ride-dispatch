@@ -18,7 +18,7 @@ from itertools import combinations
 from .db import (get_credit, get_settlement, insert_credit, open_batches,
                  unallocated_credits)
 from .service import PLATFORMS
-from .statement import batch_head, batch_label, leg_amount, money_str
+from .statement import leg_amount, money_str
 
 logger = logging.getLogger("credits")
 
@@ -387,22 +387,14 @@ def _tail(order_id: str) -> str:
     return "…" + order_id[-4:]
 
 
-def offer_batch_label(batch: dict, remaining: float | None = None) -> str:
-    """A batch as a button, saying what a tap would actually do.
-
-    A credit that cannot cover the batch says so on the button: the operator is
-    agreeing to a part payment, and the difference is what he then has to
-    account for leg by leg.
-    """
-    outstanding = batch["outstanding"]
-    if remaining is None or remaining >= outstanding - CENT:
-        return batch_label(batch)
-    return (f"{batch_head(batch)} · 對 {money_str(remaining)}"
-            f"（差 {money_str(round(outstanding - remaining, 2))}）")
+# Matching money to batches is done on the settle page, where the whole ledger
+# is in view and a group is one tap.  The chat only says what arrived and what
+# the matcher believes, and points there.
+ON_THE_WEB = "去埋數頁對數"
 
 
 def credit_label(credit: dict, outstanding: float | None = None) -> str:
-    """A credit as a button: what landed, when, and what is left of it."""
+    """A credit on one line: what landed, when, and what is left of it."""
     label = f"入數 {money_str(credit['amount'])} · {md(credit['value_date'])}"
     if credit["allocated"] > CENT:
         label += f" · 剩 {money_str(credit['remaining'])}"
@@ -421,9 +413,10 @@ def credit_head(credit: dict) -> str:
 
 
 def credit_card_text(credit: dict, m: Match, offered: list[dict]) -> str:
-    """The card for one credit: what the matcher believes, and what it offers.
+    """The push for one credit: what arrived and what the matcher believes.
 
-    A believed match still needs the tap, so the head asks rather than states.
+    A believed match still needs the tap, and the tap is on the settle page, so
+    the head asks rather than states and the card carries no buttons.
     """
     if credit["remaining"] <= CENT:
         return credit_head(credit)
@@ -432,10 +425,10 @@ def credit_card_text(credit: dict, m: Match, offered: list[dict]) -> str:
         if credit["allocated"] > CENT:
             head += f" · 剩 {money_str(credit['remaining'])}"
         head += " · 對到 批次 " + "、".join(f"#{i}" for i in m.exact) + "？"
-        second = "撳確認："
+        second = ON_THE_WEB
     else:
         head = credit_head(credit)
-        second = "等緊過數：" if offered else "冇 batch 啱銀碼"
+        second = f"等緊過數 · {ON_THE_WEB}" if offered else "冇 batch 啱銀碼"
     return "\n".join([head, second, "send 結算圖入嚟都會提議"])
 
 
@@ -500,13 +493,19 @@ def allocation_line(batch: dict, cleared: list[str]) -> str:
 
 
 def leftover_text(credit: dict) -> str:
-    """The change left on a credit, offered against whatever else is owed.
+    """The change left on a credit that some other batch could still take.
 
-    This is how a make-up payment bundled into a bigger transfer reaches the
-    batch it belongs to: the tap that spends the first part of the credit is
-    also what asks about the rest.
+    A make-up payment bundled into a bigger transfer reaches its batch this
+    way, so the reply that spends the first part of a credit says the rest is
+    there to match.
     """
-    return f"剩 {money_str(credit['remaining'])} · 可能係："
+    return f"入數仲剩 {money_str(credit['remaining'])} · {ON_THE_WEB}"
+
+
+def batch_offer_text(offered: list[dict], outstanding: float) -> str:
+    """The credits that could pay a batch just created, as lines to read."""
+    return "\n".join(["等緊過數 · 可能係："] + [credit_label(c, outstanding) for c in offered]
+                     + [ON_THE_WEB])
 
 
 # ---- the unpaid legs of a short-paid batch ----

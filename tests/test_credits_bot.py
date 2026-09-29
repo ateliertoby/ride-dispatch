@@ -107,15 +107,6 @@ def callback_update(data, message_id=777, text="舊訊息"):
     return MagicMock(callback_query=q), q
 
 
-def edited(q):
-    return q.message.edit_text.call_args.args[0]
-
-
-def edited_buttons(q):
-    markup = q.message.edit_text.call_args.kwargs.get("reply_markup")
-    return [] if markup is None else [btn for row in markup.inline_keyboard for btn in row]
-
-
 def command_update(*args):
     msg = MagicMock()
     msg.chat_id = CHAT
@@ -144,35 +135,46 @@ def reply_buttons(msg):
 
 def test_tick_proposes_the_exact_batch_but_links_nothing(db_path):
     """Money arriving needs no confirmation as an event; which orders it pays
-    for does.  The heartbeat announces and asks — it never links."""
+    for does, and that tap is on the settle page.  The heartbeat only
+    announces what arrived and what the matcher believes."""
     sid = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 2540.0)
     write_feed(feed_line("R1", 2540.0, YESTERDAY))
     b = fake_bot()
     tick(b)
     lines = sent(b).split("\n")
     assert lines[0] == f"入數 $2,540 · {credits.md(YESTERDAY)} · 對到 批次 #{sid}？"
-    assert lines[1] == "撳確認："
+    assert lines[1] == "去埋數頁對數"
     assert lines[2] == "send 結算圖入嚟都會提議"
-    assert [btn.callback_data for btn in sent_buttons(b)] == [f"credit:link:1:{sid}"]
+    assert sent_buttons(b) == []
     assert get_settlement(db_path, sid)["received"] == 0.0
     assert get_settlement(db_path, sid)["paid_on"] is None
 
 
-def test_tick_unresolved_sends_card_with_candidates(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    s2 = batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1080.0)
-    s3 = batch(db_path, "A3", f"{YESTERDAY} 10:00:00", 1450.0)
+def test_tick_names_a_whole_group_one_transfer_pays(db_path):
+    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 460.0)
+    s2 = batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 250.0)
+    s3 = batch(db_path, "A3", f"{YESTERDAY} 10:00:00", 340.0)
+    write_feed(feed_line("R1", 1050.0, TODAY))
+    b = fake_bot()
+    tick(b)
+    lines = sent(b).split("\n")
+    assert lines[0] == f"入數 $1,050 · {credits.md(TODAY)} · 對到 批次 #{s1}、#{s2}、#{s3}？"
+    assert lines[1] == "去埋數頁對數"
+    assert sent_buttons(b) == []
+
+
+def test_tick_unresolved_card_points_to_the_settle_page(db_path):
+    batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
+    batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1080.0)
+    batch(db_path, "A3", f"{YESTERDAY} 10:00:00", 1450.0)
     write_feed(feed_line("R1", 2950.0, TODAY))
     b = fake_bot()
     tick(b)
     lines = sent(b).split("\n")
     assert lines[0] == f"入數 $2,950 · {credits.md(TODAY)} · 未對"
-    assert lines[1] == "等緊過數："
+    assert lines[1] == "等緊過數 · 去埋數頁對數"
     assert lines[2] == "send 結算圖入嚟都會提議"
-    # Newest anchor first, and every batch fits under the credit.
-    assert [btn.callback_data for btn in sent_buttons(b)] == [
-        f"credit:link:1:{s3}", f"credit:link:1:{s2}", f"credit:link:1:{s1}"]
-    assert sent_buttons(b)[0].text == statement.batch_label(get_settlement(db_path, s3))
+    assert sent_buttons(b) == []
 
 
 def test_tick_card_says_when_there_is_nothing_to_pay(db_path):
@@ -181,20 +183,6 @@ def test_tick_card_says_when_there_is_nothing_to_pay(db_path):
     tick(b)
     assert sent(b).split("\n")[1] == "冇 batch 啱銀碼"
     assert sent_buttons(b) == []
-
-
-def test_tick_card_offers_a_batch_the_credit_can_only_part_pay(db_path):
-    """Round 2 offered nothing here: a credit smaller than every batch could
-    not be linked.  Money is allocated in amounts now, so it is a part
-    payment, and the button says what the tap would leave owing."""
-    sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 3460.0)
-    write_feed(feed_line("R1", 2950.0, TODAY))
-    b = fake_bot()
-    tick(b)
-    assert sent(b).split("\n")[1] == "等緊過數："
-    buttons = sent_buttons(b)
-    assert [btn.callback_data for btn in buttons] == [f"credit:link:1:{sid}"]
-    assert buttons[0].text.endswith("· 對 $2,950（差 $510）")
 
 
 def test_tick_backfill_summary(db_path):
@@ -313,101 +301,21 @@ def test_tick_survives_a_missing_feed(db_path, monkeypatch):
 
 # ---- the credit card ----
 
-def test_card_tap_links_and_rerenders(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    s2 = batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1080.0)
-    s3 = batch(db_path, "A3", f"{YESTERDAY} 10:00:00", 1450.0)
-    write_feed(feed_line("R1", 2950.0, TODAY))
-    tick(fake_bot())
-    cb, q = callback_update(f"credit:link:1:{s3}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    assert get_settlement(db_path, s3)["received"] == 1450.0
-    lines = edited(q).split("\n")
-    assert lines[0] == f"已對 批次 #{s3} · $1,450 · 剩 $1,500"
-    assert lines[1] == f"入數 $2,950 · {credits.md(TODAY)} · 已對 $1,450 · 剩 $1,500"
-    assert [btn.callback_data for btn in edited_buttons(q)] == [
-        f"credit:link:1:{s2}", f"credit:link:1:{s1}"]
-
-
-def test_card_tap_offers_a_batch_that_now_matches_exactly(db_path):
-    """After a partial link the remainder can equal one awaiting batch to the
-    cent. That is a resolved match, which carries its batch in `linked` and
-    leaves `candidates` empty, so a card drawn from candidates alone would
-    wrongly say nothing fits."""
-    # Two combinations pay this credit (1,000+1,500 and 1,500+1,000), so it is
-    # ambiguous and the operator gets a card rather than an automatic link.
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 1000.0)
-    s2 = batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1500.0)
-    batch(db_path, "A3", f"{YESTERDAY} 10:00:00", 1000.0)
-    write_feed(feed_line("R1", 2500.0, TODAY))
-    tick(fake_bot())
-    cb, q = callback_update(f"credit:link:1:{s1}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    lines = edited(q).split("\n")
-    assert lines[0] == f"已對 批次 #{s1} · $1,000 · 剩 $1,500"
-    assert lines[1] == f"入數 $2,500 · {credits.md(TODAY)} · 剩 $1,500 · 對到 批次 #{s2}？"
-    assert lines[2] == "撳確認："
-    # The proposal leads; the batch that does not fill the remainder stays
-    # reachable, because the matcher is only guessing.
-    assert [btn.callback_data for btn in edited_buttons(q)][0] == f"credit:link:1:{s2}"
-
-
-def test_credits_detail_offers_a_batch_that_matches_exactly(db_path):
+def test_a_tap_on_an_old_card_button_points_to_the_settle_page(db_path):
+    """Cards sent before matching moved to the settle page still carry their
+    buttons.  A tap moves no money: it takes the buttons off and says where
+    matching is done now."""
     sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
-    insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 1450.0, "currency": "HKD",
-                            "value_date": TODAY, "payer": None, "memo": None, "email_id": None,
-                            "received_at": None, "recorded_at": None})
-    msg = run_credits("1")
-    assert [b.callback_data for b in reply_buttons(msg)] == [f"credit:link:1:{sid}"]
-
-
-def test_card_tap_to_zero_removes_the_buttons(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 930.0)   # a second 930: no exact link
-    write_feed(feed_line("R1", 930.0, TODAY))
+    write_feed(feed_line("R1", 1450.0, TODAY))
     tick(fake_bot())
-    cb, q = callback_update(f"credit:link:1:{s1}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    assert edited(q) == f"入數 $930 · {credits.md(TODAY)} · 已全部對齊"
-    assert q.message.edit_text.call_args.kwargs["reply_markup"] is None
-
-
-def test_card_stale_tap_says_why_and_redraws(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1080.0)
-    write_feed(feed_line("R1", 2950.0, TODAY))
-    tick(fake_bot())
-    other = insert_credit(db_path, {"ref": "R9", "platform": "ride", "amount": 930.0,
-                                    "currency": "HKD", "value_date": TODAY, "payer": None,
-                                    "memo": None, "email_id": None, "received_at": None,
-                                    "recorded_at": None})
-    allocate(db_path, other, s1)
-    cb, q = callback_update(f"credit:link:1:{s1}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    q.answer.assert_awaited_once_with("批次已收齊")
-    assert edited(q).startswith(f"入數 $2,950 · {credits.md(TODAY)} · 未對")
-    assert get_settlement(db_path, s1)["allocations"][0]["credit_id"] == other
-
-
-def test_card_tap_on_an_archived_credit_offers_nothing(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    batch(db_path, "A2", f"{YESTERDAY} 09:00:00", 1080.0)
-    write_feed(feed_line("R1", 2950.0, TODAY))
-    tick(fake_bot())
-    run_credits("archive", "1", "唔係我哋嘅")
-    cb, q = callback_update(f"credit:link:1:{s1}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    q.answer.assert_awaited_once_with("入數已收埋")
-    assert edited(q).split("\n")[1] == "冇 batch 啱銀碼"
-    assert edited_buttons(q) == []
-
-
-def test_card_tap_on_a_vanished_credit_only_answers(db_path):
-    s1 = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 930.0)
-    cb, q = callback_update(f"credit:link:999:{s1}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    q.answer.assert_awaited_once_with("搵唔到入數")
-    q.message.edit_text.assert_not_awaited()
+    for data in (f"credit:link:1:{sid}", f"credit:pick:1:{sid}"):
+        cb, q = callback_update(data)
+        asyncio.run(bot.handle_callback(cb, MagicMock()))
+        q.answer.assert_awaited_once_with("去埋數頁對數")
+        q.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
+        q.message.edit_text.assert_not_awaited()
+    assert get_settlement(db_path, sid)["received"] == 0.0
+    assert get_credit(db_path, 1)["remaining"] == 1450.0
 
 
 # ---- the statement flow ----
@@ -464,79 +372,27 @@ def test_stmt_confirm_says_the_batch_is_paid_in_full(db_path, monkeypatch):
     assert q.message.reply_text.call_args.kwargs["reply_markup"] is None
 
 
-def test_stmt_confirm_offers_candidates(db_path, monkeypatch):
+def test_stmt_confirm_names_the_credits_that_could_pay_the_batch(db_path, monkeypatch):
     insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2950.0, "currency": "HKD",
                             "value_date": TODAY, "payer": None, "memo": None,
                             "email_id": None, "received_at": None, "recorded_at": None})
     q = confirm_a_statement(db_path, monkeypatch, "A1", 1450.0)
     reply = q.message.reply_text.call_args.args[0]
-    assert reply.endswith("\n等緊過數 · 可能係：")
-    markup = q.message.reply_text.call_args.kwargs["reply_markup"]
-    buttons = [b for row in markup.inline_keyboard for b in row]
-    assert [b.callback_data for b in buttons] == ["credit:pick:1:1"]
-    assert buttons[0].text == f"入數 $2,950 · {credits.md(TODAY)}"
+    assert reply.endswith(f"\n等緊過數 · 可能係：\n入數 $2,950 · {credits.md(TODAY)}\n去埋數頁對數")
+    assert q.message.reply_text.call_args.kwargs["reply_markup"] is None
 
 
-def test_pick_appends_to_the_settled_reply_instead_of_replacing_it(db_path):
-    """The settled reply carries the line pasted back to the platform, so a tap
-    on its credit buttons must leave it standing."""
-    sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
-    cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2950.0,
-                                  "currency": "HKD", "value_date": "2026-08-24", "payer": None,
-                                  "memo": None, "email_id": None, "received_at": None,
-                                  "recorded_at": None})
-    settled = "已結算 批次 #1 · 8月26日 · 1 程 · $1,450\n\n8月26日 共1程 HKD 1,450 確認無誤\n等緊過數 · 可能係："
-    cb, q = callback_update(f"credit:pick:{cid}:{sid}", text=settled)
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    q.answer.assert_awaited_once_with("已對")
-    assert edited(q) == settled + f"\n批次 #{sid} 收齊 · 已到帳 08-24"
-    assert q.message.edit_text.call_args.kwargs["reply_markup"] is None
-    assert get_settlement(db_path, sid)["state"] == "paid"
-
-
-def test_pick_offers_the_change_left_on_the_credit(db_path):
-    """A make-up payment arrives bundled into a bigger transfer, so the tap
-    that spends the first part of a credit is what asks about the rest."""
-    sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
-    rest = batch(db_path, "A2", f"{TWO_DAYS} 09:00:00", 1500.0)
-    cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2950.0,
-                                  "currency": "HKD", "value_date": TODAY, "payer": None,
-                                  "memo": None, "email_id": None, "received_at": None,
-                                  "recorded_at": None})
-    cb, q = callback_update(f"credit:pick:{cid}:{sid}", text="已結算 批次 #1")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    lines = edited(q).split("\n")
-    assert lines[-2] == f"批次 #{sid} 收齊 · 已到帳 {credits.md(TODAY)}"
-    assert lines[-1] == "剩 $1,500 · 可能係："
-    assert [b.callback_data for b in edited_buttons(q)] == [f"credit:link:{cid}:{rest}"]
-
-
-def test_a_refused_pick_leaves_the_settled_reply_alone(db_path):
-    sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
-    cid = insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 2950.0,
-                                  "currency": "HKD", "value_date": "2026-08-24", "payer": None,
-                                  "memo": None, "email_id": None, "received_at": None,
-                                  "recorded_at": None})
-    run_credits("archive", str(cid), "唔係我哋嘅")
-    cb, q = callback_update(f"credit:pick:{cid}:{sid}", text="已結算 批次 #1")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    q.answer.assert_awaited_once_with("入數已收埋")
-    q.message.edit_text.assert_not_awaited()
-    assert get_settlement(db_path, sid)["received"] == 0.0
-
-
-def test_stmt_confirm_offers_a_credit_that_would_pay_only_part(db_path, monkeypatch):
-    """The batch-side card says what a tap would leave the batch owed, the same
-    way the credit-side one does.  The money arrived a month after the service,
-    which is too late for the window to prove it: it stays a suggestion the
-    operator picks instead of an answer the tap acts on by itself."""
+def test_stmt_confirm_names_a_credit_that_would_pay_only_part(db_path, monkeypatch):
+    """The line says what the credit would leave the batch owed.  The money
+    arrived a month after the service, too late for the window to prove it,
+    so it stays a suggestion for the settle page."""
     insert_credit(db_path, {"ref": "R1", "platform": "ride", "amount": 900.0, "currency": "HKD",
                             "value_date": LAST_MONTH, "payer": None, "memo": None,
                             "email_id": None, "received_at": None, "recorded_at": None})
     q = confirm_a_statement(db_path, monkeypatch, "A1", 1450.0, when=MONTHS_AGO)
-    markup = q.message.reply_text.call_args.kwargs["reply_markup"]
-    buttons = [b for row in markup.inline_keyboard for b in row]
-    assert buttons[0].text == f"入數 $900 · {credits.md(LAST_MONTH)}（差 $550）"
+    reply = q.message.reply_text.call_args.args[0]
+    assert f"\n入數 $900 · {credits.md(LAST_MONTH)}（差 $550）\n" in reply
+    assert q.message.reply_text.call_args.kwargs["reply_markup"] is None
 
 
 def test_stmt_confirm_reply_is_unchanged_without_credits(db_path, monkeypatch):
@@ -675,10 +531,9 @@ def test_stmt_confirm_says_so_when_the_credit_was_spent_since_the_card(db_path, 
     born = open_batches(db_path, "ride")
     assert [b["id"] for b in born] == [other + 1]
     reply = q.message.reply_text.call_args.args[0]
-    assert "對唔到入數：" in reply and reply.endswith("等緊過數 · 可能係：")
-    markup = q.message.reply_text.call_args.kwargs["reply_markup"]
-    assert [b.callback_data for row in markup.inline_keyboard for b in row] == [
-        f"credit:pick:{spare}:{born[0]['id']}"]
+    assert "對唔到入數：" in reply
+    assert reply.endswith(f"等緊過數 · 可能係：\n入數 $3,000 · {credits.md(TODAY)}\n去埋數頁對數")
+    assert q.message.reply_text.call_args.kwargs["reply_markup"] is None
 
 
 def _call_sites(name):
@@ -700,16 +555,16 @@ def _call_sites(name):
 
 
 def test_allocate_is_only_called_by_a_tapped_callback():
-    """paid_on is written by allocate and by nothing else, and the operator's
-    tap is the only thing allowed to call it: a matcher that moved money on its
-    own would put it against orders nobody had checked.  The settle page is a
-    second tap, not a second decider — the endpoint allocates what the request
-    names and nothing else.  statement_flow.confirm is that same tap arriving
-    from either frontend: the credit it spends is the one its card named.
+    """paid_on is written by an allocation and by nothing else, and the
+    operator's tap is the only thing allowed to make one: a matcher that moved
+    money on its own would put it against orders nobody had checked.  The
+    settle page allocates what the request names and nothing else.
+    statement_flow.confirm is the tap that confirms a statement, from either
+    frontend: the credit it spends is the one its card named.  The chat's own
+    credit buttons are gone; matching is done on the settle page.
     A new call site has to be added here deliberately.
     """
-    assert _call_sites("allocate") == {("bot.py", "handle_callback"),
-                                       ("statement_flow.py", "confirm"),
+    assert _call_sites("allocate") == {("statement_flow.py", "confirm"),
                                        ("web.py", "api_allocate_credit")}
 
 
@@ -793,17 +648,6 @@ def confirm_short(db_path, monkeypatch):
     return sid, q
 
 
-def short_statement_ids(db_path, settlement_id):
-    """The batch's legs in service order: the big one, then the two held back."""
-    return [o["order_id"] for o in get_settlement(db_path, settlement_id)["orders"]]
-
-
-def tap(data, message_id):
-    cb, q = callback_update(data, message_id=message_id)
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
-    return q
-
-
 def test_confirming_a_short_statement_ends_with_the_dashboard_line(db_path, monkeypatch):
     """Round 4: the short allocation says where to name the legs, not here."""
     sid, q = confirm_short(db_path, monkeypatch)
@@ -826,57 +670,6 @@ def test_tick_vocabulary_is_gone_from_the_bot():
 def test_credits_short_is_not_a_command(db_path):
     """The /credits short form is gone; typing it shows the usage string."""
     assert reply_text(run_credits("short", "1")) == bot.CREDITS_USAGE
-
-
-def test_the_make_up_payment_closes_the_batch_and_names_the_legs(db_path, monkeypatch):
-    """The whole point of the round: the $510 arrives later, alone or as the
-    leftover of a bigger transfer, and the batch closes naming the two legs."""
-    from ride_dispatch.db import mark_unpaid
-    sid, _q = confirm_short(db_path, monkeypatch)
-    held = short_statement_ids(db_path, sid)[1:]
-    mark_unpaid(db_path, sid, held)
-    later = credit_row(db_path, "R2", 510.0, TODAY)
-    q = tap(f"credit:link:{later}:{sid}", 900)
-    said = replies(q.message)
-    assert said[0] == (f"批次 #{sid} 收齊 · 已到帳 {credits.md(TODAY)}\n"
-                       "到帳：…1704、…3137")
-    batch_ = get_settlement(db_path, sid)
-    assert batch_["state"] == "paid" and batch_["paid_on"] == TODAY
-    # The flags name the legs the platform held back on this statement, which
-    # stays true after the make-up payment: the day sheet reads them to say
-    # those legs were the ones this last transfer paid for.
-    assert [o["order_id"] for o in batch_["orders"] if o["unpaid"]] == held
-
-
-def test_a_part_payment_from_the_credit_card_ends_with_the_dashboard_line(db_path):
-    """The statement can be settled before the money lands, so the short
-    payment arrives at the credit card instead: same reply, dashboard line."""
-    seed(db_path, "1128150000000001", f"{TWO_DAYS} 09:00:00", 2950.0)
-    seed(db_path, "1128150000001704", f"{TWO_DAYS} 10:00:00", 510.0)
-    sid = create_settlement(db_path, "ride", ["1128150000000001", "1128150000001704"],
-                            3460.0, TODAY)
-    write_feed(feed_line("R1", 2950.0, TODAY))
-    tick(fake_bot())
-    q = tap(f"credit:link:1:{sid}", 901)
-    assert edited(q) == f"入數 $2,950 · {credits.md(TODAY)} · 已全部對齊"
-    said = replies(q.message)
-    assert len(said) == 1
-    assert "已收 $2,950 · 未收 $510 · 平台查完喺 dashboard 入返邊張單" in said[0]
-
-
-def test_a_leftover_credit_is_chained_onto_the_batch_that_is_short(db_path, monkeypatch):
-    """A make-up payment bundled into a later day's transfer: the tap that
-    spends the first part of the credit is what offers the rest."""
-    sid, _q = confirm_short(db_path, monkeypatch)
-    other = batch(db_path, "B1", f"{YESTERDAY} 09:00:00", 1000.0)
-    bundle = credit_row(db_path, "R2", 1510.0, TODAY)
-    q = tap(f"credit:pick:{bundle}:{other}", 902)
-    lines = edited(q).split("\n")
-    # `other` is fully paid by the $1,510 credit ($1,000 used), so no
-    # dashboard line for it; the remaining $510 is offered against `sid`.
-    assert lines[-1] == "剩 $510 · 可能係："
-    assert [b.callback_data for b in edited_buttons(q)] == [f"credit:link:{bundle}:{sid}"]
-    assert edited_buttons(q)[0].text.endswith("· $510")
 
 
 # ---- /credits ----
@@ -912,7 +705,7 @@ def test_credits_queue_truncates(db_path):
     assert lines[-1] == "…仲有 3 筆"
 
 
-def test_credits_detail_shows_links_and_offers_buttons(db_path):
+def test_credits_detail_shows_links_and_no_buttons(db_path):
     s1 = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 1450.0)
     batch(db_path, "A2", f"{TWO_DAYS} 09:00:00", 500.0)
     # Dated against the seeded batches, not against a fixed day: money cannot
@@ -928,7 +721,8 @@ def test_credits_detail_shows_links_and_offers_buttons(db_path):
     assert lines[0] == f"入數 #1 · $2,540 · {credits.md(TODAY)} · SUPPLIERPAY"
     assert lines[1] == f"已對：批次 #{s1} $1,450"
     assert lines[2] == "剩 $1,090"
-    assert [b.callback_data for b in reply_buttons(msg)] == ["credit:link:1:2"]
+    # What the rest could pay is answered on the settle page, not here.
+    assert reply_buttons(msg) == []
 
 
 def test_credits_detail_of_an_unlinked_credit(db_path):
@@ -969,8 +763,7 @@ def test_credits_unlink_returns_a_batch_to_awaiting(db_path):
     sid = batch(db_path, "A1", f"{YESTERDAY} 09:00:00", 2540.0)
     write_feed(feed_line("R1", 2540.0, YESTERDAY))
     tick(fake_bot())
-    cb, _q = callback_update(f"credit:link:1:{sid}")
-    asyncio.run(bot.handle_callback(cb, MagicMock()))
+    allocate(db_path, 1, sid)
     assert get_settlement(db_path, sid)["paid_on"] == YESTERDAY
     assert reply_text(run_credits("unlink", str(sid))) == f"批次 #{sid} 解除咗入數，返回等過數"
     assert get_settlement(db_path, sid)["paid_on"] is None

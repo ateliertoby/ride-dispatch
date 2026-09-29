@@ -1322,22 +1322,6 @@ def confirmation_line(rec: Reconciliation, dates: list[str]) -> str:
             f"HKD {money_str(rec.confirmed or 0.0).replace('$', '')} 確認無誤")
 
 
-def batch_head(batch: dict) -> str:
-    """A batch named without a figure: which one, which days, how many legs."""
-    dates = sorted({o["scheduled_time"][:10] for o in batch["orders"]})
-    return f"#{batch['id']} · {date_span_label(dates)} · {len(batch['orders'])} 程"
-
-
-def batch_label(batch: dict) -> str:
-    """A batch as a button.
-
-    The figure is what the batch is still owed, not what it was worth: a batch
-    paid short is offered for the difference, which is the only part any credit
-    can still pay.
-    """
-    return f"{batch_head(batch)} · {money_str(batch['outstanding'])}"
-
-
 def fallback_report(orders: list[dict]) -> str:
     """What the bot can offer without OCR: the unsettled legs, by day, to compare by eye."""
     lines = ["OCR 未裝，讀唔到張圖。未結算嘅接送單："]
