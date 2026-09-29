@@ -1709,9 +1709,12 @@ function creditPropHtml(p, b) {
 function batchPropHtml(p, c) {
   const gap = round2(p.outstanding - c.remaining);
   const label = gap > 0.005 ? '對 $' + $(c.remaining) + '（差 $' + $(gap) + '）' : '對';
+  // A batch of the group is exact only together with the others, and the
+  // group row above already says so.
+  const exact = p.exact && !(c.combo && c.combo.ids.includes(p.id));
   return '<div class="prow"><span class="t">批次 ' + esc(spanLabelOf(p.dates)) + ' · ' +
     p.orders + ' 程 · 差 $' + $(p.outstanding) + '</span>' +
-    (p.exact ? '<span class="ptag">啱數</span>' : '') +
+    (exact ? '<span class="ptag">啱數</span>' : '') +
     '<button class="pbtn" data-alloc-credit="' + c.id + '" data-alloc-batch="' + p.id +
     '">' + label + '</button></div>';
 }
@@ -1836,6 +1839,21 @@ function batchViewHtml(v) {
 // against. The batch row hands the operator on to that batch, and says what it
 // is still owed, because a credit covering a batch in full is not the same as
 // one that left it short.
+// One transfer pays a whole confirmation day, so the group the matcher found
+// is offered as one row and one tap; its batches stay offered one by one below.
+function comboLabel(c) {
+  const members = c.combo.ids.map(id => (c.proposals || []).find(p => p.id === id)).filter(Boolean);
+  return c.combo.ids.length + ' 個批次 · ' +
+    members.map(p => spanLabelOf(p.dates)).join('、') + ' · $' + $(c.combo.total);
+}
+function comboBtnHtml(c, label) {
+  return '<button class="pbtn" data-alloc-all="' + c.id + '" data-alloc-ids="' +
+    c.combo.ids.join(',') + '">' + label + '</button>';
+}
+function comboPropHtml(c) {
+  return '<div class="prow"><span class="t">' + esc(comboLabel(c)) + '</span>' +
+    '<span class="ptag">啱數</span>' + comboBtnHtml(c, '對晒') + '</div>';
+}
 function creditViewHtml(v) {
   const c = creditById(v.id);
   if (!c) return '';
@@ -1852,6 +1870,7 @@ function creditViewHtml(v) {
     const props = c.proposals || [];
     extra = props.length
       ? '<div class="prop-sec"><div class="prop-head">可能對</div>' +
+        (c.combo ? comboPropHtml(c) : '') +
         props.map(p => batchPropHtml(p, c)).join('') + '</div>'
       : '<div class="sub-note mute">冇 statement 對得上</div>';
   }
@@ -1895,6 +1914,11 @@ function queueRowHtml(c) {
     '<span class="t">' + esc(mdSlash(c.value_date)) + ' · $' + $(c.amount) + '</span>' +
     '<span class="s">未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : '') + '</span>' +
     '<span class="c">&rsaquo;</span></button>';
+  if (c.combo) {
+    return '<div class="qitem">' + row +
+      '<div class="qprop"><span class="t">&rarr; ' + esc(comboLabel(c)) + '</span>' +
+      comboBtnHtml(c, '對晒') + '</div></div>';
+  }
   const exact = (c.proposals || []).filter(p => p.exact);
   if (exact.length !== 1) return row;
   const p = exact[0];
@@ -1998,6 +2022,20 @@ async function allocateCredit(creditId, batchId) {
   toast(batch.state === 'paid'
     ? '已對 $' + $(put) + ' · 批次收齊'
     : '已對 $' + $(put) + ' · 仲差 $' + $(batch.outstanding));
+}
+
+async function allocateAll(creditId, batchIds) {
+  let res;
+  try {
+    res = await apiWrite('POST', '/api/credits/' + creditId + '/allocate-all',
+                         { settlement_ids: batchIds });
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  await load();
+  toast('已對 ' + res.batches.length + ' 個批次 · $' +
+    $(round2(res.batches.reduce((sum, b) => sum + b.confirmed_amount, 0))) + ' · 收齊');
 }
 
 async function unlinkCredit(batchId, creditId) {
@@ -2196,6 +2234,8 @@ document.getElementById('sheet').addEventListener('click', e => {
   if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
   const stmtGo = e.target.closest('[data-stmtgo]');
   if (stmtGo && !stmtGo.disabled) { confirmStatement(); return; }
+  const all = e.target.closest('[data-alloc-all]');
+  if (all) { allocateAll(+all.dataset.allocAll, all.dataset.allocIds.split(',').map(Number)); return; }
   const alloc = e.target.closest('[data-alloc-credit]');
   if (alloc) { allocateCredit(+alloc.dataset.allocCredit, +alloc.dataset.allocBatch); return; }
   // The confirm button carries the same pair as the row that opened it, so it

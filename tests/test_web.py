@@ -936,7 +936,7 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
         "fold", "od", "upbatch", "upguess", "uptick", "upsave",
-        "undo", "undogo", "alloc-batch", "alloc-credit", "stmtgo",
+        "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 
 
