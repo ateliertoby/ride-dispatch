@@ -40,7 +40,11 @@
 
 **A leg's own cost belongs on the order, a cost the transfer carries belongs on the batch.** A statement is not only fares. The platform charges 判罰賠款 back for a trip it holds the driver responsible for, and it books such a line wherever it likes: against a leg of this statement, against a leg an earlier batch already holds, against a trip that was cancelled, or under a number the book has never seen. The first is the leg's own cost, so it is written to `orders.penalty_fee` by the same tap that creates the batch, and `expected_of` nets it off for every platform — which is also what makes a statement idempotent, because once the fine is stored, re-reading the same image agrees with the platform's own figure. The rest are money on this transfer and nothing else, so they go to `settlement_adjustments`, one row per printed line, and join the batch's `expected_amount` in the same write. The boundary is what keeps the two apart: recording a fine against an already-settled leg on the order would have to reopen a batch whose expected total is frozen, while recording it as a line of the transfer being confirmed now leaves that batch alone and still balances. The platform's own line structure is kept rather than netted, because a 判罰 and the 免責 line that cancels it are two facts and a pair that happens to net to zero must still read as the pair it was. A line that nets positive under an unknown number is not an adjustment at all but a leg the book never got, and stays flagged as unknown: money coming in must not be able to read as fully explained. The button that writes the batch names every part of what it is about to do — 確認結算 + 記判罰 + 記帳項 + 對入數 — because money leaving an order is not something to discover after the fact.
 
-**A 舉牌 paid while its trip is held back is paid ahead, not settled.** The platform can leave a trip off a statement and still pay the trip's 舉牌 line on it, under the trip's own number. Folded by order number, that reads as the trip underpaid by its whole fare, and confirming it at the platform's figure would settle the order: the fare would drop out of what is owed, and the trip line arriving later would read as money paid extra. The 舉牌 is money on this transfer and the trip is not, so the line goes to `settlement_adjustments` flagged `ahead`, and the order stays unsettled like any held-back leg. `owed_of` takes what other batches carry for an order off `expected_of`, so the batch that later takes the trip is owed the trip alone and the trip line matches it. The category chip that names a line is unreadable, so the rule is arithmetic: an order whose only line is exactly its own 舉牌 fee. A trip line printed at zero beside it is a trip paid nothing, not one held back. The trip's batch freezes its expected total net of the line, so the batch carrying the line cannot be undone while the trip's batch stands, the same reason a batched leg's fees are locked.
+**A 舉牌 paid while its trip is held back is paid ahead, not settled.** The platform can leave a trip off a statement and still pay the trip's 舉牌 line on it, under the trip's own number. Folded by order number, that reads as the trip underpaid by its whole fare, and confirming it at the platform's figure would settle the order: the fare would drop out of what is owed, and the trip line arriving later would read as money paid extra. The 舉牌 is money on this transfer and the trip is not, so the line goes to `settlement_adjustments` flagged `ahead`, and the order stays unsettled like any held-back leg. `owed_of` takes what other batches carry for an order off `expected_of`, so the batch that later takes the trip is owed the trip alone and the trip line matches it. The category chip that names a line is unreadable, so the rule is arithmetic: an order whose only line is exactly its own 舉牌 fee. A trip line printed at zero beside it is a trip paid nothing, not one held back. The trip's batch freezes its expected total net of the line, so the batch carrying the line cannot be undone while the trip's batch stands, the same reason a batched leg's fees are locked. On the settle calendar the batch also covers the held trip's day, drawn as the dashed pointer a held-back day gets and labelled with the money it put in ($40→26日), since that day has no leg of its own in the batch.
+
+**Money is matched on the settle page; the chat only announces it.** A credit arriving from the feed is pushed to Telegram as what arrived and what the matcher believes (對到 批次 #26、#27、#28？ · 去埋數頁對數), with no buttons. Matching it is a tap on the settle page, where the whole ledger and calendar are in view, and a whole confirmation day that one transfer paid is one tap there (對晒), allocated in one transaction that refuses the group whole unless the credit covers every batch in it. The chat's per-batch buttons made a transfer covering three statements take three taps and were answered without the ledger in view. The statement card's 確認結算 + 對入數 stays in the chat: the credit it spends is the one that card named. Buttons left on older credit cards answer with where matching is done now and move no money.
+
+**One order sheet, opened from both pages.** An order found wrong while settling is corrected where it was found. The order's sheet — its details, editable fields, pickup point, cancel confirm and numpad — is one component, `_order_sheet.js` and `_order_sheet.css`, that both pages include; each supplies an `orderHost` that says which order is open, how a view is stacked, how a patch reloads, and the page's own rows (the settle page adds the whole order number to copy, the net figure and links to the batches that hold the leg and that paid its 舉牌 ahead). On a batched order the fields its batch's frozen total was summed from, and cancellation, show as 已結算 rather than waiting for the server to refuse them.
 
 **A separate settle page rather than a mode in the dashboard.** The day view answers "what am I driving", the settle page answers "what am I owed" — different questions, different shapes (a timeline versus a continuous strip of weeks), and `dashboard.html` was already 1.4k lines. The two pages share their tokens and common components through `templates/_shared.css` and `templates/_shared.js`, pulled in with Jinja `{% include %}` inside each page's `<style>`/`<script>` — no build step and no extra request. Only genuinely common code moved: each page keeps its own view stack, because the dashboard's serves two hosts (bottom sheet and top drop panel) while the settle page's stacks eight kinds — day, order, batch, statement, credit, the 未對 queue, undo and 解除入數 — most of them opened straight off the grid rather than always reached through a day.
 
@@ -82,14 +86,16 @@ Settlement (埋數)
     the question already holds the answer and the tap that takes it; the volume
     is a few hundred rows a year, which is cheaper than a round trip per sheet
   → a bar opens the batch sheet, a chip the credit sheet, a cell the day sheet,
-    a leg in that day sheet its own order sheet (GET /api/orders/<id>, because
-    the month payload carries settle columns only); a tap also focuses the
-    money relation the mark belongs to and dims everything outside it
+    a leg in that day sheet the order sheet the dashboard opens (_order_sheet.js;
+    GET /api/orders/<id>, because the month payload carries settle columns
+    only), where the order is edited in place; a tap also focuses the money
+    relation the mark belongs to and dims everything outside it
   → a batch is created only by confirming a statement, from this page or from
     the bot, so every batch traces back to the image it was read from
   → the header's 入數未對 count opens the work queue: open and partial credits,
     oldest first, a row whose match is unambiguous carrying that match and its
-    對 button in place; a matched or archived credit is read off the calendar
+    對 button in place, or 對晒 for a confirmation-day group; a matched or
+    archived credit is read off the calendar
   → batch sheet states what the bank has sent and what it still owes, one row
     per allocation and each of them a way into that credit's own sheet plus a
     解除, and folds the order list behind a count; a short-paid batch offers the
@@ -98,10 +104,14 @@ Settlement (埋數)
     for (補 …0041 · …0092, 補收 on the leg)
   → credit sheet states what arrived, how much of it a statement accounts for,
     and the batches it paid, with what each of those is still owed; money not
-    yet accounted for is offered against the batches owed it (可能對)
+    yet accounted for is offered against the batches owed it (可能對), led by
+    the group one transfer pays whole when the matcher found one
   → 對 → POST /api/credits/<id>/allocate {settlement_id} → db.allocate, the
     amount being as much of the batch as the credit can still pay — the same
-    default the chat card allocates on, never a figure from the client
+    default the statement confirm allocates on, never a figure from the client
+  → 對晒 → POST /api/credits/<id>/allocate-all {settlement_ids} →
+    db.allocate_all: every batch of the group paid in full in one transaction,
+    or none of them
   → 解除 → DELETE /api/settlements/<id>/allocations/<credit id> → db.deallocate
     (one line only; the batch keeps whatever else paid it)
   → 撤銷結算 → DELETE /api/settlements/<id> (unlinks its orders, drops its
@@ -166,7 +176,7 @@ Bank credit (入數)
   → inside that window: an exact amount, or a whole confirmation-day group at
     any size — one transfer pays every batch confirmed on the same working day,
     so the group is the ordinary payment rather than a coincidence and is
-    matched whole → Match.exact, which the card asks about (對到 批次 #4？)
+    matched whole → Match.exact, which the push names (對到 批次 #4？)
   → only a transfer that mixes confirmation days leaves no whole group, and
     only then are combinations searched blind, up to MAX_SUBSET batches, one
     hit being the answer; among equal-sum combinations the one drawn from a
@@ -176,15 +186,19 @@ Bank credit (入數)
   → amounts are round hundreds and the ledger holds months of them, so an
     amount agreeing to the cent on the wrong date is offered among the
     alternatives, never proposed
-  → a card's buttons come from credits.offer: Match.exact first, then Match.short
-    (batches the credit could only pay part of, 對 $2,950（差 $510）), then the
-    other candidates — the belief leads without being acted on
-  → db.allocate is reached only from a callback the operator tapped
-    (credit:link, credit:pick, stmt:confirm); a test pins those call sites
-  → after any allocation the change left on the credit is offered against
-    whatever is still owed (剩 $510 · 可能係：), which is how a make-up payment
-    bundled into a bigger transfer reaches the batch that is short
-  → 1-3 new credits: one card each; more: one backfill summary, /credits
+  → the settle page's proposals come from credits.offer: Match.exact first,
+    then Match.short (batches the credit could only pay part of,
+    對 $2,950（差 $510）), then the other candidates — the belief leads without
+    being acted on; a Match.exact of several batches also travels whole as
+    the credit's combo, which the page offers as one tap
+  → db.allocate is reached only from the statement confirm and the settle
+    page's 對, db.allocate_all only from its 對晒; tests pin those call sites
+  → the change left on a credit stays proposed against whatever is still owed,
+    which is how a make-up payment bundled into a bigger transfer reaches the
+    batch that is short; a statement confirmed in the chat says so
+    (入數仲剩 $510 · 去埋數頁對數)
+  → 1-3 new credits: one push each, no buttons; more: one backfill summary,
+    /credits
   → /credits (queue, detail, archive, unarchive, unlink) is the correction
     path; unlink takes all the money back off a batch, or, given a credit as
     well, only that one allocation
@@ -238,10 +252,11 @@ HKIA parking endpoint (plate → inside? entry time, pvNr, paid; Car Park 3 and 
 - `ride_dispatch/phone.py` — Display-time E.164 phone formatting, recognising every country code currently assigned in ITU-T E.164 (`E164_CC`, prefix-free, which is what makes the longest-match-first scan unambiguous) and stripping the national trunk zero only for the codes known to use one (`TRUNK_ZERO_CC`). A separated 3-digit code followed by exactly 7 digits is left alone: that is how a NANP number is written, the shape is unresolvable, and a wrong guess dials a stranger. Twinned in `templates/_shared.js:formatPhoneE164`, both country-code lists included — keep them in sync.
 - `ride_dispatch/parking.py` — HKIA car park client and the rules read off a visit: free/chargeable verdict from HKIA's fee reading, car park naming (P1/P4 from HKIA's code or name), which car parks have the free half hour and which the lookup can see at all, payment plan, poll-arming window, PayDollar link assembly. Async httpx.
 - `ride_dispatch/whiteboard.py` — Whiteboard sign image generator. fal.ai queue API (GPT-Image-2 edit), async httpx, base image in `assets/`, VIP-marker name sanitization.
-- `ride_dispatch/credits.py` — Bank credit ledger: feed ingestion (whole-file re-read, deduped on the bank reference, so the consumer keeps no offset), the pure credit ↔ batch matcher shared by both directions, the `propose_*` wrappers that read the DB, and the card text. A batch is paid when, and only when, everything allocated to it covers its total: `paid_on` is written by `allocate` alone, from the bank's value date, at the moment the batch is whole, and cleared by `deallocate` or by the batch being undone. Nothing in this module calls `allocate` — it proposes and the operator's tap decides, so a matcher that grows a new rule cannot start moving money on its own. What a credit has left to give and what a batch is still owed are both derived from `credit_allocations`, never stored. Text only, no buttons: `web.py` imports this module, and the dashboard process must not pull in the Telegram library, so the two markup builders live in `bot.py` instead.
+- `ride_dispatch/credits.py` — Bank credit ledger: feed ingestion (whole-file re-read, deduped on the bank reference, so the consumer keeps no offset), the pure credit ↔ batch matcher shared by both directions, the `propose_*` wrappers that read the DB, and the card text. A batch is paid when, and only when, everything allocated to it covers its total: `paid_on` is written by an allocation alone (`allocate`, `allocate_all`), from the bank's value date, at the moment the batch is whole, and cleared by `deallocate` or by the batch being undone. Nothing in this module allocates — it proposes and the operator's tap decides, so a matcher that grows a new rule cannot start moving money on its own. What a credit has left to give and what a batch is still owed are both derived from `credit_allocations`, never stored. Text only: the chat's credit messages carry no buttons, since matching is done on the settle page.
 - `ride_dispatch/statement.py` — Settlement statement reader (RapidOCR boxes → rows by shape, cells out of a reconstructed column grid named off the header) and the pure reconciliation of a statement against candidate orders, including which of its lines are an order's own 判罰, which are the batch's 帳項, and which 舉牌 was paid ahead of a trip the platform held back; the card text both frontends print.
 - `ride_dispatch/statement_flow.py` — What a statement means and what confirming one does, shared by the bot and the settle page so a statement cannot mean one thing in the chat and another in the browser. `prepare` reconciles and asks the ledger, writing nothing; `confirm` writes the batch, its fines and its adjustments and allocates the credit the card named, asking nothing. Both hand back text fragments each frontend arranges into its own card. `keep_unread_image` files a screenshot the reader could not read under `statements/failed/`, because a reader bug can only be reproduced from the exact bytes.
-- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement delete, the 未過數 ticks, and allocating a credit to a batch or taking it back off). It also reads statements: `POST /api/statements/read` runs the same `statement_flow.prepare` the bot does and holds the result under a token for 30 minutes, and `/api/statements/confirm` spends that token on the way in, so a double tap cannot write a second batch. Only a statement creates a batch, here as in the bot.
+- `ride_dispatch/web.py` — Flask app. JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement delete, the 未過數 ticks, and allocating a credit to a batch or to a whole group, or taking it back off). It also reads statements: `POST /api/statements/read` runs the same `statement_flow.prepare` the bot does and holds the result under a token for 30 minutes, and `/api/statements/confirm` spends that token on the way in, so a double tap cannot write a second batch. Only a statement creates a batch, here as in the bot.
 - `templates/_shared.css`, `templates/_shared.js` — Tokens and components shared by the two pages, Jinja-included into each. A rule one page overrides belongs in that page instead. `_shared.js` is leaf helpers only — anything that assumes a page's own DOM shape stays in that page — and it is where every twin of a Python function lives: `money` (`statement.money_str`), `formatPhoneE164` (`phone.py`, both country-code lists with it), `collectContactLines` (`bot.collect_contact_lines`), `platform` (`service.platform_of`), `expectedOf` (`service.expected_of`), plus `svcLabel`, `orderTime`, `weekday` and the write wrapper. Changing one side of a twin without the other is the sync risk this list exists to name.
-- `templates/settle.html` — Settle page (埋數). Event calendar: a day cell carries the money no statement covers yet, a batch draws as a bar over its service days and a credit as a chip on its value date, packed into lanes per week. The strip of weeks is continuous and loads a month at a time off either end: a batch's dates split into runs wherever they are not consecutive, and within a run the only thing that cuts a bar is the week wrap — a batch straddling a month boundary is drawn whole. Day, order, batch, statement, credit, 未對 queue, undo and 解除入數 sheets, plus the focus mode that lights one whole money relation on the strip behind them. Every sheet is a read except 撤銷結算, the 未過數 ticks, reading a statement, and putting a credit against a batch or taking it back off.
+- `templates/_order_sheet.js`, `templates/_order_sheet.css` — The order's own sheet (details, editable fields, pickup point, cancel confirm, numpad), included by both pages. Each page supplies an `orderHost` for what differs: which order is open, how a view is stacked, how a patch reloads, and its own info rows.
+- `templates/settle.html` — Settle page (埋數). Event calendar: a day cell carries the money no statement covers yet, a batch draws as a bar over its service days and a credit as a chip on its value date, packed into lanes per week. The strip of weeks is continuous and loads a month at a time off either end: a batch's dates split into runs wherever they are not consecutive, and within a run the only thing that cuts a bar is the week wrap — a batch straddling a month boundary is drawn whole. Day, order, batch, statement, credit, 未對 queue, undo and 解除入數 sheets, plus the focus mode that lights one whole money relation on the strip behind them. Every settle sheet is a read except 撤銷結算, the 未過數 ticks, reading a statement, and putting a credit against a batch or a group or taking it back off; the order sheet is the dashboard's, and edits the order.
 - `templates/dashboard.html` — Single-page dashboard. Vanilla JS, mobile-first, no build step, dark-first auto theme. Shows flight phase, landing time, and computed 用車時間. Paste-order entry, bottom-sheet editing (an airport pickup's meeting point included), numpad input, platform filter chips (接送/滴滴/Uber/foodpanda).
