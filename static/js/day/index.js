@@ -645,6 +645,8 @@ function addFormView(el) {
   });
   el.querySelectorAll('.quick-type-btn').forEach(btn => {
     btn.addEventListener('click', () => {
+      // Kept as typed, so that backing out of the quick stages finds it again.
+      addState.pasteText = byId('pasteBox').value;
       addState.type = btn.dataset.t;
       pushView(addTimeView());
     });
