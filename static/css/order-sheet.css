@@ -79,19 +79,25 @@ span.pp-opt { cursor: default; }
 }
 
 .numpad-display {
-  text-align: center; font-size: 40px; font-weight: 700;
-  font-variant-numeric: tabular-nums; padding: 18px 0 6px; letter-spacing: 1px;
+  text-align: center; font-family: var(--mono); font-size: 40px; font-weight: 700; line-height: 1.25;
+  letter-spacing: -.02em; padding: 16px 0 6px;
   min-height: 74px;
 }
 .numpad-display .dim { color: var(--text-3); }
-.numpad-hint { text-align: center; font-size: 13px; color: var(--text-3); min-height: 20px; }
-.numpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px 0 4px; }
+.numpad-hint { text-align: center; font-family: var(--mono); font-size: 12px; line-height: 20px; color: var(--text-3); min-height: 20px; }
+/* The keys are cells of one ruled grid: the hairlines are the grid's own
+   ground showing through the gaps between them. */
+.numpad {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 14px;
+  background: var(--line); border: 1px solid var(--line); border-radius: 3px; overflow: hidden;
+}
+.numpad > * { background: var(--sheet-bg); }
 .key {
-  background: var(--key-bg); border: none; border-radius: 12px;
-  font-size: 24px; font-weight: 550; padding: 15px 0; cursor: pointer;
+  border: none; border-radius: 0;
+  font-family: var(--mono); font-size: 22px; line-height: 1.2; padding: 14px 0; cursor: pointer;
 }
 .key:active { background: var(--key-press); }
-.key.fn { font-size: 18px; color: var(--text-2); }
+.key.fn { font-size: 18px; line-height: 26.4px; color: var(--text-2); }
 /* A field a batch's frozen total was summed from: its figure stays readable
    as plain text, with why it cannot be edited said beside its label. */
 .field-row.locked { cursor: default; }
@@ -115,7 +121,7 @@ span.pp-opt { cursor: default; }
    never sit beside it), confirm sits above the keypad behind a structural
    gap, and only when no keypad is on screen does confirm take the bottom
    thumb position. Confirm is a decision control, not part of the input
-   cluster: full-width inverted primary versus the grey key grid, and a
+   cluster: full-width inverted primary versus the ruled key grid, and a
    separate element outside the keypad unit. */
 /* Pay layout: the panel is sized by its content and flows top-down — no
    full-screen stretch, no dead space between the preview and the action
@@ -137,8 +143,9 @@ span.pp-opt { cursor: default; }
   flex-shrink: 0; color: var(--text-3); font-size: 13px;
 }
 .np-links button {
-  background: none; border: none; color: var(--text-3); font-size: 13px;
+  background: none; border: none; color: var(--text-2); font-size: 13px;
   padding: 14px 6px; cursor: pointer; text-decoration: underline;
+  text-decoration-color: var(--text-3); text-underline-offset: 3px;
 }
 .np-links-opt {
   display: inline-flex; align-items: center; gap: 6px;
@@ -155,14 +162,17 @@ span.pp-opt { cursor: default; }
   flex: 1; min-height: 0; padding: 12px 0; font-size: 32px;
   transition: font-size .3s cubic-bezier(.32,.72,.35,1);
 }
+/* The border is drawn inside the key, as a shadow: the key collapses to no
+   width when the keypad opens, and a border would be left standing. */
 .np-amount-row .step {
-  background: var(--key-bg); border: none; border-radius: 12px; cursor: pointer;
-  font-size: 17px; font-weight: 600; color: var(--text-2);
+  background: none; border: none; border-radius: 3px; cursor: pointer;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-family: var(--mono); font-size: 15px; color: var(--text-2);
   padding: 12px 0; width: 76px; flex-shrink: 0;
   transition: max-width .3s cubic-bezier(.32,.72,.35,1), opacity .2s, padding .3s cubic-bezier(.32,.72,.35,1);
   max-width: 76px; overflow: hidden;
 }
-.np-amount-row .step:active { background: var(--key-press); }
+.np-amount-row .step:active { background: var(--surface-press); }
 .np-amount-row.expanded .step { max-width: 0; padding-left: 0; padding-right: 0; opacity: 0; pointer-events: none; }
 .np-amount-row.expanded .numpad-display { font-size: 40px; }
 /* Keypad slides up from the screen edge and pushes confirm upward — the
@@ -175,8 +185,12 @@ span.pp-opt { cursor: default; }
 }
 .np-pad.open { grid-template-rows: 1fr; opacity: 1; }
 .np-pad > div { overflow: hidden; }
-.np-pad .numpad { padding-top: 16px; }
-.sug-tag { font-size: 12px; font-weight: 650; color: var(--green); vertical-align: 5px; letter-spacing: 0; margin-left: 4px; }
+/* Says the amount showing is the suggested one: a mark, not a status. */
+.sug-tag {
+  font-family: var(--han); font-size: 11.5px; font-weight: 400; line-height: 1.35; letter-spacing: 0;
+  padding: 1px 5px 0; margin-left: 8px; border-radius: 2px; vertical-align: 6px;
+  box-shadow: inset 0 0 0 1px var(--text-3); color: var(--text-2);
+}
 @media (prefers-reduced-motion: reduce) {
   .np-pad, .np-amount-row .step, .np-amount-row .numpad-display, .np-links-opt { transition: none; }
   .np-links, .np-amount-row, .np-sheet .np-ok { animation: none; }

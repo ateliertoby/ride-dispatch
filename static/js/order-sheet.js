@@ -244,7 +244,7 @@ export function numpadView({ title, sub, hint, mode, onConfirm, quick, above, la
     const padHtml =
       '<div class="np-pad' + (suggested ? '' : ' open') + '" id="npPad"><div>' +
       '<div class="numpad" id="npKeys"></div></div></div>';
-    sheet.insertAdjacentHTML('beforeend',
+    sheet.insertAdjacentHTML('beforeend', MARK +
       host.head(esc(title), sub || '') +
       (above || '') +
       (pay
@@ -260,7 +260,7 @@ export function numpadView({ title, sub, hint, mode, onConfirm, quick, above, la
           '<button class="primary-btn np-ok" id="npOk" disabled>確認</button>' +
           padHtml
         : '<div class="numpad-display" id="npDisplay"></div>' +
-          '<div class="numpad-hint">' + esc(hint || '') + '</div>' +
+          '<div class="numpad-hint">' + tight(esc(hint || '')) + '</div>' +
           (quick ? '<button class="ghost-btn" id="npQuick">' + esc(quick.label) + '</button>' : '') +
           '<button class="primary-btn" id="npOk" disabled>確認</button>' +
           padHtml)
@@ -287,12 +287,12 @@ export function numpadView({ title, sub, hint, mode, onConfirm, quick, above, la
     }
     function paint() {
       if (mode === 'money') {
-        display.innerHTML = (input ? '$' + esc(input) : '<span class="dim">$0</span>') +
+        display.innerHTML = (input ? tight('$' + esc(input)) : '<span class="dim">$0</span>') +
           (suggest != null && input === String(suggest) ? '<span class="sug-tag">建議</span>' : '');
       } else {
         const dim = '<span class="dim">&#8211;</span>';
         const digit = i => i < input.length ? esc(input[i]) : dim;
-        display.innerHTML = digit(0) + digit(1) + ':' + digit(2) + digit(3);
+        display.innerHTML = digit(0) + digit(1) + tight(':') + digit(2) + digit(3);
       }
       ok.disabled = !valid();
     }
