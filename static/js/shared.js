@@ -20,14 +20,19 @@ export function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
 // day earned, and "$-97.38" reads as a mangled figure where "−$97.38" reads as
 // money taken off, so the sign goes outside the symbol.
 export function money(n) { return (n < 0 ? '−$' : '$') + $(Math.abs(n)); }
-// A figure set in the mono face gives its colon, point, comma or middle dot a
-// whole cell; each is wrapped so the stylesheet (.p) can pull it in. Takes
-// text that is already escaped and returns markup: tags are passed over, so
-// the result can be given back to it unchanged, and it must never be handed
-// raw user text.
+// A figure set in the mono face gives each mark inside it a whole cell, which
+// opens 13:42, $1560.50 and 2026-10-01 up into separate words; each mark is
+// wrapped so the stylesheet can pull it in. The class says how the mark sits
+// in its cell, which is how it has to be pulled: a colon, point, comma or
+// middle dot at the left (.p), a hyphen in the middle (.pd), a slash across
+// all of it (.ps). The minus sign before money is U+2212 and is left alone:
+// it is a sign, not a mark inside a figure. Takes text that is already
+// escaped and returns markup: tags are passed over, so the result can be
+// given back to it unchanged, and it must never be handed raw user text.
+const TIGHT = { '-': 'pd', '/': 'ps' };
 export function tight(html) {
-  return String(html ?? '').replace(/<[^>]*>[:.,·]<\/span>|<[^>]*>|[:.,·]/g,
-    m => m.length === 1 ? '<span class="p">' + m + '</span>' : m);
+  return String(html ?? '').replace(/<[^>]*>[:.,·\-/]<\/span>|<[^>]*>|[:.,·\-/]/g,
+    m => m.length === 1 ? '<span class="' + (TIGHT[m] || 'p') + '">' + m + '</span>' : m);
 }
 export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (

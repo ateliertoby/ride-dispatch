@@ -436,11 +436,14 @@ function renderTabs() {
 }
 
 // How many character cells a figure takes once its punctuation is pulled in:
-// tight() takes about half a cell off each mark it wraps (.34em of a .65em
-// cell).
+// what the stylesheet takes off each mark tight() wraps (.34em, .24em and
+// .12em by class), in cells of .65em.
+const PULLED = { p: 0.52, pd: 0.37, ps: 0.18 };
 function cellsOf(html) {
   const text = html.replace(/<[^>]*>/g, '');
-  return (text.length - 0.52 * (html.match(/class="p"/g) || []).length).toFixed(2);
+  const off = (html.match(/class="p[ds]?"/g) || [])
+    .reduce((n, m) => n + PULLED[m.slice(7, -1)], 0);
+  return (text.length - off).toFixed(2);
 }
 
 function cellHtml(dateStr) {

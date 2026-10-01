@@ -195,6 +195,8 @@ test('esc', () => {
 });
 
 const P = c => '<span class="p">' + c + '</span>';
+const D = '<span class="pd">-</span>';
+const S = '<span class="ps">/</span>';
 
 test('tight wraps the colon of a time', () => {
   assert.equal(tight('13:42'), '13' + P(':') + '42');
@@ -210,6 +212,18 @@ test('tight wraps the middle dot of a date', () => {
   assert.equal(tight('10\u00b701'), '10' + P('\u00b7') + '01');
 });
 
+test('tight wraps the hyphens and slashes of a date, each by its own class', () => {
+  assert.equal(tight('2026-10-01'), '2026' + D + '10' + D + '01');
+  assert.equal(tight('9/10'), '9' + S + '10');
+  assert.equal(tight('\u219210/2'), '\u219210' + S + '2');
+  assert.equal(tight('$40\u219210/1'), '$40\u219210' + S + '1');
+});
+
+test('tight leaves the minus sign before money alone', () => {
+  assert.equal(tight(money(-63)), '\u2212$63');
+  assert.equal(tight('\u2212$97.38 \u00b7 9/10'), '\u2212$97' + P('.') + '38 ' + P('\u00b7') + ' 9' + S + '10');
+});
+
 test('tight leaves a figure with no punctuation alone', () => {
   assert.equal(tight('UO623'), 'UO623');
   assert.equal(tight('$480'), '$480');
@@ -218,7 +232,7 @@ test('tight leaves a figure with no punctuation alone', () => {
 });
 
 test('tight does not wrap what it has already wrapped', () => {
-  for (const s of ['13:42', '$2,169.50', '10\u00b701', 'UO623']) {
+  for (const s of ['13:42', '$2,169.50', '10\u00b701', 'UO623', '2026-10-01', '9/10']) {
     assert.equal(tight(tight(s)), tight(s));
   }
 });
@@ -226,4 +240,5 @@ test('tight does not wrap what it has already wrapped', () => {
 test('tight passes over tags and keeps escaped text escaped', () => {
   assert.equal(tight('出發 <b title="a.b">07:35</b>'), '出發 <b title="a.b">07' + P(':') + '35</b>');
   assert.equal(tight(esc('<1:2>')), '&lt;1' + P(':') + '2&gt;');
+  assert.equal(tight('<b class="a-b" data-x="1/2">10/1</b>'), '<b class="a-b" data-x="1/2">10' + S + '1</b>');
 });

@@ -100,6 +100,12 @@ body {
    their cell (about .06em before the ink, .4em after), so a pull on the left
    would run the mark into the figure before it. */
 .p { margin-inline: 0 -.34em; }
+/* A hyphen sits in the middle of its cell with a fifth of an em either side
+   of it, and a slash fills its cell from corner to corner: each is pulled
+   from both sides, the slash by as little as keeps it clear of a bold digit,
+   so 2026-10-01 and 9/10 read as one figure. */
+.pd { margin-inline: -.12em; }
+.ps { margin-inline: -.06em; }
 button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
 /* ---- masthead ----
