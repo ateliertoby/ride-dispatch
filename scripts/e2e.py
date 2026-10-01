@@ -12,6 +12,11 @@ freshly seeded synthetic database (scripts/seed_demo_db.py) with both clocks
 pinned to 14:00, so checks do not depend on each other or on when they run.
 Each prints PASS or FAIL; the exit status is non-zero if any failed.
 
+The shell's service worker is kept out of every check but those about it
+(worker.*, and the auth.* checks that need the cached shell): WebKit does not
+let a page under a worker have its requests held or stubbed, which is how the
+other checks arrange what they test.
+
 A check also fails when the page logged an error, a request failed or the
 server answered with an error status, unless the check said to expect it.
 
@@ -20,10 +25,12 @@ does. Checks are registered with @check, in the order they run; a new view
 adds its own under its own name prefix.
 """
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -33,20 +40,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (DEVICE, TIMEOUT_MS, TIMEZONE, Driver, Server, demo_now,  # noqa: E402
-                     new_context, paste_message)
+from harness import (DEVICE, LOGIN_PATH, ROOT, TIMEOUT_MS, TIMEZONE, Driver,  # noqa: E402
+                     Server, copy_app, demo_now, new_context, paste_message)
 
 CHECKS = []
 
 
-def check(name: str, old: bool = True, clock: str = "fixed", still: bool = True):
+def check(name: str, old: bool = True, clock: str = "fixed", still: bool = True,
+          workers: bool = False, copy: bool = False):
     """Register a check. `old` says the separate pages can pass it too, which
     is every check that does not depend on how the shell loads its data.
     `clock` is "fixed" (Date frozen, timers real) or "installed" (the check
     moves time itself). `still` turns the page's transitions and animations
-    off, which is what every check wants unless motion is what it checks."""
+    off, which is what every check wants unless motion is what it checks.
+    `workers` lets the shell's service worker in; such a check cannot hold or
+    stub a request from the page and makes the server misbehave instead
+    (Server.fault). `copy` serves the app from a throwaway copy the check may
+    change, to stand for a deploy."""
     def register(fn):
-        CHECKS.append({"name": name, "fn": fn, "old": old, "clock": clock, "still": still})
+        CHECKS.append({"name": name, "fn": fn, "old": old, "clock": clock, "still": still,
+                       "workers": workers, "copy": copy})
         return fn
     return register
 
@@ -186,16 +199,59 @@ kinds => {
 """
 
 
+SHELL_KEY = "/__shell__"
+
+# The worker as the page sees it, and every address each of its caches holds.
+WORKER_JS = """
+async () => {
+  const reg = await navigator.serviceWorker.getRegistration();
+  const held = {};
+  for (const name of (await caches.keys()).sort()) {
+    const keys = await (await caches.open(name)).keys();
+    held[name] = keys.map(r => new URL(r.url).pathname + new URL(r.url).search).sort();
+  }
+  return { controller: !!navigator.serviceWorker.controller, active: !!(reg && reg.active),
+           waiting: !!(reg && reg.waiting), installing: !!(reg && reg.installing), caches: held };
+}
+"""
+
+# Where the showing banner and the showing view's header sit, and what a tap
+# in the middle of each of the header's controls would land on.
+BANNER_JS = """
+() => {
+  const seen = e => e.getClientRects().length > 0;
+  const banners = [...document.querySelectorAll('.shell-banner')].filter(seen);
+  const header = [...document.querySelectorAll('.header')].find(seen);
+  const b = banners.length ? banners[0].getBoundingClientRect() : null;
+  const h = header.getBoundingClientRect();
+  const controls = [...header.querySelectorAll('.nav-btn, .icon-btn, .date-btn')].filter(seen);
+  return {
+    banners: banners.map(e => e.id),
+    banner: b && [Math.round(b.top), Math.round(b.bottom), Math.round(b.left), Math.round(b.width)],
+    header: [Math.round(h.top), Math.round(h.left), Math.round(h.width)],
+    covered: controls.filter(c => {
+      const r = c.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !(hit && (hit === c || c.contains(hit)));
+    }).length,
+    wide: document.documentElement.scrollWidth > window.innerWidth,
+  };
+}
+"""
+
+
 class Session(Driver):
     """One page on one server, with everything it asked the server recorded."""
 
-    def __init__(self, ctx, base_url: str, today: date, shell: bool):
+    def __init__(self, ctx, base_url: str, today: date, shell: bool, server: Server):
         super().__init__(ctx, base_url)
         self.today = today
         self.shell = shell
+        self.server = server
         self.t = seed_demo_db.targets(today)
         self.requests = []     # (method, path, resource type), as they start
         self.finished = []     # (method, path), as they finish
+        self.answers = []      # (path, status, answered by the service worker)
         self.writes = []       # (method, path, body text) for every non-GET to /api/
         self.noise = []        # console errors, failed requests, error statuses
         self.allowed = []
@@ -222,6 +278,7 @@ class Session(Driver):
             self.noise.append(f"request failed: {req.method} {path_of(req.url)} ({req.failure})")
 
         def answered(res):
+            self.answers.append((path_of(res.url), res.status, res.from_service_worker))
             if res.status >= 400:
                 self.noise.append(f"http {res.status}: {res.request.method} {path_of(res.url)}")
 
@@ -241,9 +298,8 @@ class Session(Driver):
         self.allowed.extend(fragments)
 
     def unexpected(self) -> list:
-        out = [f"page error: {e}" for e in self.errors]
-        out += [n for n in self.noise if not any(a in n for a in self.allowed)]
-        return out
+        out = [f"page error: {e}" for e in self.errors] + self.noise
+        return [n for n in out if not any(a in n for a in self.allowed)]
 
     # -- asserting --
 
@@ -564,6 +620,68 @@ class Session(Driver):
     def scroll_room(self) -> int:
         return self.page.evaluate("() => document.documentElement.scrollHeight - window.innerHeight")
 
+    # -- the service worker and the shell's banners --
+
+    def controlled(self, page=None) -> None:
+        (page or self.page).wait_for_function("() => navigator.serviceWorker.controller")
+
+    def worker(self, page=None) -> dict:
+        return (page or self.page).evaluate(WORKER_JS)
+
+    def shown_version(self, page=None):
+        """The version the document on screen was built as."""
+        try:
+            return (page or self.page).evaluate(
+                "() => document.querySelector('meta[name=asset-version]').content")
+        except Exception:      # between two documents
+            return None
+
+    def banner(self, which: str, page=None) -> bool:
+        return (page or self.page).locator("#banner-" + which).is_visible()
+
+    def mark(self) -> None:
+        """Leave something on the page that only a reload removes."""
+        self.page.evaluate("() => { window.__mark = 1; }")
+
+    def marked(self) -> bool:
+        try:
+            return self.page.evaluate("() => window.__mark === 1")
+        except Exception:
+            return False
+
+    def documents(self) -> int:
+        return len([r for r in self.requests if r[2] == "document"])
+
+    def reload(self, ready: str = ".orders .row") -> None:
+        self.page.reload()
+        self.on(ready).first.wait_for()
+        self.settle()
+
+    def look_for_update(self, page=None) -> None:
+        """What coming back to the app does: the page asks the browser to
+        look for a new worker."""
+        (page or self.page).evaluate(
+            "() => { document.dispatchEvent(new Event('visibilitychange')); }")
+
+    def deploy(self, **faults) -> str:
+        """Replace the serving process with one serving a changed asset, as a
+        deploy does, and return the new version. Needs a check with copy=True."""
+        self.server.stop()
+        with open(os.path.join(self.server.app_root, "static", "js", "lanes.js"), "a") as f:
+            f.write("// deployed\n")
+        self.server.fault(**faults)
+        self.server.start()
+        return self.server.version()
+
+    def precached(self) -> list:
+        """What the served worker says it stores, the shell included."""
+        with urllib.request.urlopen(self.base + "/sw.js", timeout=5) as res:
+            listed = re.search(r"^const ASSETS = (\[.*\]);$", res.read().decode(), re.M)
+        return sorted(json.loads(listed.group(1)) + [SHELL_KEY])
+
+    def geometry(self) -> dict:
+        return self.page.evaluate(BANNER_JS)
+
 
 # ---- day view: load and navigation (inventory A, K11) ----
 
@@ -765,7 +883,9 @@ def day_auth_expired(s: Session) -> None:
     s.wait(lambda: s.writes, "the write")
     s.never(s.toast, "a toast for an expired login (write)")
     s.expect(s.count(".sheet.show .numpad"), "the numpad stays up")
-    s.on(".scrim").first.tap(position={"x": 8, "y": 8})
+    s.expect(s.banner("auth"), "the banner for an expired login")
+    # Below the banner, which lies over the top of the scrim.
+    s.on(".scrim").first.tap(position={"x": 8, "y": 120})
     s.stub("GET", "**/api/orders?date=*", 401, "<html>log in</html>", "text/html")
     s.press('[aria-label="後一日"]')
     s.wait(lambda: s.date_text().startswith(s.day(1)), "the date to change")
@@ -2611,10 +2731,12 @@ def settle_auth_expired(s: Session) -> None:
     s.page.evaluate("() => window.scrollTo(0, 0)")
     s.wait(lambda: s.asked(asked), "the month above the strip to be asked for")
     s.never(s.toast, "a toast for an expired login (a month)", ms=quiet)
+    # A change on the server asks for nothing more: the banner has said why.
+    s.expect(s.banner("auth"), "the banner for an expired login")
     asked = len(s.requests)
     s.api("PATCH", "/api/orders/" + o(12), {"price": 401})
-    s.wait(lambda: s.asked(asked, "/api/credits"), "the reload", ms=6000)
-    s.never(s.toast, "a toast for an expired login (reload)", ms=quiet)
+    s.never(lambda: s.requests[asked:], "a request for a change while the login is expired", ms=3500)
+    s.never(s.toast, "a toast for an expired login (a change)", ms=quiet)
     s.settle()
 
 
@@ -3066,18 +3188,394 @@ def views_timing(s: Session) -> None:
     s.never(s.toast, "a readout for back", ms=500)
 
 
+# ---- the service worker (plan review focus 1) ----
+#
+# These run with the worker let in. A page it controls cannot have its requests
+# held or stubbed, so what the server was asked is read from the server's own
+# log, and the server is made to misbehave instead (Server.fault).
+
+LOST_SERVER = ("request failed", "Failed to load resource", "Could not connect", "http 503",
+               "status of 503", "network connection was lost")
+# A request the browser gave up on, because the page was reloaded under it or
+# because it was sent to another origin's login, is reported in these words.
+CUT_OFF = ("access control checks", "Access-Control-Allow-Origin")
+
+
+@check("worker.first-install-takes-control-without-a-reload", old=False, workers=True)
+def worker_first_install(s: Session) -> None:
+    s.open_day()
+    s.mark()
+    s.controlled()
+    s.page.wait_for_timeout(600)
+    s.expect(s.marked(), "the page was reloaded when the first worker took control")
+    s.eq(s.documents(), 1, "document requests")
+    s.expect(not s.banner("update") and not s.banner("auth"), "a banner is showing")
+    g = s.geometry()
+    s.eq((g["banners"], g["header"][0]), ([], 0), "banners taking room while hidden")
+    w = s.worker()
+    s.eq((w["active"], w["waiting"], w["installing"]), (True, False, False), "the registration")
+    # Whole: the document and every asset it can ask for, and nothing else.
+    listed = s.precached()
+    s.eq(w["caches"], {"shell-" + s.server.version(): listed}, "what the worker holds")
+    wanted = {p for m, p, kind in s.requests if kind in ("script", "stylesheet")}
+    s.expect(wanted and wanted <= set(listed), f"the page asked for assets the worker does not hold: {wanted - set(listed)}")
+
+
+@check("worker.shell-from-the-cache-data-from-the-server", old=False, workers=True)
+def worker_offline_shell(s: Session) -> None:
+    s.allow(*LOST_SERVER)
+    s.open_day()
+    s.controlled()
+    # The server refuses the document, the assets and the worker script: a
+    # launch must not need any of them.
+    s.server.fault(no_shell=True)
+    asked, answered = len(s.server.asked()), len(s.answers)
+    s.reload()
+    s.eq(s.rows(), s.ids(), "rows after a launch the server gave no document to")
+    since = s.server.asked()[asked:]
+    s.eq([a for a in since if a[1].split("?")[0] in ("/", "/settle") or a[1].startswith("/assets/")], [],
+         "requests to the server for the document or an asset")
+    s.expect(("GET", "/api/orders?date=" + s.day(), 200) in since, "today's orders were not asked of the server")
+    answers = s.answers[answered:]
+    shell = [w for p, st, w in answers if p == "/" or p.startswith("/assets/")]
+    s.expect(len(shell) > 10 and all(shell), "the document or an asset did not come from the worker")
+    s.eq([p for p, st, w in answers if p.startswith("/api/") and w], [], "data answered by the worker")
+    # Ordinary use under the worker: a change made elsewhere, a write, the other view.
+    oid = s.t["order"]["dropoff"]
+    s.api("PATCH", "/api/orders/" + oid, {"price": 455})
+    s.wait(lambda: s.text(s.row(oid) + " .price") == "$455", "the change made elsewhere")
+    s.open_order(oid)
+    s.edit("價錢", "460")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + oid, {"price": 460}), "the write")
+    s.expect(("PATCH", "/api/orders/" + oid, 200) in s.server.asked(), "the write never reached the server")
+    s.on(".scrim").first.tap(position={"x": 8, "y": 8})
+    s.go_settle()
+    s.expect(("GET", CREDITS, 200) in s.server.asked(), "the settle view's data was not asked of the server")
+    s.go_day()
+    held = [k for keys in s.worker()["caches"].values() for k in keys]
+    s.eq([k for k in held if not (k.startswith("/assets/") or k == SHELL_KEY)], [], "stored by the worker beside the shell")
+    s.eq([p for p, st, w in s.answers if p.startswith("/api/") and w], [], "data answered by the worker")
+    # No server at all: the shell still paints, the data is asked for and
+    # fails, and nothing stands in for it.
+    s.server.stop()
+    tried = len(s.requests)
+    s.page.reload()
+    s.wait_toast("載入失敗")
+    s.expect(s.date_text().startswith(s.day()), "the date button without a server")
+    s.eq(s.count('[aria-label="入單"]'), 1, "the header's controls without a server")
+    s.eq(s.rows(), [], "rows shown with no server to give them")
+    s.expect(("GET", "/api/orders?date=" + s.day(), "fetch") in s.requests[tried:], "today's orders were not asked for")
+
+
+@check("worker.stale-version-address-is-refused", old=False, workers=True)
+def worker_stale_address(s: Session) -> None:
+    s.allow("http 404", "status of 404")
+    s.open_day()
+    s.controlled()
+    v = s.server.version()
+    fetch = "p => fetch(p).then(r => r.status)"
+    s.eq(s.page.evaluate(fetch, "/assets/000000000000/js/main.js"), 404, "an asset under a version that is not the server's")
+    s.eq(s.page.evaluate(fetch, f"/assets/{v}/js/main.js"), 200, "the same asset under the server's version")
+    s.wait(lambda: ("GET", "/assets/000000000000/js/main.js", 404) in s.server.asked(),
+           "an address the worker does not hold to be passed to the server")
+
+
+def refused_install(s: Session, document: str, **fault) -> None:
+    """Load with the server's document unfit to be stored, then with it fit."""
+    s.allow(*LOST_SERVER)
+    s.server.fault(**fault)
+    s.open_day()
+    s.wait(lambda: len([a for a in s.server.asked() if a == ("GET", document, 200)]) >= 2,
+           "the worker's own request for the document")
+    s.never(lambda: s.worker()["controller"] or s.worker()["active"], "a worker took charge of a version it could not store whole", ms=1500)
+    s.eq([k for keys in s.worker()["caches"].values() for k in keys if k == SHELL_KEY], [], "a document stored")
+    s.eq(s.rows(), s.ids(), "the app, from the network")
+    s.expect(not s.banner("update"), "an update is offered")
+    # The next load tries again.
+    s.server.fault()
+    s.reload()
+    s.controlled()
+    s.eq(s.worker()["caches"], {"shell-" + s.server.version(): s.precached()}, "what the worker holds")
+
+
+@check("worker.install-refused-for-a-document-of-another-version", old=False, workers=True)
+def worker_refuses_version(s: Session) -> None:
+    refused_install(s, "/", doc_version="000000000000")
+
+
+@check("worker.install-refused-for-a-redirected-document", old=False, workers=True)
+def worker_refuses_redirect(s: Session) -> None:
+    refused_install(s, "/?redirected=1", doc_redirect=True)
+
+
+@check("worker.update-waits-for-the-tap", old=False, workers=True, copy=True)
+def worker_update(s: Session) -> None:
+    s.allow(*LOST_SERVER)
+    s.open_day()
+    s.controlled()
+    v1 = s.shown_version()
+    s.open_order(s.t["order"]["dropoff"])
+    s.mark()
+    v2 = s.deploy()
+    s.expect(v2 != v1, "the deploy did not change the version")
+    s.look_for_update()
+    s.wait(lambda: s.banner("update"), "the update banner")
+    s.never(lambda: not s.marked(), "a reload nobody asked for", ms=1500)
+    s.eq(s.shown_version(), v1, "the version on screen before the tap")
+    s.expect(s.sheet_open(), "the open sheet was lost")
+    w = s.worker()
+    s.eq((w["active"], w["waiting"]), (True, True), "the new worker, waiting")
+    s.eq(w["caches"].get("shell-" + v1), [a.replace(v2, v1) for a in s.precached()], "the cache of the version in use")
+    s.eq(s.documents(), 1, "document requests before the tap")
+    s.eq(s.text("#banner-update"), "有新版本 · 撳呢度更新", "the banner")
+    # The banner is reachable over the scrim of the open sheet.
+    since, asked = len(s.requests), len(s.server.asked())
+    s.page.locator("#banner-update").tap()
+    s.wait(lambda: s.shown_version() == v2, "the new version after the tap")
+    s.on(".orders .row").first.wait_for()
+    s.settle()
+    s.expect(not s.marked() and s.documents() == 2, "the tap did not reload the page exactly once")
+    s.expect(not s.banner("update"), "the banner after the update")
+    s.eq([r for r in s.requests[since:] if f"/assets/{v1}/" in r[1]], [], "requests for the old version's assets")
+    s.eq([a for a in s.server.asked()[asked:] if f"/assets/{v1}/" in a[1]], [], "the old version's assets asked of the server")
+    w = s.worker()
+    s.eq((w["waiting"], w["caches"]), (False, {"shell-" + v2: s.precached()}), "the worker after the update")
+    s.eq(s.rows(), s.ids(), "rows on the new version")
+
+
+@check("worker.waiting-version-is-taken-at-launch", old=False, workers=True, copy=True)
+def worker_update_at_boot(s: Session) -> None:
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    s.open_day()
+    s.controlled()
+    v1 = s.shown_version()
+    v2 = s.deploy()
+    s.look_for_update()
+    s.wait(lambda: s.banner("update"), "the update banner")
+    # Not tapped. The next launch has nothing open to lose, and takes it.
+    s.page.reload()
+    s.wait(lambda: s.shown_version() == v2, "the waiting version at the next launch")
+    s.on(".orders .row").first.wait_for()
+    s.settle()
+    s.expect(not s.banner("update"), "the banner after the update")
+    s.eq(sorted(s.worker()["caches"]), ["shell-" + v2], "caches")
+    s.expect(v1 != v2 and s.rows() == s.ids(), "rows on the new version")
+
+
+@check("worker.another-window-is-offered-the-reload", old=False, workers=True, copy=True)
+def worker_two_windows(s: Session) -> None:
+    s.allow(*LOST_SERVER)
+    s.open_day()
+    s.controlled()
+    first = s.page
+    s.open_day()
+    s.controlled()
+    v1 = s.shown_version()
+    s.open_order(s.t["order"]["dropoff"])
+    s.mark()
+    v2 = s.deploy()
+    s.look_for_update(first)
+    s.wait(lambda: s.banner("update", first), "the update banner in the first window")
+    first.locator("#banner-update").tap()
+    s.wait(lambda: s.shown_version(first) == v2, "the first window on the new version")
+    # The second window's worker has been replaced under it. It is told, and
+    # keeps what it has open until its own banner is tapped.
+    s.wait(lambda: s.banner("update"), "the update banner in the second window")
+    s.never(lambda: not s.marked(), "the second window reloaded on its own", ms=1500)
+    s.expect(s.sheet_open() and s.shown_version() == v1, "the second window lost what it had open")
+    s.page.locator("#banner-update").tap()
+    s.wait(lambda: s.shown_version() == v2, "the second window on the new version")
+    s.on(".orders .row").first.wait_for()
+    s.settle()
+    s.expect(not s.banner("update"), "the banner after the update")
+
+
+@check("worker.deploy-during-install-leaves-the-old-version-in-charge", old=False, workers=True, copy=True)
+def worker_redeployed(s: Session) -> None:
+    s.allow(*LOST_SERVER, "http 404", "status of 404")
+    s.open_day()
+    s.controlled()
+    v1 = s.shown_version()
+    held = s.precached()
+    # The worker script of one version, then the server of the next: every
+    # asset address the script names is gone.
+    v2 = s.deploy(no_assets=True)
+    s.look_for_update()
+    s.wait(lambda: any(p.startswith(f"/assets/{v2}/") and st == 404 for m, p, st in s.server.asked()),
+           "the install to ask for its assets")
+    s.never(lambda: s.banner("update"), "an update is offered though its install failed", ms=1500)
+    w = s.worker()
+    s.eq((w["active"], w["waiting"], w["installing"]), (True, False, False), "the registration")
+    s.eq(w["caches"].get("shell-" + v1), held, "the cache of the version in charge")
+    s.eq(w["caches"].get("shell-" + v2, []), [], "stored of the version that failed")
+    # It still launches from what it holds.
+    s.server.fault(no_shell=True)
+    s.reload()
+    s.eq((s.shown_version(), s.rows()), (v1, s.ids()), "the next launch")
+    # The next look finds the server whole and offers the version.
+    s.server.fault()
+    s.look_for_update()
+    s.wait(lambda: s.banner("update"), "the update banner once the install can finish")
+    s.eq(s.worker()["waiting"], True, "the new worker, waiting")
+
+
+# ---- an expired login (plan review focus 2) ----
+
+@check("auth.banner-instead-of-a-toast", old=False)
+def auth_banner(s: Session) -> None:
+    s.allow("http 401", "status of 401")
+    s.open_settle()
+    g = s.geometry()
+    s.eq((g["banners"], g["header"][0]), ([], 0), "banners taking room while hidden")
+    s.go_day()
+    oid = s.t["order"]["dropoff"]
+    for glob in ("**/api/orders?date=*", "**/api/ping", "**/api/settle?*", "**/api/credits?*"):
+        s.stub("GET", glob, 401, "<html>log in</html>", "text/html")
+    # The stream still runs: a change on the server makes the day view ask, and
+    # that request is what finds the login gone.
+    asked = len(s.requests)
+    s.api("PATCH", "/api/orders/" + oid, {"price": 455})
+    s.wait(lambda: s.banner("auth"), "the banner", ms=6000)
+    s.eq(s.text("#banner-auth"), "登入過期 · 撳呢度重新登入", "the banner")
+    s.never(s.toast, "a toast for an expired login")
+    s.expect(not s.banner("update"), "the update banner")
+    s.eq(len([r for r in s.requests[asked:] if r[1].startswith("/api/orders?")]), 1, "requests that found the login gone")
+    # From here a change on the server asks nothing: there is nothing to fetch.
+    asked = len(s.requests)
+    s.api("PATCH", "/api/orders/" + oid, {"price": 456})
+    s.never(lambda: s.requests[asked:], "a request for a change while the login is expired", ms=3500)
+    # The banner takes the top of the screen and the header sits under it,
+    # every control still in reach; so too with the page scrolled.
+    width = s.page.viewport_size["width"]
+    for where in ("day", "settle", "settle, scrolled"):
+        if where == "settle":
+            s.go_settle()
+        if where.endswith("scrolled"):
+            s.page.evaluate("() => window.scrollBy(0, 400)")
+            s.settle()
+        g = s.geometry()
+        s.eq(g["banners"], ["banner-auth"], f"banners showing ({where})")
+        s.eq(g["banner"], [0, 44, 0, width], f"the banner's box ({where})")
+        s.eq(g["header"], [44, 0, width], f"the header's box ({where})")
+        s.eq((g["covered"], g["wide"]), (0, False), f"header controls covered, page wider than the screen ({where})")
+    s.never(s.toast, "a toast for an expired login (the settle view)", ms=300)
+    # With a sheet open the banner is still in reach, over the scrim.
+    s.go_day()
+    s.open_order(oid)
+    hit = s.page.evaluate("() => document.elementFromPoint(innerWidth / 2, 22).id")
+    s.eq(hit, "banner-auth", "what a tap on the banner lands on with a sheet open")
+    # The update banner gives way to it.
+    s.page.evaluate("() => { document.getElementById('banner-update').hidden = false; }")
+    s.eq(s.geometry()["banners"], ["banner-auth"], "banners showing with an update waiting too")
+    s.settle()
+
+
+@check("auth.expired-at-launch-with-the-shell-from-the-cache", old=False, workers=True)
+def auth_launch(s: Session) -> None:
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    s.open_settle()
+    s.controlled()
+    # The proxy now answers everything with its login. The document is the
+    # worker's, so the launch paints; the data is what shows the login gone.
+    s.server.fault(expired=True)
+    answered = len(s.answers)
+    s.page.reload()
+    s.wait(lambda: s.banner("auth"), "the banner")
+    s.expect(s.page.url == s.base + "/settle" and s.count('[aria-label="讀結算圖"]') == 1,
+             "the settle view did not paint from the cache")
+    s.expect(any(w for p, st, w in s.answers[answered:] if p == "/settle"), "the document did not come from the worker")
+    s.never(s.toast, "a toast for an expired login")
+    s.eq(s.count(".cell[data-d]"), 0, "data shown with the login expired")
+    # The tap is a navigation the worker passes on, so the proxy can answer it.
+    asked = len(s.server.asked())
+    s.page.locator("#banner-auth").tap()
+    s.page.wait_for_url("**" + LOGIN_PATH + "?**")
+    def logins() -> list:
+        return [st for m, p, st in s.server.asked()[asked:] if p.startswith("/settle?login=")]
+
+    s.wait(logins, "the navigation the banner made to reach the server")
+    s.eq(logins(), [302], "the navigation the banner made, as the server saw it")
+    # Logged in again: the proxy sends the browser back to what it asked for.
+    s.server.fault()
+    asked = len(s.server.asked())
+    s.page.locator("#back").tap()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.eq(s.page.url, s.base + "/settle", "the address after the login")
+    s.expect(not s.banner("auth"), "the banner after the login")
+    s.eq(logins(), [200], "the return, as the server saw it")
+    s.expect(("GET", CREDITS, 200) in s.server.asked()[asked:], "the settle view's data after the login")
+    s.expect(s.worker()["controller"], "the worker after the login")
+    # And the session works: a change on the server reaches the page.
+    asked = len(s.server.asked())
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: ("GET", CREDITS, 200) in s.server.asked()[asked:], "the reload for a change", ms=6000)
+    s.settle()
+
+
+@check("auth.dropped-stream-finds-the-expired-login", old=False, workers=True)
+def auth_stream(s: Session) -> None:
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    s.open_day()
+    s.controlled()
+    shown = s.rows()
+    tried = len(s.requests)
+
+    def made(path: str) -> int:
+        return len([r for r in s.requests[tried:] if r[1] == path])
+
+    # The line drops. Every failure of the stream asks for a ping, and the
+    # pings are spaced however often it fails.
+    s.server.stop()
+    s.wait(lambda: made("/api/events") >= 3, "the stream to try three times", ms=30_000)
+    s.expect(1 <= made("/api/ping") < made("/api/events"),
+             f"{made('/api/ping')} pings for {made('/api/events')} tries of the stream")
+    s.expect(not s.banner("auth"), "a dropped line is taken for an expired login")
+    # When the line is back the login is gone. Nothing on the page asks for
+    # data; the stream failing to reconnect is the only sign.
+    s.server.fault(expired=True)
+    s.server.start()
+    s.wait(lambda: s.banner("auth"), "the banner", ms=20_000)
+    s.never(s.toast, "a toast for an expired login")
+    s.eq(s.rows(), shown, "rows")
+    # The page has its answer and asks no more.
+    pings = made("/api/ping")
+    s.never(lambda: made("/api/ping") > pings, "a ping once the login is known to be gone", ms=7000)
+
+
+@check("auth.expired-login-found-when-the-line-comes-straight-back", old=False, workers=True)
+def auth_stream_quick(s: Session) -> None:
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    s.open_day()
+    s.controlled()
+    # The stream's failure against the login comes seconds after its failure
+    # for the dropped line, inside the gap that spaces the pings, and in WebKit
+    # it is the last there will be: the stream does not try again after it.
+    s.server.stop()
+    s.server.fault(expired=True)
+    s.server.start()
+    s.wait(lambda: s.banner("auth"), "the banner", ms=20_000)
+    s.never(s.toast, "a toast for an expired login")
+
 # ---- running ----
 
 def run(playwright, browser, chk: dict, today: date, shell: bool):
     """Run one check on a server of its own. Returns (problem or None, writes)."""
-    with Server(today, shell=shell) as url:
+    with contextlib.ExitStack() as stack:
+        root = ROOT
+        if chk["copy"]:
+            root = copy_app(stack.enter_context(tempfile.TemporaryDirectory(prefix="ride-app-")))
+        server = Server(today, root, shell=shell)
+        url = stack.enter_context(server)
         if chk["clock"] == "installed":
             ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme="dark",
-                                      timezone_id=TIMEZONE, locale="zh-HK")
+                                      timezone_id=TIMEZONE, locale="zh-HK",
+                                      service_workers="block")
             ctx.clock.install(time=demo_now(today))
         else:
-            ctx = new_context(playwright, browser, "dark", today, still=chk["still"])
-        s = Session(ctx, url, today, shell)
+            ctx = new_context(playwright, browser, "dark", today, still=chk["still"],
+                              workers=chk["workers"])
+        s = Session(ctx, url, today, shell, server)
         problem = None
         try:
             chk["fn"](s)
