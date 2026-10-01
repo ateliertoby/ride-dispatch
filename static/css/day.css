@@ -1,0 +1,197 @@
+/* The day view's own rules, linked by the shell after base.css and
+   order-sheet.css. Everything is scoped to the view's root so that the two
+   views, which stay in one document, cannot style each other. The scope is
+   written :where(.view-day) because :where() adds no specificity: a rule here
+   weighs against the shared stylesheets exactly as it would unscoped, so
+   which of two rules wins is decided by the selectors as written and by
+   source order, as in a single stylesheet. Rules that cannot nest (@keyframes)
+   or whose contents are what nests (@media) sit at top level in source order. */
+
+/* Tokens only this view uses: row-state colours. */
+body[data-view="day"] {
+  --urgent-bg: rgba(255,97,97,.14);
+  --tight-bg: rgba(255,176,46,.14);
+  --next-bg: rgba(61,220,132,.06);
+}
+@media (prefers-color-scheme: light) {
+  body[data-view="day"] {
+    --urgent-bg: #fdeaea;
+    --tight-bg: #fff8e1;
+    --next-bg: #edfaf2;
+  }
+}
+:where(.view-day) {
+  .add-btn { background: var(--surface); color: var(--text); font-size: 22px; font-weight: 400; }
+
+  .orders { padding: 8px 0 24px; }
+  .row {
+    display: flex; width: 100%; text-align: left; border: none; background: none;
+    cursor: pointer; padding: 9px 14px; min-height: 56px; gap: 10px;
+    border-left: 3px solid transparent;
+  }
+  .row:active { background: var(--surface-press); }
+  .row.done { opacity: .45; }
+  .row.next { background: var(--next-bg); border-left-color: var(--green); }
+
+  /* Fixed width so every big time starts on the same x. The width is set by the
+     widest sub-line ("出發 14:43"), which must stay on one line: broken across
+     two it reads as two separate facts. */
+  .rail { width: 84px; flex-shrink: 0; }
+  .rail .t {
+    font-size: 26px; font-weight: 750; letter-spacing: -.5px;
+    font-variant-numeric: tabular-nums; line-height: 1.1;
+  }
+  .rail .st { font-size: 11.5px; color: var(--text-2); line-height: 1.5; font-variant-numeric: tabular-nums; }
+  .rail .st b { font-weight: 650; }
+
+  .row-body { flex: 1; min-width: 0; padding-top: 2px; }
+  /* The endpoint is the one thing on the row that must never be cut, so nothing
+     here truncates. The route is two units, FROM and "→ TO", and the second one
+     wraps whole, which keeps the arrow leading the second line. Each unit still
+     wraps internally when a single endpoint outgrows the column. */
+  .route {
+    display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0;
+    column-gap: 6px; font-size: 17px; line-height: 1.35;
+  }
+  .route > span {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    min-width: 0; max-width: 100%;
+  }
+  /* Emphasis rule: the non-airport endpoint is the one the driver has to find,
+     so it carries the weight; the airport side stays compact because it is a
+     place he already knows. */
+  .route .big { font-weight: 650; color: var(--text); min-width: 0; }
+  .route .small { font-weight: 500; color: var(--text-2); min-width: 0; }
+  .route .reg { font-weight: 550; color: var(--text); min-width: 0; }
+  .route .arrow { color: var(--text-3); flex-shrink: 0; font-size: 15px; }
+  .flt {
+    display: inline-block; flex-shrink: 0;
+    font-size: 13px; font-weight: 600; letter-spacing: .09em; color: var(--text-2);
+    border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+    font-variant-numeric: tabular-nums; vertical-align: 1px;
+  }
+
+  .tags { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
+  .tag {
+    font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .tag.banner { background: var(--banner-bg); color: var(--banner-fg); }
+  .tag.urgent { background: var(--urgent-bg); color: var(--red); }
+  .tag.tight { background: var(--tight-bg); color: var(--amber); }
+  .tag.neutral { background: var(--key-bg); color: var(--text-3); }
+
+  /* Every row ends with money, so the amount lands in the same right-hand slot
+     as a quick order's. The slot never shrinks; the route wraps instead. */
+  .price {
+    flex-shrink: 0; padding-top: 4px; text-align: right;
+    font-size: 15px; font-weight: 600; color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .price.unset { color: var(--amber); }
+  /* A 判罰賠款 sits under the gross fare rather than replacing it: the day
+     total is gross, and a row that quietly showed net would not add up to it.
+     Exact to the cent — the layout gives way to the number, never the other
+     way round. */
+  .price .pen {
+    display: block; margin-top: 2px;
+    font-size: 11px; font-weight: 650; padding: 1px 5px; border-radius: 5px;
+    background: var(--urgent-bg); color: var(--red);
+  }
+
+  /* Quick orders are filler between legs, so they get a lighter one-line row. */
+  .row.quick { min-height: 44px; align-items: center; padding: 4px 14px; }
+  .row.quick .rail .t { font-size: 17px; font-weight: 650; color: var(--text-2); }
+  .row.quick .row-body { display: flex; align-items: center; padding-top: 0; }
+  .qplat { font-size: 14px; font-weight: 650; }
+  .qplat.didi { color: var(--didi-fg); }
+  .qplat.uber { color: var(--uber-fg); }
+  .qplat.foodpanda { color: var(--fp-fg); }
+  .qprice { margin-left: auto; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .qprice.unset { color: var(--amber); }
+
+  /* Waiting time and the NOW marker are marks on the timeline the big times run
+     down, so both are indented to the rail rather than to the row. */
+  .gap { padding: 1px 0; }
+  .gap-label {
+    padding-left: 17px; font-size: 11px; color: var(--text-3);
+    font-variant-numeric: tabular-nums; line-height: 1.6;
+  }
+  .now { display: flex; align-items: center; gap: 8px; padding: 3px 14px 3px 17px; }
+  .now .now-t {
+    font-size: 12px; font-weight: 750; color: var(--red);
+    font-variant-numeric: tabular-nums; flex-shrink: 0; width: 58px;
+  }
+  .now .now-line { flex: 1; height: 1px; background: var(--red); opacity: .55; }
+
+  /* ---- sheet ---- */
+  /* Paste panel drops from the top: it opens right under the finger that
+     tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
+  .drop {
+    position: fixed; z-index: 21; left: 0; right: 0; top: 0;
+    max-width: 480px; margin: 0 auto; max-height: 100dvh;
+    background: var(--sheet-bg); border-radius: 0 0 18px 18px;
+    padding: calc(12px + env(safe-area-inset-top)) 18px 16px;
+    overflow: hidden;
+    transform: translateY(-105%);
+    transition: transform .3s cubic-bezier(.32,.72,.35,1), height .3s cubic-bezier(.32,.72,.35,1);
+  }
+  .drop.show { transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.view-day) {
+    .drop { transition: none; }
+    .paste-preview .sum-row { animation: none; }
+  }
+}
+:where(.view-day) {
+  .paste-box {
+    width: 100%; margin-top: 12px; padding: 12px;
+    background: var(--key-bg); color: var(--text);
+    /* 16px floor: iOS Safari auto-zooms the page when focusing any
+       input/textarea whose font-size is below 16px */
+    border: none; border-radius: 12px; font-size: 16px; font-family: inherit;
+    resize: vertical; min-height: 150px;
+  }
+  .quick-types { display: flex; gap: 8px; margin-top: 14px; }
+  .quick-type-btn {
+    flex: 1; border: none; border-radius: 10px; padding: 10px 0;
+    background: var(--key-bg); font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .quick-type-btn.didi { color: var(--didi-fg); }
+  .quick-type-btn.uber { color: var(--uber-fg); }
+  .quick-type-btn.foodpanda { color: var(--fp-fg); }
+  .paste-preview {
+    padding: 4px 0 0; border-bottom: 1px solid var(--line); margin-bottom: 2px;
+    max-height: 28vh; overflow-y: auto;
+  }
+  .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
+  .paste-preview .sum-row .v { text-align: right; }
+  /* A change row carries two addresses, so its value wraps to several lines;
+     the label must keep its own width instead of collapsing to one character
+     per line beside it. */
+  .paste-preview.changes .sum-row .k { flex-shrink: 0; }
+}
+@keyframes row-in { from { opacity: 0; transform: translateY(4px); } }
+:where(.view-day) {
+  .paste-preview .sum-row {
+    animation: row-in .25s both;
+    animation-delay: calc(var(--i, 0) * 25ms);
+  }
+  /* In the numpad's pay layout the preview is what shrinks and scrolls, never
+     the panel around it. */
+  .np-sheet .paste-preview { flex: 0 1 auto; max-height: none; min-height: 66px; }
+  .dup-warn {
+    background: rgba(255,97,97,.12); color: var(--red);
+    border-radius: 10px; padding: 10px 12px; font-size: 14px;
+    font-weight: 600; margin-top: 10px;
+  }
+
+  /* Change rows read "was → now": the superseded value stays legible but
+     recedes, so the eye lands on what the message actually says. */
+  .sum-row .v .was { color: var(--text-3); }
+
+  .sum-row .v.urgent { color: var(--red); }
+  .sum-row .v.tight { color: var(--amber); }
+  .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
+}
