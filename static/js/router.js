@@ -3,12 +3,16 @@
 //
 // views is { name: { path, title, view, root, deps } }, where view is
 // { mount(root, deps), show(), hide(), refresh() }. A view is mounted the
-// first time it is shown and stays mounted.
+// first time it is shown and stays mounted. navAt() is for a view to call
+// inside show().
 export function createRouter(views, { onSwitch } = {}) {
   const byPath = new Map(Object.entries(views).map(([name, v]) => [v.path, name]));
   const scroll = {};
   const mounted = new Set();
   let current = null;
+  // When the tap that asked for the switch now being made happened, for the
+  // views' timing readout; 0 when no tap did (the first view, back, forward).
+  let tapAt = 0;
 
   // A path no view claims shows the view at '/'.
   function nameFor(pathname) { return byPath.get(pathname) || byPath.get('/'); }
@@ -50,11 +54,13 @@ export function createRouter(views, { onSwitch } = {}) {
       // the server for it.
       if (!byPath.has(path)) return;
       e.preventDefault();
+      tapAt = performance.now();
       go(path);
+      tapAt = 0;
     });
     window.addEventListener('popstate', () => show(nameFor(location.pathname)));
     show(nameFor(location.pathname));
   }
 
-  return { start, go, current: () => current };
+  return { start, go, current: () => current, navAt: () => tapAt };
 }

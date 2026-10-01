@@ -71,8 +71,10 @@ function isDone(o) {
 // ---- nav / load ----
 // Diagnostic: with localStorage.perf set, a paint of data reports how long it
 // took to arrive: the first one since the navigation that loaded the page, a
-// later one since the date tap that asked for it.
+// later one since the tap that asked for it, on a date control or on the
+// link that switched to this view.
 let navAt = 0;
+let tapAt = () => 0;         // when the tap that switched views was made; the router's
 function reportPerf() {
   let ms = null;
   if (!window._perfSaid) ms = performance.now();
@@ -754,6 +756,7 @@ export const dayView = {
   mount(el, deps) {
     root = el;
     store = deps.store;
+    tapAt = deps.navAt;
     initPerfSwitch();
     // Release the drop panel's inline animation height once a grow/shrink lands,
     // so the stage classes (content height / 100dvh) govern it between animations.
@@ -773,6 +776,7 @@ export const dayView = {
     // other view returns the operator to where he was.
     scrollToNext = !shownOnce;
     shownOnce = true;
+    navAt = tapAt();
     return load();
   },
   hide() { showing = false; },
