@@ -77,7 +77,7 @@ button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: tran
   padding-top: calc(10px + env(safe-area-inset-top));
   border-bottom: 1px solid var(--line);
 }
-/* ---- shell banner ---- */
+/* ---- shell banners ---- */
 /* Above the header and the scrim, so one can be read and tapped with a sheet
    open; level with the sheets, which come later in the document and so lie
    over it where they reach the top. Named apart from the day view's .banner
@@ -94,6 +94,8 @@ button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: tran
 }
 /* The rule above sets display, which would otherwise undo the attribute. */
 .shell-banner[hidden] { display: none; }
+/* One at a time: until the login is back, nothing can be updated anyway. */
+#banner-auth:not([hidden]) ~ #banner-update { display: none; }
 /* A banner takes the top of the screen, and with it the room the header
    leaves for the status bar; the header then stays below it, by the
    banner's height. */

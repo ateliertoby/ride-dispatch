@@ -220,10 +220,11 @@ def test_the_worker_changes_with_the_assets(client, static_copy):
     assert f"/assets/{web.asset_version()}/js/probe.js" in after
 
 
-def test_the_shell_holds_a_hidden_update_banner(client):
+def test_the_shell_holds_two_hidden_banners(client):
     html = client.get("/").get_data(as_text=True)
+    assert '<button class="shell-banner" id="banner-auth" hidden>' in html
     assert '<button class="shell-banner" id="banner-update" hidden>' in html
-    assert html.index('id="banner-update"') < html.index('id="view-day"')
+    assert html.index('id="banner-auth"') < html.index('id="view-day"')
 
 
 def test_api_answers_are_never_cacheable(client):

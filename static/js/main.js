@@ -1,12 +1,18 @@
 // Boot: the views, the router that shows one of them, the change stream, the
-// worker that caches the shell, and the banner that offers a new version.
+// worker that caches the shell, and the two banners the shell itself owns.
 
 import { createStore } from './store.js';
 import { openStream } from './stream.js';
-import { getJson } from './api.js';
+import { getJson, isAuthExpired, onAuthExpired } from './api.js';
 import { createRouter } from './router.js';
 import { dayView } from './day/index.js';
 import { settleView } from './settle/index.js';
+
+// Back from a login: the marker that sent the navigation past the worker has
+// done its job, and the router must not see it.
+if (new URLSearchParams(location.search).has('login')) {
+  history.replaceState(history.state, '', location.pathname);
+}
 
 const store = createStore(getJson);
 // For the timing readout: when the tap that switched views was made.
@@ -20,11 +26,41 @@ const views = {
 const router = createRouter(views);
 router.start();
 
+// With the document served from the worker's cache an expired login no longer
+// arrives as a login page; it arrives as requests that fail, which api.js
+// recognises. The banner is what says so.
+const authBanner = document.getElementById('banner-auth');
+onAuthExpired(() => { authBanner.hidden = false; });
+authBanner.addEventListener('click', () => {
+  // A navigation the worker lets through to the network, so the access proxy
+  // can run its login and send the browser back here.
+  location.assign(location.pathname + '?login=' + Date.now());
+});
+
+// A hidden view asks nothing, so when the stream fails the ping is what tells
+// an expired login from a dropped line. A stream that cannot connect fails
+// again every few seconds, or once and for good, depending on the browser:
+// failures inside the gap are answered by one ping at its end, so the last
+// failure is always followed by a ping and a run of them is not a storm.
+const PING_GAP_MS = 5000;
+let pingGap = 0;
+let pingOwed = false;
+function ping() {
+  if (isAuthExpired()) return;
+  if (pingGap) { pingOwed = true; return; }
+  pingGap = setTimeout(() => {
+    pingGap = 0;
+    if (pingOwed) { pingOwed = false; ping(); }
+  }, PING_GAP_MS);
+  getJson('/api/ping').catch(() => {});
+}
+
 // A change on the server refreshes what is on screen; a hidden view catches up
-// when it is shown, which is the only time it can be painted correctly.
+// when it is shown, which is the only time it can be painted correctly. With
+// the login expired there is nothing a refresh could fetch.
 openStream(
-  () => views[router.current()].view.refresh(),
-  () => { getJson('/api/ping').catch(() => {}); },   // tells an expired login from a dropped line
+  () => { if (!isAuthExpired()) views[router.current()].view.refresh(); },
+  ping,
 );
 
 // A reload loses whatever is open: a sheet, a statement being read, unsaved
