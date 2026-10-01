@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from flask import (
     Flask,
     Response,
+    abort,
     render_template,
     request,
     jsonify,
@@ -65,14 +67,100 @@ app = Flask(
 )
 
 
+# Serve the single-document shell instead of the two pages. Removed with the
+# pages once the shell has replaced them.
+SHELL = os.environ.get("RIDE_SHELL", "") == "1"
+
+_MANIFEST_MIMETYPE = "application/manifest+json"
+_VERSION_TEMPLATES = ("app.html", "sw.js")
+_asset_version_cache = None
+
+
+def _versioned_files():
+    for root, _dirs, files in os.walk(app.static_folder):
+        for name in files:
+            yield os.path.join(root, name)
+    for name in _VERSION_TEMPLATES:
+        path = os.path.join(app.template_folder, name)
+        if os.path.exists(path):
+            yield path
+
+
+def asset_version() -> str:
+    """Content hash of everything the shell is made of.
+
+    It names the asset URLs and the service worker's cache, so a deploy that
+    changes any of it gives every file a new address and no client can run one
+    version's document against another's script.
+
+    A serving process reads the files once and keeps the answer: the files on
+    disk must not change under it, so a deploy replaces them and restarts the
+    process in one step.
+    """
+    global _asset_version_cache
+    # A test or a debug server edits files under a running process.
+    if _asset_version_cache is None or app.testing or app.debug:
+        h = hashlib.sha256()
+        for path in sorted(_versioned_files()):
+            # Relative, so the same tree hashes alike wherever it is checked out.
+            h.update(os.path.relpath(path, app.root_path).encode())
+            with open(path, "rb") as f:
+                h.update(f.read())
+        _asset_version_cache = h.hexdigest()[:12]
+    return _asset_version_cache
+
+
+@app.context_processor
+def _asset_helpers():
+    v = asset_version()
+    return {"asset_version": v, "asset": lambda path: f"/assets/{v}/{path}"}
+
+
+def _shell():
+    resp = app.make_response(render_template("app.html"))
+    # Revalidated on every load: the document is what names the asset version.
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Asset-Version"] = asset_version()
+    return resp
+
+
 @app.route("/")
 def dashboard():
-    return render_template("dashboard.html")
+    return _shell() if SHELL else render_template("dashboard.html")
 
 
 @app.route("/settle")
 def settle():
-    return render_template("settle.html")
+    return _shell() if SHELL else render_template("settle.html")
+
+
+@app.get("/assets/<version>/<path:filename>")
+def versioned_asset(version, filename):
+    # A stale version is refused rather than answered with today's file: the
+    # address promises the content, and it is cached as immutable.
+    if version != asset_version():
+        abort(404)
+    mimetype = _MANIFEST_MIMETYPE if filename.endswith(".webmanifest") else None
+    resp = send_from_directory(app.static_folder, filename, mimetype=mimetype)
+    # Replaces the "no-cache" every file response starts with.
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
+@app.get("/api/ping")
+def api_ping():
+    return jsonify({"ok": True, "version": asset_version()})
+
+
+@app.after_request
+def _no_store_api(resp):
+    # Money and schedule data must come from the server every time. Set over
+    # whatever the view chose, because a file response arrives marked
+    # "no-cache", which still lets a cache keep a copy. The event stream is
+    # never stored and keeps the header its proxies expect.
+    if request.path.startswith("/api/") and request.endpoint != "events":
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/manifest.webmanifest")
@@ -81,7 +169,7 @@ def manifest():
     # has no entry for .webmanifest, and browsers reject the manifest unless it
     # arrives as application/manifest+json.
     return send_from_directory(
-        app.static_folder, "manifest.webmanifest", mimetype="application/manifest+json"
+        app.static_folder, "manifest.webmanifest", mimetype=_MANIFEST_MIMETYPE
     )
 
 
