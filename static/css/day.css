@@ -300,16 +300,16 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
   .sum-row.total .k { color: var(--text); font-weight: 600; }
   .sum-row.total .v { font-size: 17px; font-weight: 700; }
 
+  /* What a pasted message was read as: lines to check by eye, set close,
+     between two hairlines. The label keeps its width and the value takes the
+     wrapping, or a long address would squeeze the label to a character a
+     line. */
   .paste-preview {
-    padding: 4px 0 0; border-bottom: 1px solid var(--line); margin-bottom: 2px;
+    padding: 6px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
     max-height: 28vh; overflow-y: auto;
   }
-  .paste-preview .sum-row { padding: 3px 2px; font-size: 13px; gap: 12px; }
-  .paste-preview .sum-row .v { text-align: right; }
-  /* A change row carries two addresses, so its value wraps to several lines;
-     the label must keep its own width instead of collapsing to one character
-     per line beside it. */
-  .paste-preview.changes .sum-row .k { flex-shrink: 0; }
+  .paste-preview .sum-row { padding: 3px 0; border-bottom: none; font-size: 13px; }
+  .paste-preview + .paste-preview { border-top: none; }
 }
 @keyframes row-in { from { opacity: 0; transform: translateY(4px); } }
 :where(.view-day) {
@@ -320,10 +320,11 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
   /* In the numpad's pay layout the preview is what shrinks and scrolls, never
      the panel around it. */
   .np-sheet .paste-preview { flex: 0 1 auto; max-height: none; min-height: 66px; }
+  /* Why a pasted message cannot be saved as it is. */
   .dup-warn {
-    background: rgba(255,97,97,.12); color: var(--red);
-    border-radius: 10px; padding: 10px 12px; font-size: 14px;
-    font-weight: 600; margin-top: 10px;
+    box-shadow: inset 0 0 0 1px var(--red); color: var(--red);
+    border-radius: 3px; padding: 10px 12px; font-size: 14px; line-height: 1.35;
+    font-weight: 600; margin-bottom: 10px;
   }
 
   /* Change rows read "was → now": the superseded value stays legible but
@@ -332,7 +333,6 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
 
   .sum-row .v.urgent { color: var(--red); }
   .sum-row .v.tight { color: var(--amber); }
-  .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
 }
 /* Last, so that it is not undone by a rule further down: with motion reduced
    nothing in this view moves. */

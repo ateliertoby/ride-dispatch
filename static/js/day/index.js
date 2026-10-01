@@ -733,10 +733,11 @@ function pastePriceView() {
   const p = addState.preview, o = p.order;
   const svc = svcLabel(o.service_type);
   const rows = [['平台', [p.source, svc].filter(Boolean).join(' · ')]];
-  if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16)]);
+  // A row is [label, value, urgency class, whether the value is a figure].
+  if (o.scheduled_time) rows.push(['用車時間', o.scheduled_time.slice(0, 16), '', true]);
   if (o.passenger_name) rows.push(['乘客', o.passenger_name]);
-  for (const [cl, cv] of collectContactLines(o)) rows.push([cl, cv]);
-  if (o.flight_number) rows.push(['航班', o.flight_number]);
+  for (const [cl, cv] of collectContactLines(o)) rows.push([cl, cv, '', true]);
+  if (o.flight_number) rows.push(['航班', o.flight_number, '', true]);
   if (o.passenger_exit_minutes) {
     let exitVal = o.passenger_exit_minutes + '分鐘';
     if (p.exit_urgency === 'urgent') exitVal += ' — 降落前要出發';
@@ -746,11 +747,11 @@ function pastePriceView() {
   if (o.vehicle_type) rows.push(['車型', o.vehicle_type]);
   if (o.pickup) rows.push(['路線', o.pickup + ' → ' + o.dropoff]);
   if (o.driver_notes) rows.push(['備註', o.driver_notes]);
-  if (p.parking_fee) rows.push(['停車費', '$' + $(p.parking_fee)]);
-  if (p.banner_fee) rows.push(['舉牌費', '$' + $(p.banner_fee)]);
+  if (p.parking_fee) rows.push(['停車費', '$' + $(p.parking_fee), '', true]);
+  if (p.banner_fee) rows.push(['舉牌費', '$' + $(p.banner_fee), '', true]);
   const rowsHtml = '<div class="paste-preview">' + rows.map((r, i) =>
     '<div class="sum-row" style="--i:' + i + '"><span class="k">' + esc(r[0]) + '</span><span class="v' +
-    (r[2] ? ' ' + esc(r[2]) : '') + '">' + esc(r[1]) + '</span></div>'
+    (r[2] ? ' ' + esc(r[2]) : '') + (r[3] ? ' num' : '') + '">' + (r[3] ? tight(esc(r[1])) : esc(r[1])) + '</span></div>'
   ).join('') + '</div>';
 
   // A live row on the same order number means the platform re-sent the
@@ -759,7 +760,7 @@ function pastePriceView() {
   if (p.duplicate) {
     const deadEnd = (title, warn) => function view(sheet) {
       sheet.insertAdjacentHTML('beforeend',
-        sheetHead(title, '#' + esc(shortId(o.order_id))) +
+        sheetHead(title, '<span class="num">#' + esc(shortId(o.order_id)) + '</span>') +
         '<div class="dup-warn">' + esc(warn) + '</div>' + rowsHtml);
     };
     if (p.locked) return deadEnd('貼單 · 已結算', '已結算嘅單要先撤銷結算');
