@@ -20,6 +20,15 @@ export function $(n) { return n % 1 ? n.toFixed(2) : n.toFixed(0); }
 // day earned, and "$-97.38" reads as a mangled figure where "−$97.38" reads as
 // money taken off, so the sign goes outside the symbol.
 export function money(n) { return (n < 0 ? '−$' : '$') + $(Math.abs(n)); }
+// A figure set in the mono face gives its colon, point, comma or middle dot a
+// whole cell; each is wrapped so the stylesheet (.p) can pull it in. Takes
+// text that is already escaped and returns markup: tags are passed over, so
+// the result can be given back to it unchanged, and it must never be handed
+// raw user text.
+export function tight(html) {
+  return String(html ?? '').replace(/<[^>]*>[:.,·]<\/span>|<[^>]*>|[:.,·]/g,
+    m => m.length === 1 ? '<span class="p">' + m + '</span>' : m);
+}
 export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]

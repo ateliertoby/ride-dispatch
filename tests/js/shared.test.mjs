@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   $, money, platform, expectedOf, owedOf, formatPhoneE164, collectContactLines,
-  svcLabel, shortId, orderTime, weekday, fmtDate, esc,
+  svcLabel, shortId, orderTime, weekday, fmtDate, esc, tight,
 } from '../../static/js/shared.js';
 
 test('money shows cents only when there are some', () => {
@@ -192,4 +192,38 @@ test('esc', () => {
   assert.equal(esc('<a href="x">&\'</a>'), '&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;');
   assert.equal(esc(null), '');
   assert.equal(esc(0), '0');
+});
+
+const P = c => '<span class="p">' + c + '</span>';
+
+test('tight wraps the colon of a time', () => {
+  assert.equal(tight('13:42'), '13' + P(':') + '42');
+});
+
+test('tight wraps the point of a fare with cents and every thousands comma', () => {
+  assert.equal(tight(money(2169.5)), '$2169' + P('.') + '50');
+  assert.equal(tight('$1,202,169.50'), '$1' + P(',') + '202' + P(',') + '169' + P('.') + '50');
+  assert.equal(tight(money(-97.38)), '\u2212$97' + P('.') + '38');
+});
+
+test('tight wraps the middle dot of a date', () => {
+  assert.equal(tight('10\u00b701'), '10' + P('\u00b7') + '01');
+});
+
+test('tight leaves a figure with no punctuation alone', () => {
+  assert.equal(tight('UO623'), 'UO623');
+  assert.equal(tight('$480'), '$480');
+  assert.equal(tight(''), '');
+  assert.equal(tight(null), '');
+});
+
+test('tight does not wrap what it has already wrapped', () => {
+  for (const s of ['13:42', '$2,169.50', '10\u00b701', 'UO623']) {
+    assert.equal(tight(tight(s)), tight(s));
+  }
+});
+
+test('tight passes over tags and keeps escaped text escaped', () => {
+  assert.equal(tight('出發 <b title="a.b">07:35</b>'), '出發 <b title="a.b">07' + P(':') + '35</b>');
+  assert.equal(tight(esc('<1:2>')), '&lt;1' + P(':') + '2&gt;');
 });

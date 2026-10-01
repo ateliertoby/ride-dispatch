@@ -106,6 +106,10 @@ body {
   padding-bottom: env(safe-area-inset-bottom);
   overflow-x: hidden;
 }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+/* A monospaced colon, comma or point takes a whole cell; pulled in so 13:42
+   and $2169.50 read as one figure. shared.js:tight() writes the wrapper. */
+.p { margin-inline: -.2em; }
 button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
 .header {
