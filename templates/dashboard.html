@@ -270,16 +270,31 @@ function isDone(o) {
   return d ? Date.now() > d.getTime() : false;
 }
 // ---- nav / load ----
+// Diagnostic: with localStorage.perf set, a paint of data reports how long it
+// took to arrive: the first one since the navigation that loaded the page, a
+// later one since the date tap that asked for it.
+let navAt = 0;
+function reportPerf() {
+  let ms = null;
+  if (!window._perfSaid) ms = performance.now();
+  else if (navAt) ms = performance.now() - navAt;
+  window._perfSaid = true;
+  navAt = 0;
+  if (ms === null) return;
+  try { if (localStorage.getItem('perf')) toast(Math.round(ms) + ' ms'); } catch (e) { /* no storage */ }
+}
 function go(d) {
   const dt = new Date(cur + 'T00:00:00');
   dt.setDate(dt.getDate() + d);
   cur = fmtDate(dt);
   scrollToNext = true;
+  navAt = performance.now();
   load();
 }
 function goToday() {
   cur = fmtDate(new Date());
   scrollToNext = true;
+  navAt = performance.now();
   load();
 }
 
@@ -294,6 +309,7 @@ async function load() {
     return;
   }
   render();
+  reportPerf();
   if (sheetOrderId) {
     const o = orders.find(x => x.order_id === sheetOrderId);
     if (o && sheetStack.length === 1) renderSheet();  // refresh detail view only

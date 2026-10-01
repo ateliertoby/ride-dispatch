@@ -860,6 +860,12 @@ async function load(seed) {
   remerge(payloads[payloads.length - 1]);
   dropStaleFocus();
   render();
+  // Diagnostic: with localStorage.perf set, the first paint of data after a
+  // navigation reports how long the navigation took.
+  if (!window._perfSaid) {
+    window._perfSaid = true;
+    try { if (localStorage.getItem('perf')) toast(Math.round(performance.now()) + ' ms'); } catch (e) { /* no storage */ }
+  }
   // An open order sheet shows the order itself, which the month payload does
   // not carry, so it is fetched again with the rest.
   const ov = orderView();
