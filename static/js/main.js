@@ -39,9 +39,9 @@ authBanner.addEventListener('click', () => {
 
 // A hidden view asks nothing, so when the stream fails the ping is what tells
 // an expired login from a dropped line. A stream that cannot connect fails
-// again every few seconds, or once and for good, depending on the browser:
-// failures inside the gap are answered by one ping at its end, so the last
-// failure is always followed by a ping and a run of them is not a storm.
+// again and again, every few seconds at first: failures inside the gap are
+// answered by one ping at its end, so the last failure is always followed by
+// a ping and a run of them is not a storm.
 const PING_GAP_MS = 5000;
 let pingGap = 0;
 let pingOwed = false;
@@ -57,11 +57,26 @@ function ping() {
 
 // A change on the server refreshes what is on screen; a hidden view catches up
 // when it is shown, which is the only time it can be painted correctly. With
-// the login expired there is nothing a refresh could fetch.
-openStream(
-  () => { if (!isAuthExpired()) views[router.current()].view.refresh(); },
-  ping,
-);
+// the login expired there is nothing a refresh could fetch, and no stream to
+// open again: logging in reloads the document.
+function refresh() {
+  if (!isAuthExpired()) views[router.current()].view.refresh();
+}
+const stream = openStream(refresh, ping, { stopped: isAuthExpired });
+
+// The document is not reloaded between uses, so coming back to it is the
+// moment to catch up: a phone that slept, or an app left in the background,
+// can hold data hours old behind a stream that has not yet noticed it is
+// dead. A stream waiting to be opened again is opened now.
+let wasHidden = document.visibilityState === 'hidden';
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { wasHidden = true; return; }
+  if (!wasHidden) return;
+  wasHidden = false;
+  // Neither does anything once the login has expired.
+  stream.wake();
+  refresh();
+});
 
 // A reload loses whatever is open: a sheet, a statement being read, unsaved
 // ticks. So a new version is never taken behind the operator's back. It waits,
