@@ -369,29 +369,29 @@ const QUICK_CODE = { didi: 'DIDI', uber: 'UBER', foodpanda: 'PANDA' };
 // for a 接機 badge, so the place is where the passenger is going; a 送機 says
 // so in the code column, with the terminal when the destination names one,
 // and the place is where to collect them. Any other service names itself and
-// shows both ends.
+// shows both ends. Answers the two cells' markup, code first.
 function codePlaceHtml(o) {
   const from = shortPlace(o.pickup), to = shortPlace(o.dropoff);
   const arrow = '<span class="arrow">&rarr;</span>';
   const end = (text, lead, cls) =>
-    '<span class="end' + (cls || '') + '">' + (lead ? arrow : '') + '<span>' + esc(text) + '</span></span>';
+    '<span class="end' + (lead ? ' to' : '') + (cls || '') + '">' + (lead ? arrow : '') + '<span>' + esc(text) + '</span></span>';
   if (isFlightPickup(o.service_type)) {
-    return (o.flight_number
+    return [o.flight_number
       ? '<span class="code">' + esc(o.flight_number) + '</span>'
-      : '<span class="code org">' + esc(from) + '</span>') +
-      '<span class="place">' + esc(to) + '</span>';
+      : '<span class="code org">' + esc(from) + '</span>',
+      '<span class="place">' + esc(to) + '</span>'];
   }
   if (o.service_type === '送机') {
     // shortPlace has already reduced anything naming the airport to 機場 and
     // its terminal. A destination that is somewhere else is not dropped: it
     // follows the pick-up, small.
     const airport = /^機場/.test(to);
-    return '<span class="code svc">送機' + (airport ? esc(to.slice(2)) : '') + '</span>' +
+    return ['<span class="code svc">送機' + (airport ? esc(to.slice(2)) : '') + '</span>',
       '<span class="place">' + (from ? end(from) : '') +
-      (to && !airport ? ' ' + end(to, from, ' sub') : '') + '</span>';
+      (to && !airport ? ' ' + end(to, from, ' sub') : '') + '</span>'];
   }
-  return '<span class="code svc">' + esc(svcLabel(o.service_type)) + '</span>' +
-    '<span class="place reg">' + (from ? end(from) : '') + (to ? ' ' + end(to, from) : '') + '</span>';
+  return ['<span class="code svc">' + esc(svcLabel(o.service_type)) + '</span>',
+    '<span class="place reg">' + (from ? end(from) : '') + (to ? ' ' + end(to, from) : '') + '</span>'];
 }
 
 // The row's second line: the flight's status block, the two times worked out
@@ -442,6 +442,8 @@ function nowHtml() {
 // data-oid and the .next class name are what render() queries to scroll a row
 // into view; both must survive any markup change here. Every cell of the
 // first line is always written, empty or not, so the grid's columns hold.
+// The fare is written before the place, inside the same cell: it floats at
+// the cell's right and the place's lines run beside it and then under it.
 function rowHtml(o, prev, nextId, turn) {
   const quick = _QUICK_TYPES.has(o.service_type);
   const open = '<button class="row' + (quick ? ' quick' : '') + (isDone(o) ? ' done' : '') +
@@ -451,16 +453,17 @@ function rowHtml(o, prev, nextId, turn) {
   // gross-plus-toll) and no second line beyond the wait before it.
   if (quick) {
     return open +
-      '<span class="time">' + tight(esc(orderTime(o))) + '</span>' +
+      '<span class="when"><span class="time">' + tight(esc(orderTime(o))) + '</span>' + gapHtml(prev, o) + '</span>' +
       '<span class="code plat">' + QUICK_CODE[platform(o)] + '</span>' +
-      '<span class="place lite">' + esc(svcLabel(o.service_type)) + '</span>' +
+      '<span class="where">' +
       (o.price ? '<span class="price">' + tight(money(o.price)) + '</span>'
                : '<span class="price unset">未入價</span>') +
-      gapHtml(prev, o) + '</button>';
+      '<span class="place lite">' + esc(svcLabel(o.service_type)) + '</span></span></button>';
   }
+  const [code, place] = codePlaceHtml(o);
   return open +
-    '<span class="time">' + tight(esc(rowTime(o))) + '</span>' +
-    codePlaceHtml(o) + priceHtml(o) + gapHtml(prev, o) + metaHtml(o, turn) + '</button>';
+    '<span class="when"><span class="time">' + tight(esc(rowTime(o))) + '</span>' + gapHtml(prev, o) + '</span>' +
+    code + '<span class="where">' + priceHtml(o) + place + '</span>' + metaHtml(o, turn) + '</button>';
 }
 
 // ---- sheet infra ----

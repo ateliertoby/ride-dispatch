@@ -14,13 +14,16 @@
 
 :where(.view-day) {
   /* The two fixed columns are shared by the column head, every row and the
-     NOW band, so times and codes start on the same x down the whole list. */
+     NOW band, so times and codes start on the same x down the whole list.
+     Each is as wide as the widest thing it holds and no wider (a time; a
+     flight number of two letters and four digits): what they do not take,
+     the place has. */
   --gutter: 16px;
-  --c-time: 68px; --c-code: 74px;
+  --c-time: 64px; --c-code: 60px;
   --t-time: 22px; --t-place: 17px;
 }
 @media (max-width: 360px) {
-  :where(.view-day) { --c-time: 60px; --c-code: 66px; --t-time: 20px; --t-place: 16px; }
+  :where(.view-day) { --c-time: 58px; --c-code: 58px; --t-time: 20px; --t-place: 16px; }
 }
 /* The toast is the shell's and sits at the foot of the screen, where this
    view keeps its totals: it rises to clear them. */
@@ -71,11 +74,17 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
   /* A platform with nothing today recedes, unless it is the one chosen. */
   .tab.zero:not(.on) { opacity: .45; }
 
-  /* minmax(0, 1fr): the place column takes what the fare leaves and wraps
-     inside it; without the 0 a long name would widen the track and push the
-     fare off the row. */
-  .cols, .row, .ph-row {
+  /* The column head and the placeholder rows name four columns. A row has
+     three cells on the same tracks: the fare lives inside the third, at its
+     right edge, so that a name which wraps can use the width under it.
+     minmax(0, 1fr): without the 0 a long name would widen the track and push
+     the row off the screen instead of wrapping. */
+  .cols, .ph-row {
     display: grid; grid-template-columns: var(--c-time) var(--c-code) minmax(0, 1fr) auto;
+    column-gap: 10px; padding-inline: var(--gutter);
+  }
+  .row {
+    display: grid; grid-template-columns: var(--c-time) var(--c-code) minmax(0, 1fr);
     column-gap: 10px; padding-inline: var(--gutter);
   }
   .cols {
@@ -98,7 +107,24 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
     scroll-margin-block: calc(140px + env(safe-area-inset-top));
   }
   .row:active { background: var(--surface); }
-  .time { font-family: var(--mono); font-weight: 700; font-size: var(--t-time); line-height: 1; letter-spacing: -.04em; }
+  /* The time and, under it, the wait since the previous row. The wait hangs
+     from the time rather than sitting on the row's second line, so it stays
+     under the time it is counted to however far a long name pushes that line
+     down. In a row with a second line it is taken out of the flow, level with
+     that line when the name is one line, so that it adds nothing to the
+     height of the first; in a row without one it is what gives the row its
+     second line's height. (A minimum height on the row would not do: a
+     button centres its content in any height it is given.) */
+  .when { position: relative; }
+  .time {
+    display: block;
+    font-family: var(--mono); font-weight: 700; font-size: var(--t-time); line-height: 1; letter-spacing: -.04em;
+  }
+  .gap {
+    display: block; margin-top: 5px; white-space: nowrap;
+    font-family: var(--mono); font-size: 10.5px; line-height: 19px; color: var(--text-3);
+  }
+  .row:has(.meta) .gap { position: absolute; left: 0; top: var(--t-time); }
   .code { font-family: var(--mono); font-weight: 700; font-size: 14px; letter-spacing: .02em; white-space: nowrap; }
   /* A quick order's platform: lighter, it is filler between legs. */
   .code.plat { font-weight: 400; color: var(--text-2); }
@@ -111,43 +137,53 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
     font-family: var(--han); font-weight: 400; font-size: 12px; line-height: 1.25; letter-spacing: 0;
     color: var(--text-2); white-space: normal; overflow-wrap: anywhere;
   }
+  /* The place and the fare. flow-root, so the cell holds a fare taller than
+     a one-line name. The type is the place's, set here so that the cell's
+     own strut does not make its lines taller than the name's. */
+  .where { display: flow-root; min-width: 0; font-size: var(--t-place); line-height: 1.2; }
   /* The endpoint is the one thing on the row that must never be cut, so
-     nothing here truncates: the name wraps inside its column. Emphasis rule:
-     the non-airport endpoint is the one the driver has to find, so it carries
-     the weight; when neither end is the airport both stay at regular weight. */
-  .place { font-size: var(--t-place); font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; }
+     nothing here truncates: the name wraps. Its first lines stop short of the
+     fare and the rest run the cell's whole width, which keeps a long name to
+     few lines without moving where a short one starts. Emphasis rule: the
+     non-airport endpoint is the one the driver has to find, so it carries the
+     weight; when neither end is the airport both stay at regular weight.
+     The name is inline, and what it holds is inline text or a block: the row
+     aligns its cells on their first baselines, and WebKit gets that baseline
+     wrong both for an inline box that wraps (an inline-block offers its last
+     line's, which lifts the name out of the top of the row) and for a block
+     holding a short name beside the floated fare (the row gains a line of
+     empty space above). */
+  .place { font-weight: 600; overflow-wrap: anywhere; }
   .place.lite { font-weight: 400; color: var(--text-2); }
   .place.reg { font-weight: 500; }
-  /* A route is two units, FROM and "→ TO"; the second wraps whole, which
-     keeps the arrow leading the second line. inline-flex rather than
-     inline-block: the row aligns its cells on their first baselines, and an
-     inline-block that wraps offers its last line's, which would lift the
-     name out of the top of the row. */
-  .place .end { display: inline-flex; align-items: baseline; gap: .3em; max-width: 100%; }
+  /* A route is two units, FROM and "→ TO". The second starts its own line,
+     led by the arrow, and hangs under its own first character when it
+     wraps. */
+  .place .end.to { display: block; padding-left: 1.3em; text-indent: -1.3em; }
   .place .end.sub { font-size: 14px; font-weight: 400; color: var(--text-2); }
-  .place .arrow { color: var(--text-3); font-weight: 400; }
-  /* Every row ends with money. The slot never shrinks; the place wraps
-     instead. */
-  .price { font-family: var(--mono); font-size: 14px; text-align: right; white-space: nowrap; }
+  .place .arrow { display: inline-block; width: 1.3em; text-indent: 0; color: var(--text-3); font-weight: 400; }
+  /* Every row ends with money, at the right of the first line. It never
+     shrinks or wraps; the place gives way. The line height is the place's
+     own, so a fare of one line shortens one line of the name and no more;
+     the pixel it is moved down by makes up the difference between the two
+     faces and puts the figure on the name's first baseline. */
+  .price {
+    float: right; margin-left: 10px; position: relative; top: 1px;
+    font-family: var(--mono); font-size: 14px; line-height: calc(var(--t-place) * 1.2);
+    text-align: right; white-space: nowrap;
+  }
   .price.unset { font-family: var(--han); font-size: 12px; font-weight: 600; color: var(--amber); }
   /* A 判罰賠款 sits under the gross fare rather than replacing it: the day
      total is gross, and a row that quietly showed net would not add up to it.
      Exact to the cent -- the layout gives way to the number, never the other
      way round. */
-  .price .pen { display: block; margin-top: 3px; font-size: 11.5px; color: var(--red); }
+  .price .pen { display: block; font-size: 11.5px; line-height: 1.35; color: var(--red); }
 
   .meta {
     grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
     font-size: 12px; color: var(--text-2);
   }
   .meta .num b { color: var(--text); font-weight: 400; }
-  /* The wait since the previous row, under the time it is counted to. Its
-     line is as tall as the meta line's first, so the two sit level when the
-     meta wraps. */
-  .gap {
-    grid-column: 1; grid-row: 2; align-self: start;
-    font-family: var(--mono); font-size: 10.5px; line-height: 19px; color: var(--text-3);
-  }
 
   /* Status: a solid block, one per row, the only place a row carries colour. */
   .st {
