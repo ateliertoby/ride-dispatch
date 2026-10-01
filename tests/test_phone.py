@@ -84,25 +84,31 @@ def test_trunk_zero_codes_are_assigned():
     assert TRUNK_ZERO_CC <= E164_CC
 
 
-# formatPhoneE164() in templates/_shared.js hand-duplicates both tables, and
-# nothing else executes that file: there is no JS test rig, so a one-off typo
-# in either list would ship silently and un-recognise a country on the web UI
-# only.  These two tests are the only thing holding the copies together.
-_SHARED_JS = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                          "templates", "_shared.js")
+# formatPhoneE164() hand-duplicates both tables, and the JS tests only check
+# the numbers they list: a one-off typo in either list would un-recognise a
+# country on the web UI only.  These two tests are the only thing holding the
+# copies together.  The function lives in two files while the pages are being
+# turned into modules, and neither copy may drift.
+_ROOT = os.path.dirname(os.path.dirname(__file__))
+_SHARED_JS = [
+    os.path.join(_ROOT, "templates", "_shared.js"),
+    os.path.join(_ROOT, "static", "js", "shared.js"),
+]
 
 
-def _js_const(name):
-    """Country codes from a _shared.js Set literal, whitespace-insensitive."""
-    src = open(_SHARED_JS, encoding="utf-8").read()
+def _js_const(path, name):
+    """Country codes from a Set literal in a JS file, whitespace-insensitive."""
+    src = open(path, encoding="utf-8").read()
     m = re.search(r'const %s = new Set\((.*?)\);' % name, src, re.S)
-    assert m, f"{name} not found in {_SHARED_JS}"
+    assert m, f"{name} not found in {path}"
     return set(re.findall(r'\d+', m.group(1)))
 
 
-def test_js_e164_table_in_sync():
-    assert _js_const("_E164_CC") == set(E164_CC)
+@pytest.mark.parametrize("path", _SHARED_JS, ids=os.path.basename)
+def test_js_e164_table_in_sync(path):
+    assert _js_const(path, "_E164_CC") == set(E164_CC)
 
 
-def test_js_trunk_zero_table_in_sync():
-    assert _js_const("_TRUNK_ZERO_CC") == set(TRUNK_ZERO_CC)
+@pytest.mark.parametrize("path", _SHARED_JS, ids=os.path.basename)
+def test_js_trunk_zero_table_in_sync(path):
+    assert _js_const(path, "_TRUNK_ZERO_CC") == set(TRUNK_ZERO_CC)
