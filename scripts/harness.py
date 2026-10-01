@@ -111,6 +111,8 @@ def _install_faults(app, path: str, port: int) -> None:
     doc_redirect  the shell document is reached through a same-origin redirect
     no_assets     every asset address is a 404, as after a deploy
     no_shell      the document, the assets and the worker script are refused
+    bad_gateway   every request is answered 502 with a page of the tunnel's,
+                  as while the server behind it is restarting
     """
     import json
     from flask import redirect, request
@@ -140,6 +142,8 @@ def _install_faults(app, path: str, port: int) -> None:
         if f.get("expired"):
             nxt = request.full_path.rstrip("?")
             return redirect(f"http://localhost:{port}{LOGIN_PATH}?next=" + urllib.parse.quote(nxt, safe=""))
+        if f.get("bad_gateway"):
+            return "<html>bad gateway</html>", 502
         static = path_.startswith("/assets/")
         if f.get("no_assets") and static:
             return "gone", 404

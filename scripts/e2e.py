@@ -3557,6 +3557,139 @@ def auth_stream_quick(s: Session) -> None:
     s.wait(lambda: s.banner("auth"), "the banner", ms=20_000)
     s.never(s.toast, "a toast for an expired login")
 
+
+# ---- the stream in a document that is never reloaded ----
+#
+# The server is made to misbehave rather than the page's requests held: an
+# EventSource is the browser's own, and what it does with a refusal is the
+# thing being checked.
+
+HIDE_JS = """
+state => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+"""
+
+
+def streams(s: Session) -> int:
+    """How many event streams the page has had opened for it."""
+    return len([a for a in s.answers if a[0] == "/api/events" and a[1] == 200])
+
+
+def refused(s: Session) -> int:
+    """How many times the server has refused the event stream. The browser
+    reports a refused stream as a request it gave up, with no answer."""
+    return len([a for a in s.server.asked() if a[1:] == ("/api/events", 502)])
+
+
+def live_again(s: Session, opened: int) -> None:
+    """Wait for a stream opened since `opened` were counted, and for the page
+    to have caught up on its greeting."""
+    s.wait(lambda: streams(s) > opened, "the stream to be opened again", ms=45_000)
+    s.settle()
+
+
+@check("stream.reopened-after-the-gateway-refused-it", old=False)
+def stream_bad_gateway(s: Session) -> None:
+    s.allow(*LOST_SERVER, "http 502", "status of 502", "request failed: GET /api/events")
+    s.open_day()
+    oid = s.t["order"]["dropoff"]
+    opened, shown = streams(s), s.rows()
+    # A deploy: the server goes, and until it is back the tunnel answers for it.
+    s.server.stop()
+    s.server.fault(bad_gateway=True)
+    s.server.start()
+    # A refusal ends an EventSource; one refusal after another is the page
+    # opening a new one each time.
+    s.wait(lambda: refused(s) >= 3, "the stream to be tried again after being refused", ms=30_000)
+    s.expect(not s.banner("auth"), "a refusing gateway is taken for an expired login")
+    s.never(s.toast, "a toast for a stream that is down", ms=300)
+    s.eq(s.rows(), shown, "rows while the stream is down")
+    # The server is back. What changed while the stream was down arrives with
+    # the new stream's greeting, and what changes afterwards arrives live.
+    s.server.fault()
+    s.api("PATCH", "/api/orders/" + oid, {"price": 454})
+    live_again(s, opened)
+    s.wait(lambda: s.text(s.row(oid) + " .price") == "$454", "the change made while the stream was down")
+    s.api("PATCH", "/api/orders/" + oid, {"price": 455})
+    s.wait(lambda: s.text(s.row(oid) + " .price") == "$455", "a change made after the stream came back")
+    s.eq(s.documents(), 1, "document requests")
+    s.eq(s.writes, [], "writes by the page")
+
+
+@check("stream.reopened-after-the-server-was-away", old=False)
+def stream_server_away(s: Session) -> None:
+    s.allow(*LOST_SERVER)
+    s.open_settle()
+    opened, tried = streams(s), len(s.requests)
+    s.server.stop()
+    s.wait(lambda: len([r for r in s.requests[tried:] if r[1] == "/api/events"]) >= 2,
+           "the stream to be tried while the server is away", ms=30_000)
+    s.expect(not s.banner("auth"), "a server that is away is taken for an expired login")
+    s.server.start()
+    live_again(s, opened)
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "a change made after the server came back")
+    s.eq(s.documents(), 1, "document requests")
+    s.eq(s.writes, [], "writes by the page")
+
+
+@check("stream.coming-back-to-the-app-refreshes-the-showing-view", old=False)
+def stream_visible(s: Session) -> None:
+    s.open_day()
+    today = "/api/orders?date=" + s.day()
+
+    def since(asked: int, prefix: str = "/api/") -> list:
+        return [p for _, p, _ in s.requests[asked:] if p.startswith(prefix)]
+
+    # Going away asks nothing; coming back asks for what is showing, once.
+    asked = len(s.requests)
+    s.page.evaluate(HIDE_JS, "hidden")
+    s.never(lambda: since(asked), "a request on being hidden", ms=500)
+    s.page.evaluate(HIDE_JS, "visible")
+    s.wait(lambda: today in since(asked), "the day view to refresh on coming back")
+    s.settle()
+    s.eq(since(asked).count(today), 1, "requests for the day showing")
+    s.eq([p for p in since(asked) if not p.startswith("/api/orders?date=")], [], "requests for anything else")
+    s.eq(s.rows(), s.ids(), "rows")
+    # The event alone, with the document never hidden, is not a return.
+    asked = len(s.requests)
+    s.page.evaluate("() => { document.dispatchEvent(new Event('visibilitychange')); }")
+    s.never(lambda: since(asked), "a refresh for a document that was never hidden", ms=700)
+    # The settle view, when that is the one showing, and only it.
+    s.go_settle()
+    asked = len(s.requests)
+    s.page.evaluate(HIDE_JS, "hidden")
+    s.page.evaluate(HIDE_JS, "visible")
+    s.wait(lambda: CREDITS in since(asked), "the settle view to refresh on coming back")
+    s.settle()
+    s.eq(since(asked).count(CREDITS), 1, "requests for the ledger")
+    s.eq(since(asked, "/api/orders"), [], "requests for the hidden day view")
+    s.eq(since(asked).count("/api/events"), 0, "new event streams")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    s.eq(s.writes, [], "writes")
+
+
+@check("stream.nothing-reopens-or-refreshes-with-the-login-expired", old=False)
+def stream_expired(s: Session) -> None:
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    s.open_day()
+    shown = s.rows()
+    # The line drops and comes back with the login gone.
+    s.server.stop()
+    s.server.fault(expired=True)
+    s.server.start()
+    s.wait(lambda: s.banner("auth"), "the banner", ms=30_000)
+    # Longer than any wait a stream closed before the banner could be serving.
+    asked = len(s.requests)
+    s.never(lambda: s.requests[asked:], "a request once the login is known to be gone", ms=9000)
+    s.page.evaluate(HIDE_JS, "hidden")
+    s.page.evaluate(HIDE_JS, "visible")
+    s.never(lambda: s.requests[asked:], "a request on coming back with the login expired", ms=1500)
+    s.never(s.toast, "a toast for an expired login", ms=200)
+    s.eq(s.rows(), shown, "rows")
+
 # ---- running ----
 
 def run(playwright, browser, chk: dict, today: date, shell: bool):
