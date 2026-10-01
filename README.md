@@ -61,22 +61,39 @@ cp .env.example .env
 | `PARKING_EMAIL` | No | Address HKIA attaches to an online parking payment. Blank is accepted |
 | `BANK_CREDITS_FEED` | No | Path to first-reader's published bank credit feed (JSONL). Unset = the ledger is off and batches stay unpaid |
 
-Tests: `pytest tests/`
-
 Bot and dashboard are separate processes:
 
 ```bash
 python -m ride_dispatch.bot   # Telegram bot + the flight, car park and bank credit jobs
-python -m ride_dispatch.web   # Web dashboard + settle page (default port 3200)
+python -m ride_dispatch.web   # Web app: day view and settle view (default port 3200)
 ```
 
+The web app is one document, served on both `/` and `/settle`, that switches between the day view and the settle view in the browser. It is plain ES modules and CSS under `static/`, with no build step, and a service worker keeps the document and its assets on the phone so the installed app opens without waiting for the server; order and money data is always fetched (see `ARCHITECTURE.md`).
+
 The statement reader is not a job but a call, and both processes make it (step 11), so both want the OCR install if statements are to be read from both.
+
+## Develop
+
+```bash
+pytest tests/                        # Python: parsing, database, API, the shell and its worker
+node --test "tests/js/*.test.mjs"    # the browser modules that need no DOM (Node 22+, no packages)
+
+pip install -r requirements-dev.txt && playwright install webkit
+python scripts/e2e.py                          # behaviour, driven through a real browser
+python scripts/e2e.py --only day.add           # the checks whose name begins with this
+python scripts/shots.py --out /tmp/shots       # a screenshot of every state, dark and light
+python scripts/shots.py --out /tmp/new --compare /tmp/shots   # and a pixel count of what changed
+```
+
+`requirements-dev.txt` (Playwright and Pillow) is for the two scripts only; nothing in it is needed to run the app. Both scripts start their own server on a free port against a synthetic database built by `scripts/seed_demo_db.py`, with the browser's clock and the server's pinned to 14:00 on one day (`--today`, today by default), so two runs for the same day give the same result and neither touches real data. They run in WebKit as an iPhone, the engine the installed app runs on.
 
 ## Deploy
 
 The dashboard is exposed via a named Cloudflare Tunnel (`~/.cloudflared/ride-dispatch.yml`) with **Cloudflare Access** (email OTP, 1-month session) as perimeter auth. All three processes (bot, web, tunnel) run as supervised services; `deploy/` carries example definitions for both launchd (macOS plists) and systemd (Linux units). The systemd tunnel unit runs the tunnel by UUID, so the credentials JSON alone is enough — no account `cert.pem` needed on the host.
 
 Statement OCR is a separate install on the server: `pip install -r requirements.txt`, then `pip install --no-deps -r requirements-ocr.txt`, in that order. It adds roughly 360 MB to the venv (onnxruntime plus the PP-OCR models), so it is worth checking disk before running it. Restart `ride-dispatch-bot` afterwards — a bot that started without the package keeps replying with the no-OCR fallback until it does.
+
+Updating the web app is one step in three moves: stop the web service, `git pull`, start it again. The server works out the version of its assets once per process and serves them under that version as immutable, so a process left running over files that have changed would hand out new files at the old version's address; stopping it first means none ever does. The tunnel answers 502 for the second or two this takes, and an app that is open reconnects by itself. A phone shows 有新版本 once it has fetched the new version in the background, and takes it when that is tapped or the next time the app is launched.
 
 Two gotchas:
 
