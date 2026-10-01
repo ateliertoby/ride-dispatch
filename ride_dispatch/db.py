@@ -1597,6 +1597,19 @@ def recent_parking_sessions(db_path: str, limit: int = 5) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def parking_sessions_since(db_path: str, since: str, order_ids: list[str]) -> list[dict]:
+    """Visits entered at or after `since`, plus any still open and any linked
+    to one of `order_ids`, however old."""
+    marks = ",".join("?" * len(order_ids))
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM parking_sessions WHERE exit_time IS NULL OR entry_time >= ? "
+            f"OR order_id IN ({marks}) ORDER BY id",
+            (since, *order_ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def free_parking_entries_since(db_path: str, cutoff: str) -> list[str]:
     with _conn(db_path) as conn:
         rows = conn.execute(

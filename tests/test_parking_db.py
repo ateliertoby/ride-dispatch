@@ -8,7 +8,7 @@ import sqlite3
 from ride_dispatch.db import (
     init_db, open_parking_session, get_open_parking_session, get_parking_session,
     update_parking_session, close_parking_session, mark_parking_observed,
-    recent_parking_sessions, free_parking_entries_since,
+    recent_parking_sessions, free_parking_entries_since, parking_sessions_since,
 )
 
 
@@ -131,3 +131,25 @@ def test_recent_and_free_queries(db_path):
     assert [r["pv_nr"] for r in recent] == [3, 2]
     assert free_parking_entries_since(db_path, "2026-08-22 19:00") == ["2026-08-23 13:36"]
     assert free_parking_entries_since(db_path, "2026-08-24 00:00") == []
+
+
+def test_sessions_since_returns_recent_open_and_linked_visits(db_path):
+    old = _open(db_path, pv_nr=1, entry="2026-08-20 10:00")
+    close_parking_session(db_path, old, "2026-08-20 10:20", 1)
+    old_linked = _open(db_path, pv_nr=2, entry="2026-08-20 12:00", order_id="O1")
+    close_parking_session(db_path, old_linked, "2026-08-20 12:20", 1)
+    old_other = _open(db_path, pv_nr=3, entry="2026-08-20 14:00", order_id="O9")
+    close_parking_session(db_path, old_other, "2026-08-20 14:20", 1)
+    on_cutoff = _open(db_path, pv_nr=4, entry="2026-08-23 18:00")
+    close_parking_session(db_path, on_cutoff, "2026-08-23 18:20", 1)
+    old_open = _open(db_path, pv_nr=5, entry="2026-08-21 09:00")
+
+    def ids(order_ids):
+        return [s["id"] for s in parking_sessions_since(db_path, "2026-08-23 18:00", order_ids)]
+
+    assert ids([]) == [on_cutoff, old_open]
+    assert ids(["O1", "O2"]) == [old_linked, on_cutoff, old_open]
+
+
+def test_sessions_since_on_an_empty_table(db_path):
+    assert parking_sessions_since(db_path, "2026-08-23 18:00", ["O1"]) == []
