@@ -55,6 +55,137 @@ class Failed(AssertionError):
     pass
 
 
+def body_of(req):
+    """A request's body as text. A multipart body is parted by a boundary the
+    browser makes up afresh for each request, so the boundary is replaced by a
+    fixed word and two builds sending the same form compare equal."""
+    kind = req.headers.get("content-type", "")
+    if not kind.startswith("multipart/form-data"):
+        return req.post_data
+    boundary = kind.split("boundary=")[-1]
+    return (req.post_data_buffer or b"").decode("latin-1").replace(boundary, "BOUNDARY")
+
+
+# ---- settle view: what the checks read and compute ----
+
+WEEKDAY = "一二三四五六日"      # date.weekday(): Monday is 0
+
+
+def fmt(n) -> str:
+    """Money as the pages print it: cents only when there are some."""
+    return f"{n:.2f}" if n % 1 else f"{n:.0f}"
+
+
+def md_label(d: date) -> str:
+    return f"{d.month}月{d.day}日"
+
+
+def md_slash(d: date) -> str:
+    return f"{d.month}/{d.day}"
+
+
+def span_label(a: date, z: date) -> str:
+    """How a run of consecutive days is named on a sheet."""
+    if a == z:
+        return md_label(a)
+    if (a.year, a.month) == (z.year, z.month):
+        return f"{a.month}月{a.day}–{z.day}日"
+    return md_label(a) + "–" + md_label(z)
+
+
+def month_key(d: date) -> str:
+    return d.isoformat()[:7]
+
+
+def add_months(d: date, n: int) -> date:
+    """The first day of the month `n` months from d's."""
+    m = d.year * 12 + d.month - 1 + n
+    return date(m // 12, m % 12 + 1, 1)
+
+
+def week_id(d: date) -> str:
+    """The id of the week row a day is drawn on: rows begin on Sunday."""
+    return "wk" + (d - timedelta(days=(d.weekday() + 1) % 7)).isoformat()
+
+
+def month_label(d: date, now: bool = False) -> str:
+    return f"{d.year} 年 {d.month} 月" + ("今個月" if now else "")
+
+
+def settle_path(d: date, platform: str = "ride") -> str:
+    return f"/api/settle?month={month_key(d)}&platform={platform}"
+
+
+CREDITS = "/api/credits?platform=ride"
+
+# The week row at the top of the strip, read the way the page reads it: the
+# first row whose end is below the sticky header.
+TOP_WEEK_JS = """
+() => {
+  const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length);
+  const edge = header.getBoundingClientRect().bottom + 1;
+  for (const el of document.querySelectorAll('.wkblock')) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > edge) return [el.id, Math.round(r.top)];
+  }
+  return null;
+}
+"""
+
+# What is wrong with the strip's lanes, if anything: a bar or chip with no
+# width, a label cut by the columns reserved for it, two marks of one lane row
+# printed over each other. A strip laid out while it had no width fails this.
+STRIP_JS = """
+() => {
+  const bad = [];
+  for (const lane of document.querySelectorAll('#grid .lane')) {
+    const items = [...lane.children].map(el => ({
+      mark: el.matches('.slot') ? el.firstElementChild : el, r: el.getBoundingClientRect() }));
+    for (const { mark, r } of items) {
+      if (r.width < 8 || r.height < 8) bad.push('no size: ' + mark.textContent);
+      if (!mark.matches('.spill-l') && mark.scrollWidth > Math.ceil(r.width) + 1) bad.push('cut: ' + mark.textContent);
+    }
+    for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+      const a = items[i].r, b = items[j].r;
+      if (Math.abs(a.top - b.top) < 1 && a.left < b.right - 0.5 && b.left < a.right - 0.5) {
+        bad.push('overlap: ' + items[i].mark.textContent + ' / ' + items[j].mark.textContent);
+      }
+    }
+  }
+  return bad;
+}
+"""
+
+WATCH_JS = """
+id => {
+  window.__seen = window.__seen || {};
+  if (window.__seen[id]) window.__seen[id].observer.disconnect();
+  const log = [];
+  const observer = new MutationObserver(list => {
+    for (const m of list) log.push(m.type + ' ' + (m.target.id || m.target.className || m.target.nodeName));
+  });
+  observer.observe(document.getElementById(id), { subtree: true, childList: true, attributes: true, characterData: true });
+  window.__seen[id] = { observer, log };
+}
+"""
+
+# A file dragged over the page and let go, as the events a browser would send.
+# Returns, for each, whether a listener took it for itself.
+DRAG_JS = """
+kinds => {
+  const dt = new DataTransfer();
+  dt.items.add(new File(['x'], 'statement.png', { type: 'image/png' }));
+  const out = {};
+  for (const kind of kinds) {
+    const e = new DragEvent(kind, { dataTransfer: dt, bubbles: true, cancelable: true });
+    document.body.dispatchEvent(e);
+    out[kind] = e.defaultPrevented;
+  }
+  return out;
+}
+"""
+
+
 class Session(Driver):
     """One page on one server, with everything it asked the server recorded."""
 
@@ -82,7 +213,7 @@ class Session(Driver):
             path = path_of(req.url)
             self.requests.append((req.method, path, req.resource_type))
             if req.method != "GET" and path.startswith("/api/"):
-                self.writes.append((req.method, path, req.post_data))
+                self.writes.append((req.method, path, body_of(req)))
 
         def finished(req):
             self.finished.append((req.method, path_of(req.url)))
@@ -196,13 +327,17 @@ class Session(Driver):
                 routes.pop(0).continue_()
         self.page.unroute_all()
 
-    def stub(self, method: str, glob: str, status: int, body: str, content_type: str) -> None:
-        """Answer every matching request with this instead of the server's."""
+    def stub(self, method, glob: str, status: int, body: str, content_type: str) -> None:
+        """Answer every matching request with this instead of the server's.
+        `method` is one method or several; a request by another method goes
+        on to whatever was stubbed before, or to the server."""
+        methods = (method,) if isinstance(method, str) else method
+
         def handler(route, request):
-            if request.method == method:
+            if request.method in methods:
                 route.fulfill(status=status, body=body, content_type=content_type)
             else:
-                route.continue_()
+                route.fallback()
         self.page.route(glob, handler)
 
     def refuse(self, method: str, glob: str, message: str = "測試拒絕") -> None:
@@ -303,6 +438,131 @@ class Session(Driver):
 
     def scroll_y(self) -> int:
         return self.page.evaluate("() => Math.round(window.scrollY)")
+
+    # -- reading the settle view, and both views together --
+
+    def back(self, n: int) -> date:
+        return self.today - timedelta(days=n)
+
+    def open_settle(self) -> None:
+        self.open("/settle", ".cell[data-d]")
+
+    def go_settle(self) -> None:
+        self.tap('[aria-label="埋數"]')
+        self.on(".cell[data-d]").first.wait_for()
+
+    def go_day(self) -> None:
+        self.tap('[aria-label="返日程"]')
+        self.on(".orders .row, .orders .empty").first.wait_for()
+
+    def history(self, back: bool, ready: str) -> None:
+        """Back or forward, which the shell answers without a document."""
+        self.page.go_back() if back else self.page.go_forward()
+        self.on(ready).first.wait_for()
+        self.settle()
+
+    def to_day(self) -> None:
+        self.history(True, ".orders .row, .orders .empty")
+
+    def to_settle(self) -> None:
+        self.history(False, ".cell[data-d]")
+
+    def texts(self, selector: str) -> list:
+        return self.page.eval_on_selector_all(
+            selector, "els => els.filter(e => e.getClientRects().length).map(e => e.textContent.trim())")
+
+    def asked(self, since: int = 0, prefix: str = "/api/settle?") -> list:
+        return [p for _, p, _ in self.requests[since:] if p.startswith(prefix)]
+
+    def month_text(self) -> str:
+        return self.text(".date-btn")
+
+    def top_week(self) -> str:
+        return self.page.evaluate(TOP_WEEK_JS)[0]
+
+    def weeks(self) -> list:
+        return self.page.eval_on_selector_all("#grid .wkblock", "els => els.map(e => e.id)")
+
+    def strip_problems(self) -> list:
+        return self.page.evaluate(STRIP_JS)
+
+    def cell(self, back: int) -> str:
+        return f'.cell[data-d="{self.back(back).isoformat()}"]'
+
+    def bar(self, key: str) -> str:
+        return f'[data-bar="{self.t["batch"][key]}"]'
+
+    def chip(self, key: str) -> str:
+        return f'[data-chip="{self.t["credit"][key]}"]'
+
+    def marks(self, attr: str) -> dict:
+        """Bars or chips on the strip: id -> (classes, labels of its pieces)."""
+        got = self.page.eval_on_selector_all(
+            f"#grid [data-{attr}]",
+            f"els => els.map(e => [e.dataset.{attr}, e.className, e.textContent, e.getAttribute('style')])")
+        out = {}
+        for mid, cls, text, style in got:
+            entry = out.setdefault(int(mid), {"classes": set(), "labels": [], "style": ""})
+            entry["classes"].update(c for c in cls.split() if c not in ("cut-l", "cut-r", "spill-l", "lit", "dim"))
+            entry["style"] += style or ""
+            if text:
+                entry["labels"].append(("dashed " if "makeup" in cls else "") + text)
+        return out
+
+    def lit(self) -> list:
+        return sorted(set(self.page.eval_on_selector_all(
+            "#grid .lit", "els => els.map(e => e.dataset.bar ? 'bar ' + e.dataset.bar : e.dataset.chip ? 'chip ' + e.dataset.chip : e.dataset.d)")))
+
+    def title(self) -> str:
+        return self.text(".sheet.show .sheet-title")
+
+    def sub(self) -> str:
+        return self.text(".sheet.show .sheet-sub")
+
+    def open_mark(self, selector: str, ready: str = ".sheet.show .hero") -> None:
+        """A bar or chip: the first tap lights its relation, the second opens it."""
+        self.reach(selector)
+        self.tap(selector)
+        self.tap(selector)
+        self.on(ready).first.wait_for()
+
+    def open_cell(self, back: int) -> None:
+        self.reach(self.cell(back))
+        self.tap(self.cell(back))
+        self.on(".sheet.show .orow").first.wait_for()
+
+    def open_leg(self, oid: str) -> None:
+        self.tap(f'.sheet.show .orow[data-od="{oid}"]')
+        self.on(".sheet.show .field-row").first.wait_for()
+
+    def close_sheets(self) -> None:
+        self.tap(".sheet.show [data-close]")
+        self.wait(lambda: not self.sheet_open() and not self.count(".scrim.show"), "the sheet and scrim to close")
+
+    def sum_pairs(self, scope: str = ".sheet.show .sum-row") -> list:
+        return self.page.eval_on_selector_all(
+            scope, "els => els.map(e => [e.querySelector('.k').textContent, e.querySelector('.v').textContent])")
+
+    def pick_statement(self) -> None:
+        """Choose a file in the statement picker, as the system dialog would."""
+        self.page.locator("#stmtFile").set_input_files(
+            {"name": "statement.png", "mimeType": "image/png", "buffer": seed_demo_db._png()})
+
+    def watch(self, root_id: str) -> None:
+        """Start recording every change made to the DOM under a view's root."""
+        self.page.evaluate(WATCH_JS, root_id)
+
+    def changes(self, root_id: str) -> list:
+        return self.page.evaluate("id => window.__seen[id].log.slice(0, 6)", root_id)
+
+    def drag(self, *kinds: str) -> dict:
+        return self.page.evaluate(DRAG_JS, list(kinds))
+
+    def scheme(self) -> str:
+        return self.page.evaluate("() => getComputedStyle(document.documentElement).colorScheme")
+
+    def scroll_room(self) -> int:
+        return self.page.evaluate("() => document.documentElement.scrollHeight - window.innerHeight")
 
 
 # ---- day view: load and navigation (inventory A, K11) ----
@@ -550,23 +810,6 @@ def day_timing(s: Session) -> None:
     s.on(".orders .row").first.wait_for()
     s.settle()
     s.eq(s.page.evaluate("() => localStorage.getItem('perf')"), None, "the key after ?perf=0")
-
-
-@check("day.settle-path-until-the-settle-view-exists", old=False)
-def day_settle_path(s: Session) -> None:
-    """The shell has one view so far: /settle shows it, and the $ link is left
-    to the browser, which loads the same shell again."""
-    s.open_day("/settle")
-    s.eq(s.rows(), s.ids(), "rows on /settle")
-    s.eq(s.on('[aria-label="埋數"]').first.get_attribute("href"), "/settle", "the $ link")
-    s.expect(s.on('[aria-label="埋數"]').first.get_attribute("data-nav") is not None, "data-nav on $")
-    s.open_day()
-    s.allow("request failed")     # the navigation cuts the event stream
-    with s.page.expect_navigation():
-        s.press('[aria-label="埋數"]')
-    s.wait(lambda: s.rows() == s.ids(), "the day view after following $")
-    s.expect(s.page.url.endswith("/settle"), "address after following $")
-    s.settle()
 
 
 # ---- day view: chips, rows and marks (inventory A11-A12, B, C, K9) ----
@@ -1328,6 +1571,1499 @@ def day_live_panel(s: Session) -> None:
     s.wait(lambda: s.text(s.row(oid) + " .price") == "$455", "the change made elsewhere")
     s.expect(s.panel_open(), "the add panel closed on a live update")
     s.eq(s.on(".drop.show .paste-box").first.input_value(), "half a message", "the text being typed")
+
+
+# A statement as the reader reports one, for checks that are about the sheet
+# and the confirm rather than about reading an image.
+STATEMENT_READ = {
+    "token": "demo-token", "report": "DEMO 結算單\n3 程 · $1270", "credit_line": "入數 DEMO $1270 啱數",
+    "confirm_label": "確認結算 + 對入數", "can_settle": True, "no_orders_offer": None,
+}
+
+
+# ---- settle view: header, chips, months (inventory G, H1-H9) ----
+
+@check("settle.boot")
+def settle_boot(s: Session) -> None:
+    s.open_settle()
+    s.eq(s.page.title(), "埋數 · Ride Dispatch", "document title")
+    s.eq(s.month_text(), month_label(s.today, now=True), "month button")
+    s.eq(s.page.eval_on_selector_all(
+        ".header-row > *", "els => els.filter(e => e.getClientRects().length).map(e => e.getAttribute('aria-label'))"),
+        ["前一個月", None, "後一個月", "讀結算圖", "返日程"], "header controls")
+    s.eq(s.on('[aria-label="返日程"]').first.get_attribute("href"), "/", "the ✕ link")
+    book = s.api("GET", settle_path(s.today))
+    ledger = s.api("GET", CREDITS)
+    waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
+    s.eq(s.text(".summary"),
+         f"未結算 ${fmt(book['totals']['unsettled'])} · 等過數 ${fmt(book['totals']['awaiting'])}"
+         f" · 入數未對 {len(waiting)} 筆 ${fmt(ledger['sums']['open'])}", "summary")
+    s.expect(s.count(".summary .warn") and s.count(".summary .sum-link"), "the summary's amber figure and queue link")
+    n = book["counts"]
+    s.eq(s.texts(".chips .chip"), [f"接送 {n['ride']}", f"滴滴 {n['didi']}", f"Uber {n['uber']}", f"熊貓 {n['foodpanda']}"], "chips")
+    s.eq(s.text(".chip.on"), f"接送 {n['ride']}", "highlighted chip")
+    s.eq(s.texts(".header .wk span"), list("日一二三四五六"), "weekday heads")
+    s.expect(s.text(".legend").startswith("琥珀 = 平台欠緊"), "the colour key")
+    s.eq(s.on(".cell.today").first.get_attribute("data-d"), s.day(), "today's cell")
+    s.eq(s.top_week(), week_id(s.today.replace(day=1)), "the row at the top of the strip")
+    # The strip keeps loading until neither end is within reach of the screen.
+    top, bottom, height = s.page.evaluate(
+        "() => [document.querySelector('#sentTop').getBoundingClientRect().bottom,"
+        " document.querySelector('#sentBot').getBoundingClientRect().top, window.innerHeight]")
+    s.expect(top <= -149 and bottom >= height + 149, f"an end of the strip is still in reach: {top}, {bottom}, {height}")
+    asked = s.asked()
+    s.expect(settle_path(s.today) in asked, "the current month was never asked for")
+    s.expect(CREDITS in s.asked(prefix="/api/credits"), "the ledger was never asked for")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    # Form controls and scrollbars follow the page's colour scheme.
+    s.eq(s.scheme(), "dark", "color-scheme of the document")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.boot-requests", old=False)
+def settle_boot_requests(s: Session) -> None:
+    s.open_settle()
+    s.eq(len([r for r in s.requests if r[2] == "document"]), 1, "document requests")
+    paths = [p for _, p, _ in s.requests]
+    s.eq(paths.count("/api/events"), 1, "event streams")
+    s.eq(paths.count(CREDITS), 1, "requests for the ledger (the greeting is not a change)")
+    months = s.asked()
+    s.eq(len(months), len(set(months)), f"a month asked for twice: {months}")
+    s.expect(not any(p.startswith("/api/orders") for p in paths), "the day view loaded behind the settle view")
+    s.eq(s.rows(), [], "day rows drawn behind the settle view")
+
+
+@check("settle.page-rules-by-width")
+def settle_widths(s: Session) -> None:
+    """The settle page's own rules on the body and on shared controls, which
+    in the shell must hold for the settle view and for it alone."""
+    def measure():
+        return s.page.evaluate(
+            "() => { const vis = sel => [...document.querySelectorAll(sel)].find(e => e.getClientRects().length);"
+            " return [Math.round(document.body.getBoundingClientRect().width),"
+            " getComputedStyle(document.body).paddingBottom,"
+            " Math.round(vis('.nav-btn').getBoundingClientRect().width)]; }")
+
+    def resize(width: int) -> None:
+        s.page.set_viewport_size({"width": width, "height": 800})
+        s.page.wait_for_timeout(400)      # the strip re-lays itself out 150 ms after the last resize
+        s.settle()
+
+    s.open_settle()
+    s.eq(measure(), [390, "20px", 42], "settle at phone width: body width, bottom padding, round button")
+    resize(1000)
+    s.eq(measure(), [640, "20px", 42], "settle on a wide screen")
+    s.eq(s.page.eval_on_selector(".cell[data-d]", "e => getComputedStyle(e).minHeight"), "76px", "cell height on a wide screen")
+    s.eq(s.strip_problems(), [], "the strip's lanes after a resize")
+    resize(340)
+    s.eq(measure(), [340, "20px", 34], "settle below 361px")
+    s.open_day()
+    s.eq(measure(), [390, "0px", 42], "day at phone width")
+    resize(1000)
+    s.eq(measure(), [480, "0px", 42], "day on a wide screen")
+    resize(340)
+    s.eq(measure(), [340, "0px", 42], "day below 361px")
+    s.eq(s.scheme(), "normal", "color-scheme of the document on the day view")
+
+
+@check("settle.platform-chips")
+def settle_platform(s: Session) -> None:
+    s.open_settle()
+    s.eq(s.page.evaluate("() => localStorage.getItem('settlePlatform')"), None, "stored platform before any choice")
+    s.tap('[aria-label="前一個月"]')
+    asked = len(s.requests)
+    s.tap(".chip", has_text="滴滴")
+    s.expect(settle_path(s.today, "didi") in s.asked(asked), "the current month of the chosen platform")
+    s.expect("/api/credits?platform=didi" in s.asked(asked, "/api/credits"), "the chosen platform's ledger")
+    s.expect(not any("platform=ride" in p for p in s.asked(asked, "/api/")), "a request for the platform left behind")
+    s.expect(s.text(".chip.on").startswith("滴滴"), "highlighted chip")
+    s.eq(s.page.evaluate("() => localStorage.getItem('settlePlatform')"), "didi", "stored platform")
+    # The strip starts again on the current month.
+    s.eq(s.top_week(), week_id(s.today.replace(day=1)), "the row at the top after switching")
+    s.eq(s.month_text(), month_label(s.today, now=True), "month button after switching")
+    book = s.api("GET", settle_path(s.today, "didi"))
+    s.eq(s.text(".summary"), f"未結算 ${fmt(book['totals']['unsettled'])} · 等過數 ${fmt(book['totals']['awaiting'])}", "summary")
+    s.eq(s.count("#grid [data-bar]") + s.count("#grid [data-chip]"), 0, "another platform's bars and chips")
+    s.tap(s.cell(10))
+    s.eq(s.sub(), "滴滴", "day sheet subtitle")
+    s.eq(s.texts(".sheet.show .orow .oll"), ["滴滴"], "a quick order's label")
+    s.close_sheets()
+    # Tapping the chosen chip again does nothing.
+    asked = len(s.requests)
+    s.tap(".chip", has_text="滴滴")
+    s.eq(s.asked(asked, "/api/"), [], "requests for tapping the chosen chip")
+    s.allow("request failed: GET /api/events")     # a reload cuts the event stream
+    s.page.reload()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.expect(s.text(".chip.on").startswith("滴滴"), "the chosen platform after a reload")
+    s.page.evaluate("() => localStorage.setItem('settlePlatform', 'no-such-platform')")
+    s.page.reload()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.expect(s.text(".chip.on").startswith("接送"), "an unknown stored platform falls back to 接送")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.month-navigation")
+def settle_months(s: Session) -> None:
+    s.open_settle()
+    cur = s.today.replace(day=1)
+    prev, before = add_months(cur, -1), add_months(cur, -2)
+    asked = len(s.requests)
+    s.tap('[aria-label="前一個月"]')
+    s.eq(s.month_text(), month_label(prev), "month button after ←")
+    s.eq(s.top_week(), week_id(prev), "top row after ←")
+    s.expect(settle_path(prev) not in s.asked(asked), "a month the strip holds was fetched again")
+    s.tap('[aria-label="後一個月"]')
+    s.eq(s.month_text(), month_label(cur, now=True), "month button after →")
+    s.eq(s.top_week(), week_id(cur), "top row after →")
+    s.tap('[aria-label="前一個月"]')
+    s.tap('[aria-label="前一個月"]')
+    s.eq(s.month_text(), month_label(before), "month button two months back")
+    s.eq(s.top_week(), week_id(before), "top row two months back")
+    weeks = s.weeks()
+    days = [date.fromisoformat(w[2:]) for w in weeks]
+    s.expect(all(b - a == timedelta(days=7) for a, b in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    # The first week of each later month carries the hairline, and nothing else does.
+    starts = s.page.eval_on_selector_all("#grid .wkblock.mstart", "els => els.map(e => e.id)")
+    months = sorted({month_key(d + timedelta(days=6)) for d in days})
+    s.eq(starts, [week_id(date.fromisoformat(m + "-01")) for m in months[1:]], "rows that begin a month")
+    # The month button goes to the current month, and does nothing once there.
+    s.tap(".date-btn")
+    s.eq(s.month_text(), month_label(cur, now=True), "month button after tapping it")
+    s.eq(s.top_week(), week_id(cur), "top row after tapping the month button")
+    at, asked = s.scroll_y(), len(s.requests)
+    s.tap(".date-btn")
+    s.eq((s.scroll_y(), s.asked(asked)), (at, []), "tapping the month button on the current month")
+    # The header follows the scroll.
+    after = add_months(cur, 1)
+    # The strip grows as its end comes into reach, so the row may take more
+    # than one scroll to bring to the top.
+    for _ in range(4):
+        s.page.evaluate("""id => {
+          const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+            .getBoundingClientRect().bottom;
+          window.scrollBy(0, document.getElementById(id).getBoundingClientRect().top - header + 8);
+        }""", week_id(after + timedelta(days=7)))
+        s.settle()
+    s.eq(s.top_week(), week_id(after + timedelta(days=7)), "top row after scrolling into the next month")
+    s.eq(s.month_text(), month_label(after), "month button after scrolling")
+    s.eq(s.weeks()[:len(weeks)], weeks, "rows already drawn changed")
+
+
+@check("settle.edge-loading")
+def settle_edges(s: Session) -> None:
+    s.open_settle()
+    boot = settle_path(s.today)
+
+    def earliest() -> date:
+        return (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+
+    def latest() -> date:
+        return date.fromisoformat(s.weeks()[-1][2:]).replace(day=1)
+
+    first, last = earliest(), latest()
+    # Near the top, with the first row a little above the line it sits on: the
+    # month before arrives above it and the row does not move.
+    held = s.page.evaluate("""() => {
+      const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().bottom;
+      const row = document.querySelector('#grid .wkblock');
+      window.scrollTo(0, window.scrollY + row.getBoundingClientRect().top - header + 20);
+      return [row.id, Math.round(row.getBoundingClientRect().top)];
+    }""")
+    s.settle()
+    s.expect(earliest() < first, "nothing was loaded above the strip")
+    s.eq(s.page.evaluate(TOP_WEEK_JS), held, "the top row after a month arrived above it")
+    # At the bottom, the month after.
+    s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    s.settle()
+    s.expect(latest() > last, "nothing was loaded below the strip")
+    # Wandering over what is held asks for nothing, and no month was asked for twice.
+    s.page.evaluate("() => window.scrollTo(0, (document.documentElement.scrollHeight - window.innerHeight) / 2)")
+    s.settle()
+    asked = len(s.requests)
+    for step in (-200, 400, -200):
+        s.page.evaluate("d => window.scrollBy(0, d)", step)
+        s.settle()
+    s.eq(s.asked(asked), [], "requests for scrolling over months already held")
+    twice = sorted({p for p in s.asked() if p != boot and s.asked().count(p) > 1})
+    s.eq(twice, [], "months fetched more than once")
+    days = [date.fromisoformat(w[2:]) for w in s.weeks()]
+    s.expect(all(b - a == timedelta(days=7) for a, b in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+
+
+def doctored_ledger(s: Session, months_before_strip: int) -> date:
+    """Serve the ledger with one more batch on the unmatched credit: a batch
+    whose days lie that many months before the strip's first, which no
+    seeded data reaches. Returns the day; the page must be loaded already."""
+    first = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    far = add_months(first, -months_before_strip).replace(day=15)
+    ledger = s.api("GET", CREDITS)
+    credit = [c for c in ledger["credits"] if c["id"] == s.t["credit"]["exact"]][0]
+    credit["batches"].append({"id": 990, "dates": [far.isoformat()], "orders": 1, "amount": 100.0,
+                              "confirmed_amount": 100.0, "outstanding": 0.0, "state": "paid", "has_image": False})
+    s.stub("GET", "**/api/credits?platform=ride", 200, json.dumps(ledger), "application/json")
+    s.allow("request failed: GET /api/events")     # the reload cuts the event stream
+    s.page.reload()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    return far
+
+
+@check("settle.reveal-fills-the-months-between")
+def settle_fill(s: Session) -> None:
+    s.open_settle()
+    first = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    far = doctored_ledger(s, 3)
+    s.eq((date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1), first, "the strip's first month after the reload")
+    asked = len(s.requests)
+    chip = s.chip("exact")
+    s.reach(chip)
+    s.tap(chip)
+    # The far end of the relation is three months above the strip: every month
+    # up to it is loaded, once, and the strip goes to the row that carries it.
+    got = s.asked(asked)
+    for n in (1, 2, 3):
+        s.eq(got.count(settle_path(add_months(first, -n))), 1, f"requests for the month {n} before the strip")
+    s.eq(s.top_week(), week_id(far), "the row the strip went to")
+    s.eq(s.month_text(), month_label(far), "month button")
+    days = [date.fromisoformat(w[2:]) for w in s.weeks()]
+    s.expect(all(b - a == timedelta(days=7) for a, b in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    s.expect(week_id(s.today) in s.weeks(), "the months held before were thrown away")
+    s.expect(f"chip {s.t['credit']['exact']}" in s.lit(), "the focus was dropped")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.far-jump-refounds-the-strip")
+def settle_refound(s: Session) -> None:
+    s.open_settle()
+    first = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    far = doctored_ledger(s, 7)
+    chip = s.chip("exact")
+    s.reach(chip)
+    asked = len(s.requests)
+    s.tap(chip)
+    got = s.asked(asked)
+    s.eq(got.count(settle_path(far)), 1, "requests for the month jumped to")
+    # Not the month just above the old strip: bringing the chip under the
+    # finger can scroll that one into reach, which is the strip's own growth.
+    between = [settle_path(add_months(first, -n)) for n in (2, 3, 4)]
+    s.eq([p for p in got if p in between], [], "months between were paid for")
+    s.expect(week_id(s.today) not in s.weeks(), "the old strip is still there")
+    s.expect(week_id(far) in s.weeks(), "the row carrying the far end is not on the new strip")
+    s.eq(s.month_text(), month_label(far), "month button")
+    days = [date.fromisoformat(w[2:]) for w in s.weeks()]
+    s.expect(all(b - a == timedelta(days=7) for a, b in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    # And back: the current month is as far away again.
+    asked = len(s.requests)
+    s.tap(".date-btn")
+    s.eq(s.asked(asked).count(settle_path(s.today)), 1, "requests for the current month")
+    s.expect(week_id(far) not in s.weeks(), "the far strip is still there")
+    s.eq(s.month_text(), month_label(s.today, now=True), "month button back on the current month")
+    s.eq(s.top_week(), week_id(s.today.replace(day=1)), "top row back on the current month")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.failed-load")
+def settle_failed_load(s: Session) -> None:
+    s.open_settle()
+    weeks, text = s.weeks(), s.month_text()
+    s.stub("GET", "**/api/settle?month=*", 500, "<html>boom</html>", "text/html")
+    s.allow("http 500", "status of 500")
+    # Going to the strip's top asks for the month above it, which fails.
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.wait_toast("載入失敗")
+    s.settle()
+    s.eq(s.weeks(), weeks, "the strip after a failed month")
+    s.page.wait_for_timeout(2600)
+    # A reload of what is held fails the same way and leaves it as it was.
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait_toast("載入失敗")
+    s.settle()
+    s.eq((s.weeks(), s.month_text() != ""), (weeks, text != ""), "the strip after a failed reload")
+    s.expect(s.count(".cell[data-d]") > 0, "the strip was emptied")
+
+
+# ---- settle view: cells, bars, chips, focus (inventory H10-H30) ----
+
+@check("settle.cells-bars-and-chips")
+def settle_marks(s: Session) -> None:
+    s.open_settle()
+    s.reach(s.chip("archived"))
+    s.reach(s.bar("paid"))
+
+    def amount(selector: str) -> tuple:
+        el = s.on(selector + " .amt").first
+        return el.get_attribute("class"), el.text_content()
+
+    s.eq(amount(s.cell(1)), ("amt unsettled", "$940"), "a day no batch has claimed")
+    s.eq(amount(s.cell(3)), ("amt unsettled", "$940"), "a day whose 舉牌 was paid ahead")
+    s.eq(amount(s.cell(26)), ("amt done", "$840"), "a day wholly on a batch")
+    s.eq(amount(s.cell(34)), ("amt done", "$896.55"), "a day with a fined leg, to the cent")
+    s.eq(amount(s.cell(-1)), ("amt future", "$900"), "a day still to come")
+    s.eq(amount(s.cell(0)), ("amt unsettled", "$1890"), "today")
+    s.expect("today" in s.on(s.cell(0)).first.get_attribute("class"), "today's cell is not ringed")
+    empty = s.on(".cell.none").first
+    s.expect(empty.is_disabled() and empty.get_attribute("data-d") is None, "an empty day can be opened")
+    firsts = [t for t in s.texts("#grid .cell .d") if "/" in t]
+    s.expect(firsts and all(t.endswith("/1") for t in firsts) and f"{s.today.month}/1" in firsts,
+             f"day numbers carrying a month: {firsts}")
+
+    def arrow(point: date, start: date) -> str:
+        return "→" + (f"{point.day}日" if month_key(point) == month_key(start) else md_slash(point))
+
+    b, bars = s.t["batch"], s.marks("bar")
+    s.eq((bars[b["paid"]]["classes"], bars[b["paid"]]["labels"]), ({"bar", "paid"}, ["$1376.55"]), "a collected batch")
+    s.eq((bars[b["short"]]["classes"], bars[b["short"]]["labels"]), ({"bar", "partial"}, ["$2310 · 差 $380"]), "a batch paid short")
+    s.expect("linear-gradient" in bars[b["short"]]["style"], "a short-paid bar is not split at what was received")
+    s.eq((bars[b["awaiting"]]["classes"], bars[b["awaiting"]]["labels"]), ({"bar", "awaiting"}, ["$1270"]), "a batch awaiting money")
+    s.eq(sorted(bars[b["held_back"]]["labels"]), sorted(["$1780", "dashed " + arrow(s.back(12), s.back(15))]),
+         "a batch with a held-back leg")
+    s.eq(sorted(bars[b["ahead"]]["labels"]), sorted(["$1425", "dashed $40" + arrow(s.back(6), s.back(3))]),
+         "a batch that paid a 舉牌 ahead")
+    c, chips = s.t["credit"], s.marks("chip")
+    s.eq({k: (sorted(chips[c[k]]["classes"]), chips[c[k]]["labels"]) for k in c}, {
+        "paid": (["cchip"], ["入$1376.55"]), "short": (["cchip", "short"], ["入$1930"]),
+        "exact": (["cchip", "open"], ["入$1270"]), "partial": (["cchip", "open"], ["入$2080"]),
+        "archived": (["cchip", "gone"], ["入$215.50"]), "group": (["cchip", "open"], ["入$2870"]),
+    }, "chips")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.focus")
+def settle_focus(s: Session) -> None:
+    s.open_settle()
+    bar, chip = s.bar("short"), s.chip("short")
+    s.reach(bar)
+    relation = sorted([f"bar {s.t['batch']['short']}", f"chip {s.t['credit']['short']}"] +
+                      [s.back(n).isoformat() for n in (27, 26, 25)])
+    s.tap(bar)
+    s.eq(s.lit(), relation, "what a bar's first tap lights")
+    s.expect(not s.sheet_open(), "the first tap opened a sheet")
+    s.expect(s.count("#grid .dim") > 5 and not s.count("#grid .cell.none.dim"), "everything else recedes, bar the empty days")
+    # The same relation, whichever end names it.
+    s.tap(chip)
+    s.eq(s.lit(), relation, "what the chip of the same relation lights")
+    s.expect(not s.sheet_open(), "the first tap on the other end opened a sheet")
+    s.tap(chip)
+    s.on(".sheet.show .hero").wait_for()
+    s.eq(s.title(), "入數 " + md_label(s.back(21)), "second tap on a chip opens its credit")
+    s.close_sheets()
+    s.eq(s.lit(), relation, "the focus after closing the sheet")
+    # It survives a change made elsewhere.
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "the change made elsewhere")
+    s.eq(s.lit(), relation, "the focus after a live update")
+    # A day opens on one tap whatever is focused.
+    s.tap(s.cell(26))
+    s.eq(s.title(), md_label(s.back(26)) + " 星期" + WEEKDAY[s.back(26).weekday()], "a day opened under a focus")
+    s.close_sheets()
+    s.tap(".legend")
+    s.eq((s.lit(), s.count("#grid .dim")), ([], 0), "after tapping empty calendar")
+    s.tap(bar)
+    s.tap(bar)
+    s.on(".sheet.show .hero").wait_for()
+    s.eq(s.title(), "結算 " + span_label(s.back(27), s.back(25)), "second tap on a bar opens its batch")
+    s.eq(s.writes, [], "writes")
+
+
+# ---- settle view: sheets (inventory I) ----
+
+@check("settle.sheets-stack")
+def settle_stack(s: Session) -> None:
+    s.open_settle()
+    day = md_label(s.back(19)) + " 星期" + WEEKDAY[s.back(19).weekday()]
+    batch = "結算 " + span_label(s.back(19), s.back(18))
+    s.open_cell(19)
+    s.eq((s.title(), s.sub()), (day, "接送"), "day sheet")
+    s.eq(s.count(".sheet.show .sheet-back"), 0, "a back button on a sheet with nothing under it")
+    s.tap(".sheet.show .blink")
+    s.eq(s.title(), batch, "the batch opened from its day")
+    s.eq(s.on(".sheet.show .sheet-back").first.get_attribute("aria-label"), "返上一層", "back button")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), day, "‹ goes back one level")
+    s.tap(".sheet.show .blink")
+    s.tap(".sheet.show [data-undo]")
+    s.eq(s.title(), "撤銷結算", "third level")
+    s.tap(".sheet.show .ghost-btn", has_text="返回")
+    s.eq(s.title(), batch, "返回 goes back one level")
+    s.tap(".sheet.show .ghost-btn", has_text="收埋")
+    s.eq(s.title(), day, "收埋 goes back one level")
+    # ✕ closes the whole stack, and so does the scrim.
+    s.tap(".sheet.show .blink")
+    s.tap(".sheet.show [data-undo]")
+    s.tap(".sheet.show .sheet-x")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "✕ to close the whole stack")
+    s.open_cell(19)
+    s.tap(".sheet.show .blink")
+    s.on(".scrim").first.tap(position={"x": 8, "y": 8})
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "the scrim to close the whole stack")
+    # 收埋 on the only sheet closes it.
+    s.open_mark(s.bar("awaiting"))
+    s.eq(s.count(".sheet.show .sheet-back"), 0, "a back button on a batch opened from the strip")
+    s.tap(".sheet.show .ghost-btn", has_text="收埋")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "收埋 to close the only sheet")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.day-and-batch-sheets")
+def settle_batch_sheets(s: Session) -> None:
+    s.open_settle()
+    o = seed_demo_db._oid
+    credit_day = md_slash(s.back(21))
+    s.open_cell(26)
+    rows = s.page.eval_on_selector_all(
+        ".sheet.show .orow",
+        "els => els.map(e => [e.dataset.od, e.querySelector('.ot').textContent, e.querySelector('.oid').textContent,"
+        " e.querySelector('.oll').textContent, e.querySelector('.oend').textContent, e.querySelector('.otag').className])")
+    s.eq(rows, [
+        [o(203), "11:30", "8800 0000 0000 0203", "接機 · CX488", "$460已收 " + credit_day, "otag paid"],
+        [o(204), "19:15", "8800 0000 0000 0204", "單程 · 旺角樣本賓館", "$380未過數", "otag unsettled"],
+    ], "legs of a day on a short-paid batch")
+    s.eq(s.count(".sheet.show .orow [data-copy]"), 0, "copy targets inside rows that open an order")
+    s.eq(s.texts(".sheet.show .blink-t"), [f"批次 {span_label(s.back(27), s.back(25))} · 5 程 · $2310 · 差 $380"], "batch link")
+    s.close_sheets()
+    # A leg whose 舉牌 another batch paid ahead, and that batch's link on its day.
+    s.open_cell(3)
+    s.eq(s.texts(f'.sheet.show .orow[data-od="{o(601)}"] .otag'), ["未結算", "舉牌 $40 先結"], "a leg with its 舉牌 paid ahead")
+    s.eq(s.texts(".sheet.show .blink-t"),
+         [f"批次 {span_label(s.back(6), s.back(5))} · 3 程 · $1425 · 等過數 · 連 {s.back(3).day}日 舉牌 $40"],
+         "the link to the batch that paid it")
+    s.tap(".sheet.show .blink")
+    s.eq(s.title(), "結算 " + span_label(s.back(6), s.back(5)), "batch opened from the link")
+    s.eq(s.sub(), f"接送 · 3 程 · 結算日 {md_slash(s.back(2))} · 連 {s.back(3).day}日 舉牌 $40", "batch subtitle")
+    s.eq(s.text(".sheet.show .prop-head"), "帳項 · $40", "the batch's own lines")
+    s.eq(s.sum_pairs(".sheet.show .prop-sec .sum-row"), [[f"舉牌先結 …0601 · {md_slash(s.back(3))}", "+$40"]], "the line paid ahead")
+    s.close_sheets()
+
+    # A collected batch with a statement, a fined leg and a screenshot.
+    s.open_mark(s.bar("paid"))
+    s.eq(s.title(), "結算 " + span_label(s.back(34), s.back(33)), "batch title")
+    s.eq(s.sub(), f"接送 · 3 程 · 結算日 {md_slash(s.back(31))}", "batch subtitle")
+    s.eq(s.texts(".sheet.show .hero > div"), ["平台確認", "$1376.55", "已收齊 · " + md_slash(s.back(29))], "hero")
+    pairs = s.sum_pairs(".sheet.show .sum-rows .sum-row")
+    s.eq(pairs, [["應收", "$1376.55"], ["入數 " + md_slash(s.back(29)), "$1376.55›"], ["結算單", "睇圖"]], "summary rows")
+    link = s.on(".sheet.show .sum-row a").first
+    s.eq((link.get_attribute("href"), link.get_attribute("target")), ("/api/settlements/1/image", "_blank"), "screenshot link")
+    s.eq(s.texts(".sheet.show .xbtn"), ["解除"], "the button that takes money back")
+    s.eq(s.text(".sheet.show .fold"), "3 程▸", "the folded order list")
+    s.eq(s.count(".sheet.show .orow"), 0, "order rows while folded")
+    s.tap(".sheet.show .fold")
+    s.eq(s.texts(".sheet.show .oday"), [md_label(s.back(n)) + " 星期" + WEEKDAY[s.back(n).weekday()] for n in (34, 33)], "day headings")
+    s.eq(s.texts(".sheet.show .orow .oa"), ["$476.55 · 判罰 −$63.45", "$420", "$480"], "order figures")
+    # The fold survives a change made elsewhere.
+    s.api("PATCH", "/api/orders/" + o(12), {"price": 401})
+    s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "the change made elsewhere")
+    s.settle()
+    s.eq(s.count(".sheet.show .orow"), 3, "order rows after a live update")
+    # An order number copies whole, however it is grouped for the eye.
+    s.page.evaluate("() => Object.defineProperty(navigator, 'clipboard', { configurable: true,"
+                    " value: { writeText: t => { window.__copied = t; return Promise.resolve(); } } })")
+    s.press(".sheet.show .orow .oid")
+    s.wait_toast("已複製 " + o(111))
+    s.eq(s.page.evaluate("() => window.__copied"), o(111), "what was copied")
+    s.eq(s.count(".sheet.show .orow"), 3, "the sheet after a copy")
+    s.eq(s.text(".sheet.show .ghost-btn.danger"), "撤銷結算", "undo button")
+    s.close_sheets()
+
+    # A batch that picked up a leg from an earlier statement: its days are not consecutive.
+    s.open_mark(s.bar("held_back"))
+    s.eq(s.title(), "結算 " + span_label(s.back(12), s.back(11)), "title of a batch with a held-back leg")
+    s.expect(s.sub().endswith(f" · 連 {s.back(15).day}日 1 程"), f"held-back run in {s.sub()!r}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.credit-and-queue-sheets")
+def settle_credit_sheets(s: Session) -> None:
+    s.open_settle()
+    c = s.t["credit"]
+    s.tap(".sum-link")
+    s.eq((s.title(), s.sub()), ("入數未對", "接送 · 3 筆 $4440"), "queue")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => [e.dataset.credit, e.textContent])"), [
+        [str(c["exact"]), f"{md_slash(s.back(14))} · $1270未對›"],
+        [str(c["partial"]), f"{md_slash(s.back(7))} · $2080未對 · 剩 $300›"],
+        [str(c["group"]), f"{md_slash(s.back(0))} · $2870未對›"],
+    ], "queue rows, oldest first")
+    group = "、".join([span_label(s.back(6), s.back(5)), span_label(s.back(9), s.back(8))])
+    s.eq(s.page.eval_on_selector_all(".sheet.show .qprop", "els => els.map(e => e.textContent)"), [
+        f"→ 批次 {span_label(s.back(19), s.back(18))} 差 $1270對",
+        f"→ 2 個批次 · {group} · $2870對晒",
+    ], "matches that are not in question")
+    # A credit part-used: what it could still pay, and what it has paid.
+    s.tap(f'.sheet.show .qrow[data-credit="{c["partial"]}"]')
+    s.eq((s.title(), s.sub()), ("入數 " + md_label(s.back(7)), "接送 · DEMO PLATFORM LTD"), "credit sheet")
+    s.eq(s.texts(".sheet.show .hero > div"), ["到帳", "$2080", "已對 $1780 · 剩 $300"], "hero")
+    s.eq(s.text(".sheet.show .prop-head"), "可能對", "proposals heading")
+    s.eq(s.texts(".sheet.show .prow .pbtn"), ["對 $300（差 $1145）", "對 $300（差 $970）", "對 $300（差 $80）"], "what each tap would do")
+    s.eq(s.sum_pairs(".sheet.show .sum-rows .sum-row"), [
+        [f"批次 {span_label(s.back(12), s.back(11))}", "4 程 · $1780›"], ["Ref", "DEMO-REF-0004"], ["備註", "SUPPLIERPAY"]], "rows")
+    s.tap(".sheet.show .sum-row.link")
+    s.eq(s.title(), "結算 " + span_label(s.back(12), s.back(11)), "the batch the credit paid")
+    s.tap(".sheet.show .sheet-back")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "入數未對", "back on the queue")
+    s.close_sheets()
+    # The group one transfer pays, offered as one row on the credit's own sheet.
+    s.open_mark(s.chip("group"))
+    s.eq(s.texts(".sheet.show .hero > div"), ["到帳", "$2870", "未對"], "hero of an unmatched credit")
+    s.eq(s.texts(".sheet.show .prow")[0], f"2 個批次 · {group} · $2870啱數對晒", "the group row")
+    s.eq(s.count(".sheet.show .prow .ptag"), 1, "啱數 tags: the group's, not its batches' own")
+    s.close_sheets()
+    # A credit paid into a batch that is still short, and an archived one.
+    s.open_mark(s.chip("short"))
+    s.eq(s.texts(".sheet.show .hero > div")[2], "已對", "hero of a matched credit")
+    s.eq(s.texts(".sheet.show .sub-note"), ["批次仲差 $380"], "the batch it left short")
+    s.close_sheets()
+    s.open_mark(s.chip("archived"))
+    s.eq(s.texts(".sheet.show .hero > div")[2], "收埋（no-orders）", "hero of an archived credit")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.allocate")
+def settle_allocate(s: Session) -> None:
+    s.open_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.tap(".sum-link")
+    s.press(f'.sheet.show .pbtn[data-alloc-credit="{c["exact"]}"]')
+    s.wait_toast("已對 $1270 · 批次收齊")
+    s.eq(s.writes[-1], ("POST", f"/api/credits/{c['exact']}/allocate", json.dumps({"settlement_id": b["awaiting"]}, separators=(",", ":"))),
+         "allocate write")
+    s.settle()
+    # The queue stays, without the credit that was put away.
+    s.eq(s.title(), "入數未對", "the sheet after 對")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => e.dataset.credit)"),
+         [str(c["partial"]), str(c["group"])], "queue rows after 對")
+    s.close_sheets()
+    s.expect(s.text(".summary").endswith("入數未對 2 筆 $3170"), f"summary after 對: {s.text('.summary')!r}")
+    s.eq(s.marks("bar")[b["awaiting"]]["classes"], {"bar", "paid"}, "the bar of the batch just paid")
+    s.eq(s.marks("chip")[c["exact"]]["classes"], {"cchip"}, "the chip of the credit just matched")
+    s.page.wait_for_timeout(2500)
+    # From the short-paid batch's own sheet, with money that does not cover it.
+    s.open_mark(s.bar("short"))
+    s.eq(s.text(".sheet.show .prop-head"), "等緊補數 · 差 $380", "what the batch is waiting for")
+    s.press(".sheet.show .pbtn", has_text="對 $300（差 $80）")
+    s.wait_toast("已對 $300 · 仲差 $80")
+    s.eq(s.writes[-1], ("POST", f"/api/credits/{c['partial']}/allocate", json.dumps({"settlement_id": b["short"]}, separators=(",", ":"))),
+         "allocate write from the batch")
+    s.settle()
+    s.eq(s.texts(".sheet.show .hero > div")[2], f"已收 $2230（{md_slash(s.back(7))}） · 差 $80", "the batch after a part payment")
+    s.eq(len(s.writes), 2, "writes")
+
+
+@check("settle.allocate-all")
+def settle_allocate_all(s: Session) -> None:
+    s.open_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.open_mark(s.chip("group"))
+    s.press(".sheet.show .pbtn[data-alloc-all]")
+    s.wait_toast("已對 2 個批次 · $2870 · 收齊")
+    s.eq(s.writes[-1], ("POST", f"/api/credits/{c['group']}/allocate-all",
+                        json.dumps({"settlement_ids": [b["ahead"], b["group"]]}, separators=(",", ":"))), "allocate-all write")
+    s.settle()
+    s.eq(s.texts(".sheet.show .hero > div")[2], "已對", "the credit after 對晒")
+    s.eq(s.count(".sheet.show .prow"), 0, "proposals on a matched credit")
+    s.eq(len(s.texts(".sheet.show .sum-row.link")), 2, "the batches it paid")
+    s.close_sheets()
+    bars = s.marks("bar")
+    s.eq((bars[b["ahead"]]["classes"] - {"makeup"}, bars[b["group"]]["classes"]), ({"bar", "paid"}, {"bar", "paid"}), "both bars")
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("settle.unlink")
+def settle_unlink(s: Session) -> None:
+    s.open_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.open_mark(s.bar("held_back"))
+    s.tap(".sheet.show .xbtn")
+    s.eq((s.title(), s.sub()), ("解除入數", f"{span_label(s.back(12), s.back(11))} · 入數 {md_slash(s.back(7))}"), "confirm view")
+    s.eq(s.text(".sheet.show .undo-info"), "$1780 會由呢個批次拎返出嚟，批次變返差 $1780，錢返到入數度。", "what it says will happen")
+    s.tap(".sheet.show .ghost-btn", has_text="返回")
+    s.eq(s.title(), "結算 " + span_label(s.back(12), s.back(11)), "返回 goes back to the batch")
+    s.eq(s.writes, [], "writes before confirming")
+    s.tap(".sheet.show .xbtn")
+    s.press(".sheet.show [data-unlinkgo]")
+    s.wait_toast("已解除入數")
+    s.eq(s.writes[-1][:2], ("DELETE", f"/api/settlements/{b['held_back']}/allocations/{c['partial']}"), "deallocate write")
+    s.settle()
+    s.eq(s.title(), "結算 " + span_label(s.back(12), s.back(11)), "back on the batch")
+    s.eq(s.texts(".sheet.show .hero > div")[2], "等過數", "the batch with its money taken back")
+    s.eq(s.count(".sheet.show .xbtn"), 0, "allocations left on the batch")
+    s.close_sheets()
+    s.expect(s.text(".summary").endswith("入數未對 3 筆 $6220"), f"summary after 解除: {s.text('.summary')!r}")
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("settle.undo")
+def settle_undo(s: Session) -> None:
+    s.open_settle()
+    b = s.t["batch"]
+    s.open_cell(19)
+    s.tap(".sheet.show .blink")
+    s.tap(".sheet.show [data-undo]")
+    s.eq((s.title(), s.sub()), ("撤銷結算", f"{span_label(s.back(19), s.back(18))} · 3 程"), "confirm view")
+    s.eq(s.text(".sheet.show .undo-info"), "呢 3 程會變返未結算，$1270 嘅結算紀錄會刪走。", "what it says will happen")
+    s.press(".sheet.show [data-undogo]")
+    s.wait_toast("已撤銷結算")
+    s.eq(s.writes[-1][:2], ("DELETE", f"/api/settlements/{b['awaiting']}"), "undo write")
+    s.settle()
+    # Back on the day it was opened from, whose legs are loose again.
+    s.eq(s.title(), md_label(s.back(19)) + " 星期" + WEEKDAY[s.back(19).weekday()], "the sheet after an undo")
+    s.eq(s.texts(".sheet.show .otag"), ["未結算", "未結算"], "the day's legs")
+    s.eq(s.count(".sheet.show .blink"), 0, "batch links on the day")
+    s.close_sheets()
+    s.expect(b["awaiting"] not in s.marks("bar"), "the undone batch still has a bar")
+    s.eq(s.on(s.cell(19) + " .amt").first.get_attribute("class"), "amt unsettled", "the day's amount")
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("settle.unpaid-ticks")
+def settle_ticks(s: Session) -> None:
+    s.open_settle()
+    o = seed_demo_db._oid
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    s.eq(s.text(".sheet.show .up-head"), "邊張單未過？ · 差 $380", "heading")
+    s.expect(s.text(".sheet.show .up-note").startswith("系統估：") and s.text(".sheet.show .up-note").endswith("，啱差額，已剔"),
+             f"the single guess: {s.text('.sheet.show .up-note')!r}")
+
+    def ticks() -> list:
+        return s.page.eval_on_selector_all(".sheet.show [data-uptick]",
+                                           "els => els.filter(e => e.querySelector('.up-chk.on')).map(e => e.dataset.uptick)")
+
+    def foot() -> tuple:
+        return s.text(".sheet.show .up-sum"), s.on(".sheet.show .up-btn").first.is_enabled()
+
+    s.eq(s.count(".sheet.show [data-uptick]"), 5, "tick rows")
+    s.eq((ticks(), foot()), ([o(204)], ("剔咗 $380 = 差額", True)), "the stored mark")
+    s.eq(s.texts(f'.sheet.show [data-uptick="{o(204)}"] .oend > span'), ["$380", "未過數"], "a ticked row")
+    # The box, not the middle of the row: the order number there copies itself.
+    s.tap(f'.sheet.show [data-uptick="{o(204)}"] .up-chk')
+    s.eq((ticks(), foot()), ([], ("剔咗 $0 ≠ 差 $380", False)), "with nothing ticked")
+    s.tap(f'.sheet.show [data-uptick="{o(201)}"] .up-chk')
+    s.eq((ticks(), foot()), ([o(201)], ("剔咗 $560 ≠ 差 $380", False)), "with the wrong leg ticked")
+    s.expect("warn" in s.on(".sheet.show .up-sum").first.get_attribute("class"), "a wrong sum is not marked")
+    # A repaint puts the ticks back to what is stored.
+    s.api("PATCH", "/api/orders/" + o(12), {"price": 401})
+    s.wait(lambda: ticks() == [o(204)], "the ticks to be reset by a live update")
+    s.tap(f'.sheet.show [data-uptick="{o(204)}"] .up-chk')
+    s.tap(f'.sheet.show [data-uptick="{o(204)}"] .up-chk')
+    s.press(".sheet.show .up-btn")
+    s.wait_toast("已記低")
+    s.eq(s.writes[-1], ("POST", f"/api/settlements/{s.t['batch']['short']}/unpaid",
+                        json.dumps({"order_ids": [o(204)]}, separators=(",", ":"))), "unpaid write")
+    s.settle()
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("settle.refused-writes")
+def settle_refused(s: Session) -> None:
+    s.open_settle()
+    for glob, method, message in (("**/api/credits/*/allocate", "POST", "拒絕對"),
+                                  ("**/api/credits/*/allocate-all", "POST", "拒絕對晒"),
+                                  ("**/api/settlements/*/allocations/*", "DELETE", "拒絕解除"),
+                                  ("**/api/settlements/*", "DELETE", "拒絕撤銷"),
+                                  ("**/api/settlements/*/unpaid", "POST", "拒絕記低")):
+        s.refuse(method, glob, message)
+    s.tap(".sum-link")
+    s.press(".sheet.show .qprop .pbtn", has_text="對")
+    s.wait_toast("拒絕對")
+    s.press(".sheet.show .pbtn[data-alloc-all]")
+    s.wait_toast("拒絕對晒")
+    s.eq(s.count(".sheet.show .qrow"), 3, "queue rows after two refusals")
+    s.close_sheets()
+    s.open_mark(s.bar("held_back"))
+    s.tap(".sheet.show .xbtn")
+    s.press(".sheet.show [data-unlinkgo]")
+    s.wait_toast("拒絕解除")
+    s.eq(s.title(), "解除入數", "the confirm view after a refusal")
+    s.tap(".sheet.show .sheet-back")
+    s.tap(".sheet.show [data-undo]")
+    s.press(".sheet.show [data-undogo]")
+    s.wait_toast("拒絕撤銷")
+    s.eq(s.title(), "撤銷結算", "the confirm view after a refusal")
+    s.close_sheets()
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    s.press(".sheet.show .up-btn")
+    s.wait_toast("拒絕記低")
+    s.eq(len(s.writes), 5, "writes")
+    s.settle()
+
+
+@check("settle.order-sheet")
+def settle_order_sheet(s: Session) -> None:
+    s.open_settle()
+    o = seed_demo_db._oid
+    s.page.evaluate("() => Object.defineProperty(navigator, 'clipboard', { configurable: true,"
+                    " value: { writeText: t => { window.__copied = t; return Promise.resolve(); } } })")
+    # A leg of a batch: it waits for the order, then shows it with what a batch locks.
+    s.open_cell(26)
+    path = "/api/orders/" + o(203)
+    s.hold(path)
+    s.press(f'.sheet.show .orow[data-od="{o(203)}"]')
+    s.wait(lambda: s.holding(path), "the order to be asked for")
+    s.eq((s.title(), s.text(".sheet.show .empty")), ("單 …0203", "讀緊…"), "the sheet while the order is on its way")
+    s.release_all()
+    s.on(".sheet.show .field-row").first.wait_for()
+    s.settle()
+    day = s.back(26)
+    s.eq((s.title(), s.sub()), ("接機 11:30", f"#000203 · {md_label(day)} 星期{WEEKDAY[day.weekday()]}"), "order sheet")
+    info = s.info()
+    s.eq(list(info), ["單號", "乘客", "航班", "車型", "路線", "結算"], "info rows")
+    s.eq(info["單號"], "8800 0000 0000 0203", "the whole number, grouped")
+    s.eq(info["結算"], f"批次 {span_label(s.back(27), s.back(25))} · 差 $380 ›", "settlement row")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .field-row.locked", "els => els.map(e => e.querySelector('.fk').textContent + '|' + e.querySelector('.chev').textContent)"),
+         ["價錢|已結算", "隧道費|已結算", "舉牌費|已結算"], "fields a batch locks")
+    s.press(".sheet.show .field-row", has_text="價錢")
+    s.wait_toast("已結算嘅單要先撤銷結算")
+    s.eq(s.count(".sheet.show .numpad"), 0, "a numpad for a locked field")
+    s.eq(s.text(".sheet.show .cancel-note"), "已結算嘅單要先撤銷結算先取消得", "cancel note")
+    s.page.wait_for_timeout(2500)
+    s.press(".sheet.show .info-row .oid")
+    s.wait_toast("已複製 " + o(203))
+    s.eq(s.page.evaluate("() => window.__copied"), o(203), "what was copied")
+    # A numpad stacked on it: ‹ goes back one level, and a save returns to the order.
+    s.tap(".sheet.show .field-row", has_text="停車費")
+    s.eq((s.title(), s.count(".sheet.show .sheet-back")), ("改停車費", 1), "numpad on the stack")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "接機 11:30", "‹ on the numpad")
+    s.edit("停車費", "20")
+    s.eq(s.last_write(), ("PATCH", path, {"parking_fee": 20}), "parking fee write")
+    s.eq((s.title(), s.field("停車費")), ("接機 11:30", "$20"), "the order after the save")
+    # Its batch opens on top of it.
+    s.tap(".sheet.show .info-link")
+    s.eq(s.title(), "結算 " + span_label(s.back(27), s.back(25)), "the batch opened from the order")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "接機 11:30", "back on the order")
+    # ✕ closes the whole stack here.
+    s.tap(".sheet.show .field-row", has_text="時間")
+    s.tap(".sheet.show .sheet-x")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "✕ to close the whole stack")
+
+    # A leg whose 舉牌 was paid ahead names the batch that paid it.
+    s.open_cell(3)
+    s.open_leg(o(601))
+    info = s.info()
+    s.eq((info["淨收"], info["結算"], info["舉牌"]),
+         ("$565", "未結算", f"$40 先結 · 批次 {span_label(s.back(6), s.back(5))} · 等過數 ›"), "rows of a leg with its 舉牌 paid ahead")
+    s.close_sheets()
+
+    # A loose leg: priced from here, and the strip behind follows.
+    s.open_cell(1)
+    s.open_leg(o(11))
+    s.edit("價錢", "600")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + o(11), {"price": 600}), "price write")
+    s.eq(s.field("價錢"), "$600", "price on the sheet")
+    s.eq(s.text(s.cell(1) + " .amt"), "$1040", "the day's amount behind the sheet")
+    s.tap(".sheet.show .sheet-back")
+    # Cancelled from here: back to the day, which no longer lists it.
+    s.open_leg(o(12))
+    s.tap(".sheet.show .cancel-link")
+    s.press(".sheet.show .primary-btn.danger")
+    s.wait_toast("已取消 #000012")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + o(12), {"status": "cancelled"}), "cancel write")
+    s.settle()
+    s.eq(s.title(), md_label(s.back(1)) + " 星期" + WEEKDAY[s.back(1).weekday()], "the sheet after a cancel")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .orow", "els => els.map(e => e.dataset.od)"), [o(11)], "the day's legs")
+    s.eq(len(s.writes), 3, "writes")
+
+
+@check("settle.order-that-cannot-be-read")
+def settle_order_error(s: Session) -> None:
+    s.open_settle()
+    o = seed_demo_db._oid
+    s.open_cell(1)
+    s.stub("GET", "**/api/orders/" + o(12), 404, json.dumps({"error": "搵唔到單"}), "application/json")
+    s.allow("http 404", "status of 404")
+    s.tap(f'.sheet.show .orow[data-od="{o(12)}"]')
+    s.eq((s.title(), s.text(".sheet.show .order-err")), ("單 …0012", "搵唔到單"), "an order the server does not have")
+    s.eq(s.count(".sheet.show .field-row"), 0, "fields of an order that could not be read")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.count(".sheet.show .orow"), 2, "back on the day")
+    s.never(s.toast, "a toast for an order that could not be read", ms=300)
+
+
+# ---- settle view: statement intake (inventory J) ----
+
+@check("settle.statement-read")
+def settle_statement_read(s: Session) -> None:
+    s.open_settle()
+    s.allow("http 400", "status of 400")
+    path = "/api/statements/read"
+    button = s.on('[aria-label="讀結算圖"]').first
+    s.eq(button.text_content(), "圖", "the button at rest")
+    # By the picker. The image is a blank pixel, so the reader finds nothing
+    # in it; that it answered at all is the file having arrived.
+    s.hold(path)
+    s.pick_statement()
+    s.wait(lambda: s.holding(path), "the read to be sent")
+    s.eq((button.text_content(), button.is_disabled()), ("⋯", True), "the button while reading")
+    s.release_all()
+    s.wait_toast(re.compile(r"讀唔到張圖.*— 再上載一次"))
+    s.eq((button.text_content(), button.is_disabled()), ("圖", False), "the button after reading")
+    s.expect(not s.sheet_open(), "a sheet for a statement that could not be read")
+    method, sent, body = s.writes[-1]
+    s.eq((method, sent), ("POST", path), "read write")
+    s.expect('name="file"; filename="statement.png"' in body and "Content-Type: image/png" in body, f"multipart body: {body!r}")
+    # The same file again still triggers a read.
+    s.page.wait_for_timeout(2500)
+    s.pick_statement()
+    s.wait_toast(re.compile(r"讀唔到張圖.*— 再上載一次"))
+    s.eq(len(s.writes), 2, "writes after picking the same file twice")
+    s.page.wait_for_timeout(2500)
+
+    # By dropping a file on the page.
+    s.eq(s.drag("dragenter"), {"dragenter": True}, "a file dragged in is taken")
+    s.eq(s.text(".drop.show"), "放低張結算圖", "the drop overlay")
+    s.page.evaluate("() => document.body.dispatchEvent(new DragEvent('dragleave', { bubbles: true }))")
+    s.eq(s.count(".drop.show"), 0, "the overlay after the drag left")
+    s.eq(s.page.evaluate("""() => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'not a file');
+      document.body.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return document.querySelectorAll('.drop.show').length;
+    }"""), 0, "the overlay for a drag that carries no file")
+    s.eq(s.drag("dragenter", "dragover", "drop"), {"dragenter": True, "dragover": True, "drop": True}, "a dropped file is taken")
+    s.wait(lambda: len(s.writes) == 3, "the dropped file to be read")
+    s.eq(s.writes[-1][:2], ("POST", path), "read write for a dropped file")
+    s.eq(s.count(".drop.show"), 0, "the overlay after the drop")
+    s.wait(lambda: s.toast(), "the reader's answer")
+    s.settle()
+
+
+@check("settle.statement-confirm")
+def settle_statement_confirm(s: Session) -> None:
+    s.open_settle()
+    s.allow("http 410", "status of 410")
+    s.stub("POST", "**/api/statements/read", 200, json.dumps(STATEMENT_READ), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.eq((s.title(), s.sub()), ("結算單", "接送"), "statement sheet")
+    s.eq(s.text(".sheet.show .stmt-report"), STATEMENT_READ["report"], "the report, as the server sent it")
+    s.eq(s.text(".sheet.show .stmt-credit"), STATEMENT_READ["credit_line"], "credit line")
+    s.eq(s.texts(".sheet.show .primary-btn, .sheet.show .ghost-btn"), ["確認結算 + 對入數", "唔確認"], "buttons")
+    # 唔確認 writes nothing.
+    s.tap(".sheet.show .ghost-btn")
+    s.wait(lambda: not s.sheet_open(), "the sheet to close")
+    s.eq(len(s.writes), 1, "writes after declining")
+    # The server no longer holds this read: its refusal stays on the sheet.
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.press(".sheet.show [data-stmtgo]")
+    s.wait(lambda: s.count(".sheet.show .stmt-err"), "the refusal")
+    s.eq(s.writes[-1], ("POST", "/api/statements/confirm", json.dumps({"token": "demo-token"}, separators=(",", ":"))), "confirm write")
+    s.settle()
+    s.eq(s.text(".sheet.show .stmt-err"), "已過期，再上載一次", "the server's refusal")
+    s.eq(s.texts(".sheet.show .primary-btn, .sheet.show .ghost-btn"), ["收埋"], "buttons after a refusal")
+    s.close_sheets()
+    # Confirmed: the sheet says so and leads to the batch.
+    batch = s.t["batch"]["awaiting"]
+    s.stub("POST", "**/api/statements/confirm", 200,
+           json.dumps({"settlement_id": batch, "text": "DEMO 已結算 3 程 $1270"}), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.press(".sheet.show [data-stmtgo]")
+    s.wait(lambda: s.title() == "已結算", "the sheet to say it is settled")
+    s.settle()
+    s.eq(s.text(".sheet.show .stmt-report"), "DEMO 已結算 3 程 $1270", "the server's text")
+    s.eq(s.texts(".sheet.show .ghost-btn"), ["睇批次", "收埋"], "buttons after settling")
+    s.tap(".sheet.show .ghost-btn", has_text="睇批次")
+    s.eq(s.title(), "結算 " + span_label(s.back(19), s.back(18)), "the batch opened from the statement")
+    s.eq([w[1] for w in s.writes], ["/api/statements/read", "/api/statements/read", "/api/statements/confirm",
+                                    "/api/statements/read", "/api/statements/confirm"], "writes")
+
+
+# ---- settle view: live update, timing (inventory K) ----
+
+@check("settle.live-update")
+def settle_live(s: Session) -> None:
+    s.open_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.reach(s.bar("awaiting"))
+    at, top = s.scroll_y(), s.top_week()
+    s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["awaiting"]})
+    s.wait(lambda: s.marks("bar")[b["awaiting"]]["classes"] == {"bar", "paid"}, "the bar to follow a change made elsewhere")
+    s.settle()
+    s.eq((s.scroll_y(), s.top_week()), (at, top), "the strip's position after a live update")
+    s.expect(s.text(".summary").endswith("入數未對 2 筆 $3170"), "the summary after a live update")
+    # An open sheet follows too.
+    s.open_mark(s.bar("awaiting"))
+    s.eq(s.texts(".sheet.show .hero > div")[2], "已收齊 · " + md_slash(s.back(14)), "the batch, collected")
+    s.api("DELETE", f"/api/settlements/{b['awaiting']}/allocations/{c['exact']}")
+    s.wait(lambda: s.texts(".sheet.show .hero > div")[2] == "等過數", "the open sheet to follow a change made elsewhere")
+    # A batch that goes away takes its sheets with it and leaves what was under them.
+    s.close_sheets()
+    s.open_cell(19)
+    s.tap(".sheet.show .blink")
+    s.tap(".sheet.show [data-undo]")
+    s.eq(s.title(), "撤銷結算", "three sheets deep")
+    s.api("DELETE", f"/api/settlements/{b['awaiting']}")
+    s.wait(lambda: s.title() == md_label(s.back(19)) + " 星期" + WEEKDAY[s.back(19).weekday()],
+           "the stack to fall back to the day")
+    s.eq(s.count(".sheet.show .blink"), 0, "links to a batch that is gone")
+    s.close_sheets()
+    # The same with nothing under it: the sheet closes.
+    s.open_mark(s.bar("group"))
+    s.api("DELETE", f"/api/settlements/{b['group']}")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "the sheet of a batch that is gone to close")
+    s.eq(s.writes, [], "writes by the page")
+
+
+@check("settle.live-update-with-an-order-open")
+def settle_live_order(s: Session) -> None:
+    s.open_settle()
+    o = seed_demo_db._oid
+    s.open_cell(1)
+    s.open_leg(o(12))
+    s.api("PATCH", "/api/orders/" + o(12), {"tunnel_fee": 30})
+    s.wait(lambda: s.field("隧道費") == "$30", "the open order to follow a change made elsewhere")
+    # A numpad stacked on it is repainted, as any top sheet is, and stays a numpad.
+    s.tap(".sheet.show .field-row", has_text="價錢")
+    s.api("PATCH", "/api/orders/" + o(12), {"parking_fee": 12})
+    s.settle()
+    s.page.wait_for_timeout(2500)   # the server looks for changes every two seconds
+    s.settle()
+    s.eq(s.title(), "改價錢", "the stacked numpad")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.field("停車費"), "$12", "the order once back on it")
+    s.eq(s.writes, [], "writes by the page")
+
+
+@check("settle.timing-readout")
+def settle_timing(s: Session) -> None:
+    ms = re.compile(r"\d+ ms")
+    s.open("/?perf=1", ".orders .row")
+    s.wait_toast(ms)
+    s.open_settle()
+    s.wait_toast(ms)
+    s.page.wait_for_timeout(2600)
+    # Only the first paint after the document loaded says so.
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "the change made elsewhere")
+    s.never(s.toast, "a timing toast for a live update", ms=500)
+
+
+@check("settle.expired-login-does-not-toast", old=False)
+def settle_auth_expired(s: Session) -> None:
+    s.open_settle()
+    s.allow("http 401", "status of 401")
+    o = seed_demo_db._oid
+    quiet = 500
+
+    def expired(method, glob: str) -> None:
+        s.stub(method, glob, 401, "<html>log in</html>", "text/html")
+
+    expired(("POST", "PATCH", "DELETE"), "**/api/**")
+    s.tap(".sum-link")
+    sent = len(s.writes)
+    s.press(".sheet.show .qprop .pbtn", has_text="對")
+    s.wait(lambda: len(s.writes) > sent, "the allocate write")
+    s.never(s.toast, "a toast for an expired login (對)", ms=quiet)
+    s.press(".sheet.show .pbtn[data-alloc-all]")
+    s.wait(lambda: len(s.writes) > sent + 1, "the allocate-all write")
+    s.never(s.toast, "a toast for an expired login (對晒)", ms=quiet)
+    s.close_sheets()
+    s.open_mark(s.bar("held_back"))
+    s.tap(".sheet.show .xbtn")
+    s.press(".sheet.show [data-unlinkgo]")
+    s.wait(lambda: len(s.writes) > sent + 2, "the deallocate write")
+    s.never(s.toast, "a toast for an expired login (解除)", ms=quiet)
+    s.tap(".sheet.show .sheet-back")
+    s.tap(".sheet.show [data-undo]")
+    s.press(".sheet.show [data-undogo]")
+    s.wait(lambda: len(s.writes) > sent + 3, "the undo write")
+    s.never(s.toast, "a toast for an expired login (撤銷)", ms=quiet)
+    s.close_sheets()
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    s.press(".sheet.show .up-btn")
+    s.wait(lambda: len(s.writes) > sent + 4, "the unpaid write")
+    s.never(s.toast, "a toast for an expired login (記低)", ms=quiet)
+    s.close_sheets()
+    s.open_cell(1)
+    s.open_leg(o(11))
+    s.tap(".sheet.show .field-row", has_text="停車費")
+    s.keys(".sheet.show", "20")
+    s.press(".sheet.show #npOk")
+    s.wait(lambda: len(s.writes) > sent + 5, "the order write")
+    s.never(s.toast, "a toast for an expired login (order edit)", ms=quiet)
+    s.expect(s.count(".sheet.show .numpad"), "the numpad stays up")
+    s.close_sheets()
+    s.pick_statement()
+    s.wait(lambda: len(s.writes) > sent + 6, "the statement read")
+    s.never(s.toast, "a toast for an expired login (statement read)", ms=quiet)
+    s.eq(s.text('[aria-label="讀結算圖"]'), "圖", "the read button after a read that did not happen")
+    # A confirm that never reached the server leaves the statement as it was.
+    s.stub("POST", "**/api/statements/read", 200, json.dumps(STATEMENT_READ), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.press(".sheet.show [data-stmtgo]")
+    s.wait(lambda: len(s.writes) > sent + 8, "the confirm write")
+    s.never(s.toast, "a toast for an expired login (statement confirm)", ms=quiet)
+    s.eq(s.count(".sheet.show .stmt-err"), 0, "an error on the statement sheet")
+    s.expect(s.on(".sheet.show [data-stmtgo]").first.is_enabled(), "the confirm button is left disabled")
+    s.close_sheets()
+    # Reads: a month the strip does not hold, then everything it does.
+    expired("GET", "**/api/settle?month=*")
+    expired("GET", "**/api/credits?platform=*")
+    asked = len(s.requests)
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.wait(lambda: s.asked(asked), "the month above the strip to be asked for")
+    s.never(s.toast, "a toast for an expired login (a month)", ms=quiet)
+    asked = len(s.requests)
+    s.api("PATCH", "/api/orders/" + o(12), {"price": 401})
+    s.wait(lambda: s.asked(asked, "/api/credits"), "the reload", ms=6000)
+    s.never(s.toast, "a toast for an expired login (reload)", ms=quiet)
+    s.settle()
+
+
+# ---- the two views in one document (inventory A9, G3, L4, L10; plan review focus 3 and 5) ----
+
+@check("views.switch-without-a-document-request", old=False)
+def views_switch(s: Session) -> None:
+    s.open_day()
+    asked = len(s.requests)
+    s.go_settle()
+    s.settle()
+    s.expect(s.page.url.endswith("/settle"), "address after $")
+    s.eq(s.page.title(), "埋數 · Ride Dispatch", "title after $")
+    s.eq(s.page.evaluate("() => document.body.dataset.view"), "settle", "the view the body names")
+    s.eq(s.count(".orders .row"), 0, "day rows showing on the settle view")
+    s.eq(s.scheme(), "dark", "color-scheme on the settle view")
+    middle = len(s.requests)
+    s.go_day()
+    s.expect(s.page.url.endswith("/") and not s.page.url.endswith("/settle"), "address after ✕")
+    s.eq(s.page.title(), "Ride Dispatch", "title after ✕")
+    s.eq(s.count(".cell"), 0, "settle cells showing on the day view")
+    s.eq(s.rows(), s.ids(), "day rows after coming back")
+    s.eq(s.scheme(), "normal", "color-scheme on the day view")
+    new = s.requests[asked:]
+    s.eq([r for r in new if r[2] == "document" or r[1] in ("/", "/settle")], [], "document requests for switching")
+    s.eq([r for r in new if not r[1].startswith("/api/")], [], "requests other than for data")
+    s.eq([p for _, p, _ in new].count("/api/events"), 0, "new event streams")
+    # Each view asks for its own data when it is shown, and only for that.
+    s.expect(all(p.startswith(("/api/settle?", "/api/credits?")) for _, p, _ in s.requests[asked:middle]),
+             f"requests on showing settle: {s.requests[asked:middle]}")
+    s.expect(all(p.startswith("/api/orders?") for _, p, _ in s.requests[middle:]),
+             f"requests on showing the day view: {s.requests[middle:]}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("views.reload-and-history", old=False)
+def views_history(s: Session) -> None:
+    s.allow("request failed: GET /api/events")     # a reload cuts the event stream
+    s.open_settle()
+    s.page.reload()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.expect(s.page.url.endswith("/settle") and s.count(".orders .row") == 0, "a reload on /settle left the settle view")
+    s.go_day()
+    s.page.reload()
+    s.on(".orders .row").first.wait_for()
+    s.settle()
+    s.expect(not s.page.url.endswith("/settle") and s.count(".cell") == 0, "a reload on / left the day view")
+    docs = len([r for r in s.requests if r[2] == "document"])
+    s.go_settle()
+    s.to_day()
+    s.expect(not s.page.url.endswith("/settle") and s.rows() == s.ids(), "back did not return to the day view")
+    s.eq(s.page.title(), "Ride Dispatch", "title after back")
+    s.to_settle()
+    s.expect(s.page.url.endswith("/settle") and s.count(".cell[data-d]") > 0, "forward did not return to the settle view")
+    s.eq(s.page.title(), "埋數 · Ride Dispatch", "title after forward")
+    s.eq(len([r for r in s.requests if r[2] == "document"]), docs, "document requests for back and forward")
+    # Each view keeps an on-screen way to the other.
+    s.eq(s.count('[aria-label="返日程"]'), 1, "the way back to the day view")
+    s.to_day()
+    s.eq(s.count('[aria-label="埋數"]'), 1, "the way to the settle view")
+
+
+@check("views.each-view-keeps-its-scroll", old=False)
+def views_scroll(s: Session) -> None:
+    s.open_day()
+    s.expect(s.scroll_room() > 40, "the day list does not scroll on this screen")
+    s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    s.settle()
+    day_at = s.scroll_y()
+    s.go_settle()
+    s.tap('[aria-label="前一個月"]')
+    s.tap('[aria-label="前一個月"]')
+    s.page.evaluate("() => window.scrollBy(0, 37)")
+    s.settle()
+    at, top, weeks, text = s.scroll_y(), s.page.evaluate(TOP_WEEK_JS), s.weeks(), s.month_text()
+    held = sorted(set(s.asked()))
+    s.expect(at != day_at and at > 0, "the two views happen to be scrolled alike")
+    s.go_day()
+    s.eq(s.scroll_y(), day_at, "the day view's scroll after coming back")
+    asked = len(s.requests)
+    s.go_settle()
+    s.eq((s.scroll_y(), s.page.evaluate(TOP_WEEK_JS)), (at, top), "the settle view's scroll and top row after coming back")
+    s.eq((s.weeks(), s.month_text()), (weeks, text), "the rows the strip holds, and the month it names")
+    # Shown again, it reloads what it holds, once, and reaches for nothing more.
+    s.eq(sorted(s.asked(asked)), held, "months asked for on coming back")
+    s.eq(s.asked(asked, "/api/credits"), [CREDITS], "ledger requests on coming back")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    # Back and forward restore them the same way.
+    s.to_day()
+    s.eq(s.scroll_y(), day_at, "the day view's scroll after back")
+    asked = len(s.requests)
+    s.to_settle()
+    s.eq((s.scroll_y(), s.page.evaluate(TOP_WEEK_JS)), (at, top), "the settle view's scroll and top row after forward")
+    s.eq(sorted(s.asked(asked)), held, "months asked for after forward")
+
+
+@check("views.hidden-settle-waits-until-shown", old=False)
+def views_hidden_settle(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.reach(s.bar("awaiting"))
+    row = week_id(s.back(19))
+    s.go_day()
+    s.watch("view-settle")
+    asked = len(s.requests)
+    s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["awaiting"]})
+    s.wait(lambda: s.asked(asked, "/api/orders?"), "the day view to hear of the change", ms=6000)
+    s.settle()
+    s.page.wait_for_timeout(600)
+    s.eq(s.asked(asked) + s.asked(asked, "/api/credits"), [], "requests made for the hidden settle view")
+    s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
+    s.go_settle()
+    s.eq(s.marks("bar")[b["awaiting"]]["classes"], {"bar", "paid"}, "the batch paid while the view was hidden")
+    s.eq(s.marks("chip")[c["exact"]]["classes"], {"cchip"}, "the credit matched while the view was hidden")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    box = s.on(s.bar("awaiting")).first.bounding_box()
+    s.expect(box["width"] > 40 and box["height"] > 10, f"the bar has no size: {box}")
+    # The row is laid out exactly as a page that never left would lay it out.
+    drawn = s.page.eval_on_selector("#" + row, "e => e.innerHTML")
+    s.allow("request failed: GET /api/events")     # the reload cuts the event stream
+    s.page.reload()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.reach("#" + row)
+    s.eq(s.page.eval_on_selector("#" + row, "e => e.innerHTML"), drawn, "the row, drawn on return and drawn afresh")
+
+
+@check("views.late-settle-answers-are-not-drawn-while-hidden", old=False)
+def views_late_settle(s: Session) -> None:
+    s.open_day()
+    s.page.evaluate("() => window.scrollTo(0, 60)")
+    s.settle()
+    day_at = s.scroll_y()
+    s.go_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    s.reach(s.bar("awaiting"))
+    held = sorted(set(s.asked()))
+    # A reload in flight when the operator leaves.
+    s.hold(*held, CREDITS)
+    s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["awaiting"]})
+    s.wait(lambda: s.holding(CREDITS) and all(s.holding(p) for p in held), "the reload", ms=6000)
+    s.press('[aria-label="返日程"]')
+    s.on(".orders .row").first.wait_for()
+    s.watch("view-settle")
+    done = len(s.finished)
+    s.release_all()
+    s.wait(lambda: len(s.finished) >= done + len(held) + 1, "the held answers to land")
+    s.settle()
+    s.page.wait_for_timeout(300)
+    s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when its reload landed")
+    s.eq(s.scroll_y(), day_at, "the day view's scroll")
+    s.never(s.toast, "a toast", ms=200)
+    s.go_settle()
+    s.eq(s.marks("bar")[b["awaiting"]]["classes"], {"bar", "paid"}, "the change, once the view is shown")
+
+    # A month in flight when the operator leaves.
+    first = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    above = settle_path(add_months(first, -1))
+    s.hold(above)
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.wait(lambda: s.holding(above), "the month above the strip to be asked for")
+    weeks = s.weeks()
+    s.press('[aria-label="返日程"]')
+    s.on(".orders .row").first.wait_for()
+    s.watch("view-settle")
+    done = len(s.finished)
+    s.release_all()
+    s.wait(lambda: len(s.finished) > done, "the held month to land")
+    s.settle()
+    s.page.wait_for_timeout(300)
+    s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when a month landed")
+    s.eq(s.scroll_y(), day_at, "the day view's scroll")
+    # The month is held, and drawn by the load that showing the view makes.
+    s.go_settle()
+    s.expect(len(s.weeks()) > len(weeks) and s.weeks()[-len(weeks):] == weeks, "the month that landed while hidden is not on the strip")
+    days = [date.fromisoformat(w[2:]) for w in s.weeks()]
+    s.expect(all(z - a == timedelta(days=7) for a, z in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    s.eq(s.strip_problems(), [], "the strip's lanes")
+    s.eq(s.writes, [], "writes by the page")
+
+
+@check("views.late-day-answers-are-not-drawn-while-hidden", old=False)
+def views_late_day(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.to_day()
+    # A save in flight when the operator leaves, with the numpad still up.
+    oid = s.t["order"]["dropoff"]
+    path = "/api/orders/" + oid
+    s.open_order(oid)
+    s.tap(".sheet.show .field-row", has_text="價錢")
+    s.keys(".sheet.show", "450")
+    s.hold(path)
+    s.press(".sheet.show #npOk")
+    s.wait(lambda: s.holding(path), "the save")
+    s.page.go_forward()
+    s.on(".cell[data-d]").first.wait_for()
+    # The settle view has a sheet of its own open, which the day view's save
+    # must leave alone.
+    s.press(s.cell(1))
+    s.on(".sheet.show .orow").first.wait_for()
+    title = s.title()
+    s.watch("view-day")
+    done = len(s.finished)
+    s.release_all()
+    s.wait(lambda: ("PATCH", path) in s.finished[done:], "the save to land")
+    s.settle()
+    s.page.wait_for_timeout(300)
+    s.eq(s.changes("view-day"), [], "changes to the hidden day view when its save landed")
+    s.eq((s.title(), s.count(".sheet.show .orow")), (title, 2), "the settle view's own sheet")
+    s.close_sheets()
+    s.to_day()
+    s.wait(lambda: s.count(".sheet.show .field-row") and s.field("價錢") == "$450", "the saved order, once the view is shown")
+    s.eq(s.title(), "送機 11:00", "the day view's sheet, back on the order")
+    s.eq(s.last_write(), ("PATCH", path, {"price": 450}), "the save")
+    s.tap(".sheet.show .sheet-x")
+
+    # A day in flight when the operator leaves.
+    near, shown = to_a_day_never_seen(s)
+    far = "/api/orders?date=" + s.day(2)
+    s.wait(lambda: s.holding(far), "the request for the day after tomorrow")
+    s.press('[aria-label="埋數"]')
+    s.on(".cell[data-d]").first.wait_for()
+    s.watch("view-day")
+    done = len(s.finished)
+    s.release_all()
+    s.wait(lambda: ("GET", far) in s.finished[done:] and ("GET", near) in s.finished[done:], "the held answers to land")
+    s.settle()
+    s.page.wait_for_timeout(300)
+    s.eq(s.changes("view-day"), [], "changes to the hidden day view when its day landed")
+    s.go_day()
+    s.eq((s.rows(), s.count(".orders .empty")), ([], 1), "the day, once the view is shown")
+    s.expect(s.date_text().startswith(s.day(2)), "the date the view was left on")
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("views.order-sheet-follows-the-showing-view", old=False)
+def views_order_host(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.to_day()
+    o = seed_demo_db._oid
+    mine, theirs = s.t["order"]["dropoff"], o(11)
+    # The day view's order, with a numpad on it, left open.
+    s.open_order(mine)
+    s.tap(".sheet.show .field-row", has_text="價錢")
+    s.keys(".sheet.show", "45")
+    s.to_settle()
+    s.eq((s.count(".sheet.show"), s.count(".scrim.show")), (0, 0), "the day view's sheet and scrim on the settle view")
+    # The settle view's order: its own rows, its own head, its own order.
+    s.open_cell(1)
+    s.open_leg(theirs)
+    s.eq(s.title(), "接機 10:15", "the settle view's order")
+    s.eq(list(s.info())[0], "單號", "the settle view's own rows")
+    s.tap(".sheet.show .field-row", has_text="停車費")
+    s.eq(s.count(".sheet.show .sheet-back"), 1, "the settle view's back button on the numpad")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "接機 10:15", "‹ went back one level")
+    s.edit("停車費", "20")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + theirs, {"parking_fee": 20}), "the settle view's save")
+    s.tap(".sheet.show .field-row", has_text="時間")
+    s.tap(".sheet.show .sheet-x")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "✕ on the settle view to close the whole stack")
+    # Back on the day view: its numpad as it was left, and ✕ one level at a time.
+    s.to_day()
+    s.eq((s.title(), s.text(".sheet.show .numpad-display")), ("改價錢", "$45"), "the day view's numpad as it was left")
+    s.eq(s.count(".sheet.show .sheet-back"), 0, "a back button on the day view's sheet")
+    s.keys(".sheet.show", "0")
+    s.tap(".sheet.show #npOk")
+    s.wait(lambda: not s.count(".sheet.show .numpad"), "the numpad to close after a save")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + mine, {"price": 450}), "the day view's save")
+    s.eq((s.title(), s.field("價錢")), ("送機 11:00", "$450"), "the day view's order after the save")
+    s.eq(list(s.info())[-1], "結算", "the day view's own rows")
+    s.tap(".sheet.show .field-row", has_text="時間")
+    s.tap(".sheet.show .sheet-x")
+    s.eq(s.title(), "送機 11:00", "✕ on the day view goes back one level")
+    s.tap(".sheet.show .sheet-x")
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "✕ on the detail to close the sheet")
+    # And once more the other way.
+    s.to_settle()
+    s.open_cell(1)
+    s.open_leg(theirs)
+    s.eq((list(s.info())[0], s.field("停車費")), ("單號", "$20"), "the settle view's order again")
+    s.eq(len(s.writes), 2, "writes")
+
+
+@check("views.late-order-answers-go-to-the-view-that-asked", old=False)
+def views_late_order(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.to_day()
+    o = seed_demo_db._oid
+    mine, theirs = s.t["order"]["landed_banner"], o(12)
+    path = "/api/orders/" + theirs
+    s.open_order(mine)
+    s.to_settle()
+    # An order asked for on the settle view and answered after it was left.
+    s.open_cell(1)
+    s.hold(path)
+    s.press(f'.sheet.show .orow[data-od="{theirs}"]')
+    s.wait(lambda: s.holding(path), "the order to be asked for")
+    s.page.go_back()
+    s.on(".orders .row").first.wait_for()
+    s.watch("view-settle")
+    done = len(s.finished)
+    s.release_all()
+    s.wait(lambda: ("GET", path) in s.finished[done:], "the order to arrive")
+    s.page.wait_for_timeout(300)
+    s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when its order arrived")
+    s.eq((s.title(), s.count(".sheet.show .field-row")), ("接機 14:20", 5), "the day view's own sheet")
+    s.to_settle()
+    s.on(".sheet.show .field-row").first.wait_for()
+    s.eq((s.title(), s.info()["單號"]), ("送機 16:30", "8800 0000 0000 0012"), "the order, once the view is shown")
+    # A cancel answered after the view was left is the settle view's to act on.
+    s.tap(".sheet.show .cancel-link")
+    s.hold(path)
+    s.press(".sheet.show .primary-btn.danger")
+    s.wait(lambda: s.holding(path), "the cancel")
+    s.page.go_back()
+    s.on(".orders .row").first.wait_for()
+    s.page.wait_for_timeout(500)      # the day view's own load on being shown
+    asked = len(s.requests)
+    s.release_all()
+    s.wait_toast("已取消 #000012")
+    s.settle()
+    s.eq((s.title(), s.count(".sheet.show .field-row")), ("接機 14:20", 5), "the day view's own sheet after the cancel landed")
+    # The settle view would reload after its write, and does not while hidden.
+    s.eq(s.asked(asked) + s.asked(asked, "/api/credits"), [], "requests made for the hidden settle view")
+    s.to_settle()
+    s.wait(lambda: s.count(".sheet.show .orow") == 1, "the day sheet without the cancelled leg")
+    s.eq(s.title(), md_label(s.back(1)) + " 星期" + WEEKDAY[s.back(1).weekday()], "the settle view's sheet after the cancel")
+    s.eq(s.last_write(), ("PATCH", path, {"status": "cancelled"}), "the cancel")
+
+
+@check("views.statement-read-answered-on-the-day-view", old=False)
+def views_statement(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    path = "/api/statements/read"
+    s.hold(path)
+    s.pick_statement()
+    s.wait(lambda: s.holding(path), "the read to be sent")
+    s.press('[aria-label="返日程"]')
+    s.on(".orders .row").first.wait_for()
+    s.answer(path, status=200, content_type="application/json", body=json.dumps(STATEMENT_READ))
+    s.wait(lambda: ("POST", path) in s.finished, "the read to be answered")
+    s.page.wait_for_timeout(300)
+    s.eq((s.count(".sheet.show"), s.count(".scrim.show")), (0, 0), "a sheet or scrim over the day view")
+    s.release_all()
+    s.open_order(s.t["order"]["dropoff"])
+    s.tap(".sheet.show .sheet-x")
+    # The statement is there when the operator comes back for it.
+    s.go_settle()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.eq((s.title(), s.text(".sheet.show .stmt-report")), ("結算單", STATEMENT_READ["report"]), "the statement, once the view is shown")
+    s.eq((s.text('[aria-label="讀結算圖"]'), s.on('[aria-label="讀結算圖"]').first.is_disabled()), ("圖", False), "the read button")
+    s.expect(s.on(".sheet.show [data-stmtgo]").first.is_enabled(), "the statement cannot be confirmed")
+    s.eq(len(s.writes), 1, "writes")
+
+
+@check("views.sheets-do-not-leak", old=False)
+def views_sheets(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.open_mark(s.bar("awaiting"))
+    batch = s.title()
+    s.to_day()
+    s.eq((s.count(".sheet.show"), s.count(".scrim.show"), s.count(".drop.show")), (0, 0, 0), "settle's sheet, scrim or overlay on the day view")
+    # The day view scrolls and takes taps.
+    s.page.evaluate("() => window.scrollTo(0, 50)")
+    s.eq(s.scroll_y(), 50, "the day view's scroll under a sheet left open on the other view")
+    s.open_order(s.t["order"]["dropoff"])
+    s.eq(s.title(), "送機 11:00", "the day view's sheet")
+    s.to_settle()
+    s.eq((s.count(".sheet.show"), s.count(".scrim.show"), s.title()), (1, 1, batch), "the settle view's sheet, as it was left")
+    s.close_sheets()
+    s.tap(s.cell(1))
+    s.on(".sheet.show .orow").first.wait_for()
+    s.close_sheets()
+    s.to_day()
+    s.eq((s.count(".sheet.show"), s.count(".scrim.show"), s.title()), (1, 1, "送機 11:00"), "the day view's sheet, as it was left")
+    # The add panel is the day view's alone.
+    s.tap(".sheet.show .sheet-x")
+    s.tap('[aria-label="入單"]')
+    s.stage("入單")
+    s.page.go_forward()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.eq((s.count(".drop.show"), s.count(".scrim.show"), s.count(".paste-box")), (0, 0, 0), "the add panel on the settle view")
+    s.eq(s.writes, [], "writes")
+
+
+@check("views.settle-listeners-stand-down-on-the-day-view", old=False)
+def views_listeners(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.go_day()
+    s.watch("view-settle")
+    # A file dragged over the day view is not the settle view's to take.
+    s.eq(s.drag("dragenter", "dragover", "drop"), {"dragenter": False, "dragover": False, "drop": False},
+         "drag events taken on the day view")
+    s.eq(s.page.eval_on_selector("#settle-drop", "e => e.className"), "drop", "the settle view's drop overlay")
+    # A resize and a scroll do not lay the hidden strip out.
+    s.page.set_viewport_size({"width": 430, "height": 700})
+    s.page.evaluate("() => window.scrollTo(0, 40)")
+    s.page.wait_for_timeout(500)
+    s.settle()
+    s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
+    s.eq(s.writes, [], "writes")
+    # Shown again, the strip is laid out for the new width.
+    s.go_settle()
+    s.eq(s.strip_problems(), [], "the strip's lanes at the new width")
+    s.eq(s.drag("dragenter"), {"dragenter": True}, "a file dragged over the settle view")
+    s.eq(s.count(".drop.show"), 1, "the drop overlay on the settle view")
+
+
+@check("views.switch-timing", old=False)
+def views_timing(s: Session) -> None:
+    ms = re.compile(r"\d+ ms")
+    s.open("/?perf=1", ".orders .row")
+    s.wait_toast(ms)
+    s.page.wait_for_timeout(2600)
+    # To settle: from the tap to the paint of what the server answered.
+    s.hold(CREDITS)
+    s.press('[aria-label="埋數"]')
+    s.wait(lambda: s.holding(CREDITS), "the settle view's load")
+    s.page.wait_for_timeout(700)
+    s.eq(s.toast(), "", "a readout before the data is painted")
+    s.release_all()
+    took = int(s.wait_toast(ms).split()[0])
+    s.expect(700 <= took < 5000, f"day to settle reported {took} ms with the answer held for 700")
+    s.settle()
+    s.page.wait_for_timeout(2600)
+    # A month scrolled in, or a change, is not a navigation.
+    s.tap('[aria-label="前一個月"]')
+    s.never(s.toast, "a readout for scrolling the strip", ms=400)
+    # Back to the day view, which paints what it holds at once.
+    s.press('[aria-label="返日程"]')
+    took = int(s.wait_toast(ms).split()[0])
+    s.expect(took < 500, f"settle to day reported {took} ms")
+    s.settle()
+    s.page.wait_for_timeout(2600)
+    # Back and forward are not taps: nothing to time from.
+    s.page.go_back()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.never(s.toast, "a readout for back", ms=500)
 
 
 # ---- running ----

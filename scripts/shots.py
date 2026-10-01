@@ -73,15 +73,6 @@ class Shooter(Driver):
     def settle_page(self) -> None:
         self.open("/settle", ".cell[data-d]")
 
-    def reach(self, selector: str) -> None:
-        """Bring a mark onto the strip: it is drawn only once its month is
-        loaded, and the strip loads backwards a month at a time."""
-        for _ in range(8):
-            if self.on(selector).count():
-                return
-            self.tap('[aria-label="前一個月"]')
-        raise RuntimeError(f"not on the strip after 8 months back: {selector}")
-
     def open_mark(self, selector: str, ready: str) -> None:
         """A bar or chip: the first tap lights its relation, the second opens it."""
         self.settle_page()

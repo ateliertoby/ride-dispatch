@@ -253,6 +253,15 @@ class Driver:
             self.page.wait_for_timeout(50)
         self.settle()
 
+    def reach(self, selector: str) -> None:
+        """Bring a mark onto the strip: it is drawn only once its month is
+        loaded, and the strip loads backwards a month at a time."""
+        for _ in range(8):
+            if self.on(selector).count():
+                return
+            self.tap('[aria-label="前一個月"]')
+        raise RuntimeError(f"not on the strip after 8 months back: {selector}")
+
     def keys(self, host: str, digits: str) -> None:
         """Type on the on-screen numpad inside `host`."""
         for d in digits:
