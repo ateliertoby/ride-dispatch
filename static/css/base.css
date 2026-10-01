@@ -77,6 +77,31 @@ button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: tran
   padding-top: calc(10px + env(safe-area-inset-top));
   border-bottom: 1px solid var(--line);
 }
+/* ---- shell banner ---- */
+/* Above the header and the scrim, so one can be read and tapped with a sheet
+   open; level with the sheets, which come later in the document and so lie
+   over it where they reach the top. Named apart from the day view's .banner
+   tag, which is a different thing. The tint is translucent in the dark
+   palette, hence the ground painted under it. */
+.shell-banner {
+  position: sticky; top: 0; z-index: 21;
+  display: block; width: 100%; border: none; cursor: pointer;
+  height: calc(44px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 14px 0;
+  background: linear-gradient(var(--banner-bg), var(--banner-bg)) var(--bg);
+  color: var(--banner-fg); font-size: 16px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The rule above sets display, which would otherwise undo the attribute. */
+.shell-banner[hidden] { display: none; }
+/* A banner takes the top of the screen, and with it the room the header
+   leaves for the status bar; the header then stays below it, by the
+   banner's height. */
+body:has(> .shell-banner:not([hidden])) .header {
+  top: calc(44px + env(safe-area-inset-top));
+  padding-top: 10px;
+}
+
 .header-row { display: flex; align-items: center; gap: 8px; }
 /* Also worn by links (the cross-page jumps), hence text-decoration. */
 .nav-btn, .icon-btn {
