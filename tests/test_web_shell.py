@@ -1,4 +1,6 @@
 import os
+import posixpath
+import re
 import shutil
 import tempfile
 
@@ -51,6 +53,42 @@ def test_an_asset_is_served_under_the_current_version_only(client):
     assert client.get(f"/assets/{v}/no-such-file.js").status_code == 404
 
 
+def _asset_urls(html: str) -> list[str]:
+    return re.findall(r'(?:href|src)="(/assets/[^"]+)"', html)
+
+
+def test_the_shell_links_its_styles_and_module_by_versioned_address(client):
+    v = web.asset_version()
+    html = client.get("/").get_data(as_text=True)
+    urls = _asset_urls(html)
+    assert urls == [f"/assets/{v}/css/base.css", f"/assets/{v}/css/order-sheet.css",
+                    f"/assets/{v}/css/day.css", f"/assets/{v}/js/main.js"]
+    assert f'<script type="module" src="/assets/{v}/js/main.js"></script>' in html
+    for url in urls:
+        res = client.get(url)
+        assert res.status_code == 200, url
+        assert res.mimetype == ("text/css" if url.endswith(".css") else "text/javascript"), url
+
+
+def test_every_module_the_shell_imports_is_served_as_javascript(client):
+    """A module's imports are relative, so they resolve under the same
+    versioned address; one served with another type stops the whole app."""
+    v = web.asset_version()
+    seen, queue = set(), ["js/main.js"]
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        res = client.get(f"/assets/{v}/{path}")
+        assert res.status_code == 200, path
+        assert res.mimetype == "text/javascript", path
+        for spec in re.findall(r"""from\s+'(\.[^']+)'""", res.get_data(as_text=True)):
+            queue.append(posixpath.normpath(posixpath.join(posixpath.dirname(path), spec)))
+    assert {"js/main.js", "js/router.js", "js/day/index.js", "js/order-sheet.js",
+            "js/shared.js", "js/api.js", "js/store.js", "js/stream.js"} <= seen
+
+
 def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
     import mimetypes
     monkeypatch.setattr(mimetypes, "guess_type", lambda *a, **k: ("text/plain", None))
@@ -58,6 +96,16 @@ def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
     assert client.get(f"/assets/{v}/js/api.js").mimetype == "text/javascript"
     assert client.get(f"/assets/{v}/css/base.css").mimetype == "text/css"
     assert client.get(f"/assets/{v}/manifest.webmanifest").mimetype == "application/manifest+json"
+
+
+def test_the_shell_holds_the_day_view_and_one_toast(client):
+    html = client.get("/").get_data(as_text=True)
+    assert 'id="view-day" class="view view-day" hidden' in html
+    assert 'id="view-settle" class="view view-settle" hidden' in html
+    assert html.count('id="toast"') == 1
+    # Inline handlers resolve on window; the modules publish theirs under rd.
+    handlers = re.findall(r'onclick="([^"]+)"', html)
+    assert handlers and all(h.startswith("rd.day.") for h in handlers)
 
 
 def test_an_asset_path_cannot_leave_the_static_folder(client):

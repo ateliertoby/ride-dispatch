@@ -12,7 +12,30 @@
 <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
 <title>Ride Dispatch</title>
 <meta name="asset-version" content="{{ asset_version }}">
+<link rel="stylesheet" href="{{ asset('css/base.css') }}">
+<link rel="stylesheet" href="{{ asset('css/order-sheet.css') }}">
+<link rel="stylesheet" href="{{ asset('css/day.css') }}">
 </head>
 <body>
+<div id="view-day" class="view view-day" hidden>
+<div class="header">
+  <div class="header-row">
+    <button class="nav-btn" onclick="rd.day.go(-1)" aria-label="前一日">&larr;</button>
+    <button class="date-btn" id="dateBtn" onclick="rd.day.goToday()"></button>
+    <button class="nav-btn" onclick="rd.day.go(1)" aria-label="後一日">&rarr;</button>
+    <a class="icon-btn" href="/settle" data-nav aria-label="埋數">$</a>
+    <button class="icon-btn add-btn" onclick="rd.day.openAdd()" aria-label="入單">+</button>
+  </div>
+  <div class="summary" id="day-summary"></div>
+</div>
+<div class="chips" id="day-chips"></div>
+<div class="orders" id="orders"></div>
+<div class="scrim" id="day-scrim" onclick="rd.day.closeOverlays()"></div>
+<div class="drop" id="day-drop"></div>
+<div class="sheet" id="day-sheet"></div>
+</div>
+<div id="view-settle" class="view view-settle" hidden></div>
+<div class="toast" id="toast"></div>
+<script type="module" src="{{ asset('js/main.js') }}"></script>
 </body>
 </html>
