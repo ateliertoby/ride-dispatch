@@ -86,6 +86,12 @@ def pickup_point(order: Order, source: str) -> str | None:
     return DEFAULT_CAR_PARK if _must_park(order, source) else "富豪"
 
 
+def pickup_point_fields(point: str) -> dict:
+    """What moving an order's meeting point writes: the place and its
+    first-hour charge, in one write, so the two never disagree."""
+    return {"pickup_point": point, "parking_fee": PICKUP_POINTS[point]}
+
+
 def parking_fee(order: Order, source: str) -> float:
     return PICKUP_POINTS[DEFAULT_CAR_PARK] if _must_park(order, source) else 0.0
 
