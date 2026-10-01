@@ -732,6 +732,17 @@ function scrollToWeek(id, smooth) {
 }
 // Put a month's first week row at the top of the strip.
 function scrollToMonth(key, smooth) { scrollToWeek(monthWeekId(key), smooth); }
+// Put a week row at the top of a strip that may be too short to scroll that
+// far yet: a strip just refounded holds one month, which is about a screen.
+// Where the scroll falls short the row is pinned, so each paint that grows
+// the strip asks for it again until it is there. Without the pin the first
+// growth would pin the row then on top, which is the month's first, and the
+// row asked for would never be reached.
+function pinWeek(id) {
+  scrollToWeek(id);
+  const el = byId(id);
+  if (el && Math.abs(el.getBoundingClientRect().top - stripTop()) >= 1) pinId = id;
+}
 
 // A repaint rebuilds every week row, and rows above the viewport change height
 // whenever a month is prepended or a lane appears -- which would slide the
@@ -986,7 +997,7 @@ async function revealFocus() {
   // The month arrives asynchronously, by which time the operator can have
   // dropped the focus or moved to another one.
   if (focus !== want) return;
-  scrollToWeek(weekIdOf(d));
+  pinWeek(weekIdOf(d));
 }
 
 // ---- sheet ----
