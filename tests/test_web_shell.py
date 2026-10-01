@@ -51,6 +51,15 @@ def test_an_asset_is_served_under_the_current_version_only(client):
     assert client.get(f"/assets/{v}/no-such-file.js").status_code == 404
 
 
+def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
+    import mimetypes
+    monkeypatch.setattr(mimetypes, "guess_type", lambda *a, **k: ("text/plain", None))
+    v = web.asset_version()
+    assert client.get(f"/assets/{v}/js/api.js").mimetype == "text/javascript"
+    assert client.get(f"/assets/{v}/css/base.css").mimetype == "text/css"
+    assert client.get(f"/assets/{v}/manifest.webmanifest").mimetype == "application/manifest+json"
+
+
 def test_an_asset_path_cannot_leave_the_static_folder(client):
     v = web.asset_version()
     # The first two name files that exist one level above static/. The last

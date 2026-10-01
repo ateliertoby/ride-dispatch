@@ -72,6 +72,14 @@ app = Flask(
 SHELL = os.environ.get("RIDE_SHELL", "") == "1"
 
 _MANIFEST_MIMETYPE = "application/manifest+json"
+# Named here rather than guessed: the guess comes from a table the operating
+# system can override, and a browser refuses a module script or a stylesheet
+# that arrives as anything else.
+_ASSET_MIMETYPES = {
+    ".js": "text/javascript",
+    ".css": "text/css",
+    ".webmanifest": _MANIFEST_MIMETYPE,
+}
 _VERSION_TEMPLATES = ("app.html", "sw.js")
 _asset_version_cache = None
 
@@ -140,7 +148,7 @@ def versioned_asset(version, filename):
     # address promises the content, and it is cached as immutable.
     if version != asset_version():
         abort(404)
-    mimetype = _MANIFEST_MIMETYPE if filename.endswith(".webmanifest") else None
+    mimetype = _ASSET_MIMETYPES.get(os.path.splitext(filename)[1])
     resp = send_from_directory(app.static_folder, filename, mimetype=mimetype)
     # Replaces the "no-cache" every file response starts with.
     resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
