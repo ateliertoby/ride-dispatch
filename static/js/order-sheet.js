@@ -184,6 +184,9 @@ function cancelConfirmView(sheet) {
     '<button class="ghost-btn" onclick="rd.sheet.pop()">返回</button>'
   );
   sheet.querySelector('#cancelGo').addEventListener('click', async function () {
+    // Read at the tap: by the time the server answers, the operator can have
+    // switched to the other view, and the host is then that view's.
+    const asked = host;
     this.disabled = true;
     this.textContent = '取消緊…';
     const id = o.order_id;
@@ -195,7 +198,7 @@ function cancelConfirmView(sheet) {
       this.textContent = '確認取消';
       return;
     }
-    host.cancelled(id);
+    asked.cancelled(id);
   });
 }
 
