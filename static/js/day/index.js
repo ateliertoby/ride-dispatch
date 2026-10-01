@@ -151,6 +151,8 @@ function goToday() {
 // The store paints the day's last known rows at once, when it has them, and
 // again when the server's answer differs.
 async function load() {
+  // A hidden view neither asks nor draws: showing it loads.
+  if (!showing) return;
   byId('dateBtn').innerHTML =
     esc(cur) + '<small>星期' + weekday(cur) + (cur === fmtDate(new Date()) ? ' · 今日' : '') + '</small>';
   const date = cur;
@@ -159,6 +161,8 @@ async function load() {
     landed = await store.read('orders:' + date, '/api/orders?date=' + date, data => {
       // The operator can have moved to another day while this was in flight.
       if (date !== cur) return;
+      // Or to the other view, which hides this one.
+      if (!showing) return;
       orders = data.orders;
       render();
       reportPerf();
@@ -419,6 +423,9 @@ function popView() {
   else closeSheet();
 }
 function renderSheet() {
+  // Not while hidden, when the order sheet would be drawn through the other
+  // view's host. The stack is kept; the load on show redraws the detail.
+  if (!showing) return;
   const el = byId('day-' + stackHost);
   el.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
   const view = sheetStack[sheetStack.length - 1];
