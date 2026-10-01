@@ -336,6 +336,7 @@ async function load(seed) {
   const keys = loadedMonths();
   if (!keys.length) keys.push(seed || todayMonth());
   const g = gen;
+  const asked = navAt;
   let payloads, credits;
   try {
     // The ledger comes with the months: the header counts it and the sheet
@@ -349,6 +350,10 @@ async function load(seed) {
     credits = bodies.pop();
     payloads = bodies;
   } catch (e) {
+    // The tap this load was timed from has had its answer, and it was a
+    // failure: a paint made later for another reason is not timed from it.
+    // Unless a newer showing has set the mark since, which is then its own.
+    if (navAt === asked) navAt = 0;
     if (!(e instanceof AuthExpired)) toast('載入失敗');
     return;
   }

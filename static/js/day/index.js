@@ -157,6 +157,7 @@ async function load() {
   revealId = null;
   byId('dateBtn').innerHTML = dateHtml(cur);
   const date = cur;
+  const asked = navAt;
   // Placeholder rows stand in only for a list that has never been drawn, and
   // only while the store has nothing to draw it from. A day reached later
   // keeps the previous day's rows until its own arrive, so the list is never
@@ -184,12 +185,20 @@ async function load() {
     // Nothing came, and nothing was ever drawn: the placeholders give way to
     // the empty line rather than promise rows for ever.
     if (!drawn && date === cur && showing) { orders = []; render(); }
+    // The tap this load was timed from has had its answer, and it was a
+    // failure: a paint made later for another reason is not timed from it.
+    // Unless a newer tap has set the mark since, which is then its own.
+    if (navAt === asked) navAt = 0;
     // An expired login is announced by the shell, not by a toast.
     if (!(e instanceof AuthExpired)) toast('載入失敗');
     return;
   }
   // The request failed with the day's last known rows left on screen.
-  if (!landed) { toast('載入失敗'); return; }
+  if (!landed) {
+    if (navAt === asked) navAt = 0;
+    toast('載入失敗');
+    return;
+  }
   // The neighbouring days are warmed only once this day's own answer is in,
   // so they never compete with it, and only for the day still showing.
   if (date !== cur) return;
