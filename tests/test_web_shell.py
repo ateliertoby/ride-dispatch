@@ -315,3 +315,15 @@ def test_the_document_carries_no_script_or_style_of_its_own(client):
         assert "<style" not in html, path
         assert "function " not in html, path
 
+
+
+def test_the_order_sheet_names_each_pickup_point_at_the_servers_charge():
+    """The sheet prints each meeting point's first-hour charge under its name
+    from a table of its own, the twin of ingest.PICKUP_POINTS, which is what
+    the server writes when a point is chosen. The two must not drift."""
+    from ride_dispatch.ingest import PICKUP_POINTS
+    with open(os.path.join(web.app.static_folder, "js", "order-sheet.js"), encoding="utf-8") as f:
+        table = re.search(r"^const PICKUP_POINTS = \{(.*)\};$", f.read(), re.M).group(1)
+    twin = {name: float(fee) for name, fee in re.findall(r"'([^']+)':\s*([\d.]+)", table)}
+    assert twin == PICKUP_POINTS
+    assert list(twin) == list(PICKUP_POINTS)

@@ -1,51 +1,82 @@
 /* ---- the order sheet ----
    The order's own sheet: its details, the fields that can be edited, and
    the numpad that edits them (order-sheet.js).  Linked by the shell, after
-   base.css, for every view that opens it. */
-.info { padding: 10px 0 4px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-.info-row { display: flex; gap: 10px; font-size: 14px; line-height: 1.65; }
-.info-row .k { color: var(--text-3); flex-shrink: 0; width: 3.2em; }
-.info-row .v { color: var(--text); word-break: break-all; }
-.info-row .v a { color: var(--pickup-fg); text-decoration: none; }
+   base.css, for every view that opens it. Drawn in the board's manner:
+   hairlines, squared controls, figures in the mono face, and colour only on
+   money that needs attention and on the destructive action. */
 
+/* The heading: what the board's code column shows for the order, then its
+   time. */
+.sheet-title .hd-code { font-size: 22px; letter-spacing: -.02em; }
+.sheet-title .hd-code + .num { margin-left: 4px; font-size: 16px; font-weight: 400; color: var(--text-2); }
+
+/* What the order says about itself: text, read not edited, so it is set as a
+   block of label and value lines between two hairlines, not ruled line by
+   line like the figures under it. */
+.info { padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.info-row { display: flex; gap: 12px; font-size: 14px; line-height: 1.65; }
+.info-row .k { color: var(--text-2); flex-shrink: 0; width: 3.2em; font-size: 13px; }
+.info-row .v { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+/* A link is ink with a rule under it: colour is kept for status and money. */
+.info-row .v a, .info-link {
+  color: var(--text); text-decoration: underline;
+  text-decoration-color: var(--text-3); text-underline-offset: 3px;
+}
+.info-row .v .arrow { color: var(--text-3); }
+.info-row .v .fine { color: var(--red); }
+/* The net figure, where a view states one, is the sheet's bottom line. */
+.info-row.sum .k { color: var(--text); font-weight: 600; }
+.info-row.sum .v { font-family: var(--mono); font-weight: 700; }
+
+/* The editable figures: a ledger, label left and figure right, a hairline
+   under each. */
 .field-row {
-  display: flex; align-items: center; width: 100%;
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
   background: none; border: none; border-bottom: 1px solid var(--line);
-  padding: 14px 2px; font-size: 16px; cursor: pointer; text-align: left;
+  padding: 13px 0 12px; font-size: 14px; line-height: 1.35; cursor: pointer; text-align: left;
 }
 .field-row:active { background: var(--surface-press); }
 .field-row .fk { color: var(--text-2); flex: 1; }
-.field-row .fv { font-weight: 650; font-variant-numeric: tabular-nums; }
-.field-row .fv.unset { color: var(--amber); font-weight: 500; }
-.field-row .chev { color: var(--text-3); margin-left: 10px; font-size: 14px; }
+.field-row .fv { font-family: var(--mono); font-size: 16px; }
+.field-row .fv.unset { font-family: var(--han); font-size: 13px; font-weight: 600; color: var(--amber); }
+.field-row .chev { color: var(--text-3); font-family: var(--mono); font-size: 14px; }
 .fr-split { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
 .fr-split .field-row { border-bottom: none; }
 .fr-waive {
-  flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
-  background: var(--key-bg); color: var(--green);
-  font-size: 14px; font-weight: 650; padding: 9px 16px;
+  flex-shrink: 0; border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
+  background: none; color: var(--text);
+  font-size: 14px; font-weight: 600; padding: 7px 14px;
 }
-.fr-waive:active { background: var(--key-press); }
-.pp-row {
-  display: flex; align-items: center; gap: 8px;
-  border-bottom: 1px solid var(--line); padding: 10px 2px;
-}
-.pp-row .fk { color: var(--text-2); flex: 1; font-size: 16px; }
+.fr-waive:active { background: var(--surface-press); }
+/* The meeting point: equal segments, each place over its first-hour charge,
+   the chosen one solid. A car park that is none of ours stands as one more
+   segment, and is not a control. */
+.pp-row { border-bottom: 1px solid var(--line); padding: 11px 0 12px; }
+.pp-row .fk { display: block; font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); margin-bottom: 7px; }
+.pp-seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
 .pp-opt {
-  flex-shrink: 0; border: none; border-radius: 9px; cursor: pointer;
-  background: var(--key-bg); color: var(--text-2);
-  font-size: 14px; font-weight: 650; padding: 9px 14px;
+  display: block; border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
+  background: none; color: var(--text-2); text-align: center;
+  font-size: 14px; line-height: 1.35; padding: 8px 2px 7px; overflow-wrap: anywhere;
 }
-.pp-opt:active { background: var(--key-press); }
-.pp-opt.on { background: var(--blue-bg); color: var(--blue); }
+.pp-opt:active { background: var(--surface-press); }
+.pp-opt.on { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
+.pp-opt small { display: block; font-size: 11px; font-weight: 400; margin-top: 1px; }
+span.pp-opt { cursor: default; }
 
+/* Destructive: a red outline here, solid only on the step that confirms. */
 .cancel-link {
-  display: block; margin: 4px auto 0; padding: 10px 18px;
-  background: none; border: none; cursor: pointer;
-  color: var(--red); font-size: 13px; font-weight: 500; opacity: .75;
+  display: block; width: 100%; margin-top: 8px; padding: 12px;
+  background: none; border: 1px solid var(--red); border-radius: 3px; cursor: pointer;
+  color: var(--red); font-size: 15px; font-weight: 600;
 }
-.cancel-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
-.tg-link { display: block; text-align: center; margin-top: 10px; font-size: 13px; color: var(--text-3); text-decoration: none; padding: 8px; }
+.cancel-link:active { background: var(--surface-press); }
+.cancel-info { padding: 4px 0 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
+.tg-link {
+  display: block; text-align: center; margin-top: 6px; padding: 10px; font-size: 13px;
+  color: var(--text-2); text-decoration: underline;
+  text-decoration-color: var(--text-3); text-underline-offset: 3px;
+}
 
 .numpad-display {
   text-align: center; font-size: 40px; font-weight: 700;
@@ -61,16 +92,22 @@
 }
 .key:active { background: var(--key-press); }
 .key.fn { font-size: 18px; color: var(--text-2); }
-/* A field a batch's frozen total was summed from: its value stays readable
-   and the pencil gives way to why it cannot be edited. */
+/* A field a batch's frozen total was summed from: its figure stays readable
+   as plain text, with why it cannot be edited said beside its label. */
 .field-row.locked { cursor: default; }
 .field-row.locked:active { background: none; }
-.field-row.locked .chev { font-size: 12px; }
+.field-row.locked .fk { flex: none; }
+.field-row.locked .chev {
+  order: 1; margin-right: auto; align-self: center;
+  font-family: var(--han); font-size: 11.5px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2);
+}
+.field-row.locked .fv { order: 2; }
 .cancel-note { text-align: center; margin: 4px auto 0; padding: 10px 18px; font-size: 13px; color: var(--text-3); }
 /* A view's own row that leads somewhere, drawn as the value it is. */
 .info-link {
   background: none; border: none; padding: 0; cursor: pointer; text-align: left;
-  font: inherit; color: var(--pickup-fg);
+  font: inherit;
 }
 
 /* Every numpad screen follows one rule: the keypad is bottommost (nothing

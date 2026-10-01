@@ -23,13 +23,20 @@
 // published under window.rd.sheet.
 
 import { $, apiWrite, collectContactLines, esc, expectedOf, isFlightPickup, money,
-         orderTime, platform, shortId, svcBadge, svcLabel, toast } from './shared.js';
+         orderTime, platform, shortId, svcLabel, tight, toast } from './shared.js';
 import { AuthExpired } from './api.js';
 
 let host = null;
 // Both views stay mounted, so "the page's host" is whichever view is showing;
 // that view sets it when it is shown and before it opens an order.
 export function useOrderHost(h) { host = h; }
+
+// Leads every view this file draws. The stylesheet keys on it to give the
+// heading and the buttons a hosting view supplies the same manner as the rest
+// of the sheet, whichever view's element the sheet is drawn in.
+const MARK = '<span class="os" hidden></span>';
+// A figure in the mono face. Takes text, not markup.
+const num = text => '<span class="num">' + tight(esc(text)) + '</span>';
 
 // A batch's expected total was frozen from these fields, and cancelling would
 // take the order out of that total, so the server refuses both on a batched
@@ -58,29 +65,31 @@ export function detailView(sheet) {
   if (p === 'ride') {
     if (o.passenger_name) rows.push(['乘客', esc(o.passenger_name)]);
     for (const [cl, cv] of collectContactLines(o)) {
-      rows.push([esc(cl), '<a href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
+      rows.push([esc(cl), '<a class="num" href="tel:' + esc(cv.replace(/\s+/g, '')) + '">' + esc(cv) + '</a>']);
     }
     if (o.flight_number) {
-      let f = esc(o.flight_number);
-      if (o.flight_status === 'gate' && o.flight_gate) f += ' · 已到閘 ' + esc(o.flight_gate);
-      else if (o.flight_status === 'landed' && o.flight_eta) f += ' · 已降落 ' + esc(o.flight_eta);
-      else if (o.flight_eta) f += ' · 預計 ' + esc(o.flight_eta);
-      else if (o.flight_scheduled) f += ' · 預定 ' + esc(o.flight_scheduled);
+      let f = num(o.flight_number);
+      if (o.flight_status === 'gate' && o.flight_gate) f += ' · 已到閘 ' + num(o.flight_gate);
+      else if (o.flight_status === 'landed' && o.flight_eta) f += ' · 已降落 ' + num(o.flight_eta);
+      else if (o.flight_eta) f += ' · 預計 ' + num(o.flight_eta);
+      else if (o.flight_scheduled) f += ' · 預定 ' + num(o.flight_scheduled);
       rows.push(['航班', f]);
     }
     if (o.vehicle_type) rows.push(['車型', esc(o.vehicle_type)]);
-    if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span style="color:var(--text-3)">&rarr;</span> ' + esc(o.dropoff)]);
+    if (o.pickup) rows.push(['路線', esc(o.pickup) + '<br><span class="arrow">&rarr;</span> ' + esc(o.dropoff)]);
     if (o.driver_notes) rows.push(['備註', esc(o.driver_notes)]);
   }
   // What the platform took back, and what the trip is worth after it.  The row
   // above shows the gross, so without this the sheet would not explain why the
   // settlement figure is smaller.
   if (o.penalty_fee > 0) {
-    rows.push(['判罰', esc(money(-o.penalty_fee) + '（淨收 ' + money(expectedOf(o)) + '）')]);
+    rows.push(['判罰', '<span class="fine">' + num(money(-o.penalty_fee)) + '</span>（淨收 ' + num(money(expectedOf(o))) + '）']);
   }
   rows.push(...host.rowsAfter(o));
+  // The net figure is the sheet's bottom line wherever a view states one.
   const info = '<div class="info">' + rows.map(r =>
-    '<div class="info-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>'
+    '<div class="info-row' + (r[0] === '淨收' ? ' sum' : '') + '"><span class="k">' + r[0] +
+    '</span><span class="v">' + r[1] + '</span></div>'
   ).join('') + '</div>';
 
   // Where a flight pickup meets the passenger. Choosing one also sets that
@@ -89,11 +98,12 @@ export function detailView(sheet) {
   let pointRow = '';
   if (p === 'ride' && isPickup) {
     const cur = o.pickup_point || '';
-    const opts = PICKUP_POINTS.map(pt =>
-      '<button class="pp-opt' + (pt === cur ? ' on' : '') + '" onclick="rd.sheet.setPickupPoint(\'' + pt + '\')">' + pt + '</button>');
+    const opts = Object.entries(PICKUP_POINTS).map(([pt, fee]) =>
+      '<button class="pp-opt' + (pt === cur ? ' on' : '') + '" onclick="rd.sheet.setPickupPoint(\'' + pt + '\')">' +
+      '<span class="pp-n">' + pt + '</span><small>' + num(money(fee)) + '</small></button>');
     // A car park HKIA reported that is not one of ours shows as it was named.
-    if (cur && !PICKUP_POINTS.includes(cur)) opts.push('<span class="pp-opt on">' + esc(cur) + '</span>');
-    pointRow = '<div class="pp-row"><span class="fk">上車點</span>' + opts.join('') + '</div>';
+    if (cur && !(cur in PICKUP_POINTS)) opts.push('<span class="pp-opt on"><span class="pp-n">' + esc(cur) + '</span></span>');
+    pointRow = '<div class="pp-row"><span class="fk">上車點</span><div class="pp-seg">' + opts.join('') + '</div></div>';
   }
 
   const fields = editableFields(o).map(([key, fLabel]) => {
@@ -106,10 +116,15 @@ export function detailView(sheet) {
       else value = '$' + $(v || 0);
     }
     const frozen = locked && BATCH_LOCKED.has(key);
-    const row = '<button class="field-row' + (frozen ? ' locked' : '') + '" onclick="rd.sheet.editField(\'' + key + '\')">' +
-      '<span class="fk">' + fLabel + '</span>' +
-      '<span class="fv' + (unset ? ' unset' : '') + '">' + esc(value) + '</span>' +
-      '<span class="chev">' + (frozen ? '已結算' : '&#9998;') + '</span></button>';
+    const cells = '<span class="fk">' + fLabel + '</span>' +
+      '<span class="fv' + (unset ? ' unset' : '') + '">' + (unset ? esc(value) : tight(esc(value))) + '</span>';
+    // A frozen field is text, not a control: it reads as a figure with the
+    // reason beside its label. A tap on it still says what to do about it.
+    const row = frozen
+      ? '<div class="field-row locked" onclick="rd.sheet.editField(\'' + key + '\')">' + cells +
+        '<span class="chev">已結算</span></div>'
+      : '<button class="field-row" onclick="rd.sheet.editField(\'' + key + '\')">' + cells +
+        '<span class="chev">&rsaquo;</span></button>';
     // Waiving the parking fee is the everyday action (the pickup default often
     // turns out not to be charged), so it gets a one-tap pill; any other
     // amount is rare and goes through the numpad as usual.
@@ -121,10 +136,12 @@ export function detailView(sheet) {
     return lead + row;
   }).join('');
 
-  sheet.insertAdjacentHTML('beforeend',
-    host.head('<span class="badge ' + svcBadge(o) + '">' + label + '</span> ' +
-      '<span style="font-variant-numeric:tabular-nums">' + esc(orderTime(o)) + '</span>',
-      host.subtitle ? host.subtitle(o) : '#' + esc(shortId(o.order_id))) +
+  // The heading leads with what the board's code column shows for the order:
+  // a flight pickup's flight number, any other order's service.
+  const code = isPickup && o.flight_number ? num(o.flight_number) : esc(label);
+  sheet.insertAdjacentHTML('beforeend', MARK +
+    host.head('<span class="hd-code">' + code + '</span> ' + num(orderTime(o)),
+      host.subtitle ? host.subtitle(o) : num('#' + shortId(o.order_id))) +
     info + fields +
     (p === 'ride' ? '<a class="tg-link" href="https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '') +
     (locked
@@ -156,7 +173,10 @@ function editField(key) {
 
 function waiveParking() { host.patch({ parking_fee: 0 }); }
 
-const PICKUP_POINTS = ['P1', 'P4', '富豪'];
+// JS twin of ingest.py:PICKUP_POINTS -- keep in sync. Each place and its
+// first-hour charge, which the server writes when the place is chosen; the
+// sheet shows it under the name so the choice is made knowing its cost.
+const PICKUP_POINTS = { 'P1': 35, 'P4': 32, '富豪': 0 };
 
 function setPickupPoint(pt) {
   const o = host.order();
@@ -177,8 +197,8 @@ function cancelConfirmView(sheet) {
     orderTime(o) + (o.passenger_name ? ' · ' + o.passenger_name : ''),
     o.pickup ? o.pickup + ' → ' + o.dropoff : '',
   ].filter(Boolean).map(esc).join('<br>');
-  sheet.insertAdjacentHTML('beforeend',
-    host.head('取消訂單', '#' + esc(shortId(o.order_id))) +
+  sheet.insertAdjacentHTML('beforeend', MARK +
+    host.head('取消訂單', num('#' + shortId(o.order_id))) +
     '<div class="cancel-info">' + lines + '</div>' +
     '<button class="primary-btn danger" id="cancelGo">確認取消</button>' +
     '<button class="ghost-btn" onclick="rd.sheet.pop()">返回</button>'

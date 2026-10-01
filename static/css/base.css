@@ -216,7 +216,7 @@ body:has(> .shell-banner:not([hidden])) .header {
   background: var(--text); color: var(--bg); font-size: 17px; font-weight: 700; cursor: pointer;
 }
 .primary-btn:disabled { opacity: .35; }
-.primary-btn.danger { background: var(--red); color: #fff; }
+.primary-btn.danger { background: var(--red); color: var(--on-solid); }
 .ghost-btn {
   width: 100%; margin-top: 8px; padding: 13px; border: none; border-radius: 12px;
   background: var(--key-bg); color: var(--text); font-size: 15px; font-weight: 600; cursor: pointer;
@@ -239,11 +239,56 @@ body:has(> .shell-banner:not([hidden])) .header {
 .badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
 .badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
 
+/* ---- the board's manner ----
+   The day view's panels, and the order's own sheet wherever it is opened,
+   are drawn the way the board is: flat, squared, hairlines for edges, the
+   primary action solid ink and everything else an outline. The settle view's
+   own sheets keep the rules above.
+   .board is set on a panel's element and gives it the manner whatever it
+   holds. .sheet:has(> .os) is a panel that currently holds one of
+   order-sheet.js's views (each begins with an .os mark): the panel keeps the
+   shape its view gave it, and the heading and buttons that view supplied
+   take the manner of the sheet they frame.
+   :where() keeps these rules at the weight of the ones they replace, so
+   they win by coming later and a view's own stylesheet can still say
+   otherwise. */
+.sheet.board {
+  border-radius: 0; border-top: 1px solid var(--line);
+  padding: 14px 16px calc(18px + env(safe-area-inset-bottom));
+}
+:where(.board) {
+  .grab { display: none; }
+  .sheet-head { padding-top: 0; }
+}
+:where(.board, .sheet:has(> .os)) {
+  .sheet-head { gap: 10px; }
+  .sheet-title { flex: 1; min-width: 0; font-size: 19px; line-height: 1.3; }
+  .sheet-x {
+    flex-shrink: 0; width: 36px; height: 36px; margin-right: -10px;
+    background: none; border-radius: 3px; font-family: var(--mono); font-size: 16px;
+  }
+  .sheet-x:active { background: var(--surface-press); color: var(--text); }
+  .sheet-sub { font-size: 12px; line-height: 1.35; margin-bottom: 10px; }
+  .primary-btn { margin-top: 12px; padding: 15px; border-radius: 3px; font-size: 16px; }
+  .ghost-btn {
+    padding: 12px; border: 1px solid var(--line); border-radius: 3px;
+    background: none; font-size: 15px;
+  }
+  .ghost-btn:active { background: var(--surface-press); }
+}
+/* The settle view's own back control is styled by a rule in its stylesheet,
+   which comes later; inside the order's sheet this one has to outweigh it. */
+.sheet:has(> .os) .sheet-back {
+  width: 36px; height: 36px; margin-left: -10px; padding: 0;
+  background: none; border-radius: 3px; font-family: var(--mono); font-size: 20px; line-height: 1;
+}
+.sheet:has(> .os) .sheet-back:active { background: var(--surface-press); color: var(--text); }
+
 .toast {
   position: fixed; z-index: 30; left: 50%; transform: translateX(-50%) translateY(20px);
   bottom: calc(30px + env(safe-area-inset-bottom));
   background: var(--text); color: var(--bg);
-  padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+  padding: 10px 16px; border-radius: 3px; font-size: 14px; font-weight: 600;
   opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none;
   max-width: 85%;
 }
