@@ -1009,6 +1009,32 @@ def day_timing(s: Session) -> None:
     s.eq(s.page.evaluate("() => localStorage.getItem('perf')"), None, "the key after ?perf=0")
 
 
+@check("day.timing-readout-after-a-failed-load")
+def day_timing_failed(s: Session) -> None:
+    """A date tap whose load fails must not be what the next paint is timed
+    from: that paint was asked for by nothing the operator did."""
+    ms = re.compile(r"\d+ ms")
+    s.allow("http 500", "status of 500")
+    far = "/api/orders?date=" + s.day(2)
+    s.open("/?perf=1", ".orders .row")
+    s.wait_toast(ms)
+    s.stub("GET", "**" + far, 500, "<html>boom</html>", "text/html")
+    s.go_days(1)
+    s.page.wait_for_timeout(2600)
+    # A day nothing is held for, and its load fails.
+    s.press('[aria-label="後一日"]')
+    s.wait_toast("載入失敗")
+    s.page.wait_for_timeout(2600)
+    # The day is painted later, by a change made elsewhere.
+    s.page.unroute("**" + far)
+    answered = len(s.answers)
+    s.api("PATCH", "/api/orders/" + s.t["order"]["dropoff"], {"price": 455})
+    s.wait(lambda: (far, 200, False) in s.answers[answered:], "the day to be loaded by the change")
+    s.wait(lambda: s.count(".orders .empty") or s.rows() == s.ids(2), "the day to be painted")
+    s.never(lambda: ms.fullmatch(s.toast()), "a readout timed from the tap whose load failed", ms=600)
+    s.settle()
+
+
 # ---- day view: tabs, foot, rows and marks (inventory A11-A12, B, C, K9) ----
 
 @check("day.filter-tabs")
@@ -2490,6 +2516,76 @@ def settle_refound(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
+@check("settle.far-jump-reveals-the-row-asked-for")
+def settle_refound_reveal(s: Session) -> None:
+    """A focus whose far end is a jump away refounds the strip on that month;
+    the strip then has to come to rest on the row holding the money asked
+    for, and stay there while it grows around it."""
+    s.open_settle()
+    far = doctored_ledger(s, 7)
+    chip = s.chip("exact")
+    s.reach(chip)
+    s.tap(chip)
+    s.expect(week_id(s.today) not in s.weeks(), "the strip was not refounded")
+    s.expect(week_id(far) != week_id(far.replace(day=1)), "the far day is on its month's first row")
+    s.eq(s.top_week(), week_id(far), "the row at the top of the strip after the jump")
+    s.eq(s.month_text(), month_label(far), "month button")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-run-of-months-is-stored-whole-or-not-at-all")
+def settle_fill_fails(s: Session) -> None:
+    """Three months are asked for at once and the middle one fails: a strip
+    holding the two that answered would draw the third's days as days with
+    no work on them."""
+    s.open_settle()
+    first = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    far = doctored_ledger(s, 3)
+    s.eq((date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1), first, "the strip's first month after the reload")
+    run = [settle_path(add_months(first, -n)) for n in (1, 2, 3)]
+    s.allow("http 500", "status of 500")
+    s.stub("GET", "**" + run[1], 500, "<html>boom</html>", "text/html")
+    chip = s.chip("exact")
+    s.reach(chip)
+    asked = len(s.requests)
+    s.press(chip)
+    s.wait_toast("載入失敗")
+    s.settle()
+    s.eq(s.asked(asked).count(run[2]), 1, "requests for the month that answered beyond the one that failed")
+    # The month next to the strip may be there, brought in by the strip's own
+    # growth, which asks for it alone; nothing beyond the month that failed is.
+    earliest = (date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)).replace(day=1)
+    s.expect(earliest >= add_months(first, -1) and week_id(far) not in s.weeks(),
+             f"the strip reaches past a month that failed: it begins at {earliest}")
+    s.expect(f"chip {s.t['credit']['exact']}" in s.lit(), "the focus was dropped")
+    # Nothing of the run was kept: asked for again, the month that had
+    # answered is fetched again.
+    s.page.wait_for_timeout(2500)
+    s.page.unroute("**" + run[1])
+    # The focus is put down again on an empty day beside the chip: going to
+    # the legend would scroll to the strip's top, which grows it.
+    x, y = s.page.evaluate("""() => {
+      const head = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().bottom;
+      for (const cell of document.querySelectorAll('#grid .cell.none')) {
+        const r = cell.getBoundingClientRect();
+        if (r.top > head && r.bottom < window.innerHeight - 80) return [r.left + r.width / 2, r.top + r.height / 2];
+      }
+      return [0, 0];
+    }""")
+    s.expect(y > 0, "no empty day on screen")
+    s.page.touchscreen.tap(x, y)
+    s.wait(lambda: s.lit() == [], "the focus to be put down")
+    s.settle()
+    asked = len(s.requests)
+    s.tap(chip)
+    s.eq([s.asked(asked).count(p) for p in run[1:]], [1, 1], "requests for the run, asked for again")
+    s.eq(s.top_week(), week_id(far), "the row the strip went to")
+    days = [date.fromisoformat(w[2:]) for w in s.weeks()]
+    s.expect(all(b - a == timedelta(days=7) for a, b in zip(days, days[1:])), "the strip is not one unbroken run of weeks")
+    s.eq(s.writes, [], "writes")
+
+
 @check("settle.failed-load")
 def settle_failed_load(s: Session) -> None:
     s.open_settle()
@@ -3203,6 +3299,32 @@ def settle_order_error(s: Session) -> None:
     s.never(s.toast, "a toast for an order that could not be read", ms=300)
 
 
+@check("settle.failed-order-refetch-is-shown")
+def settle_order_refetch(s: Session) -> None:
+    """An open order is fetched again with every reload. When that fetch
+    fails the sheet must say so: the order it would otherwise go on showing
+    is the one from before the change that caused the reload."""
+    s.open_settle()
+    o = seed_demo_db._oid
+    s.open_cell(1)
+    s.open_leg(o(12))
+    one = "**/api/orders/" + o(12)
+    s.allow("request failed: GET /api/orders/" + o(12), "Failed to load resource")
+    s.page.route(one, lambda route: route.abort())
+    s.api("PATCH", "/api/orders/" + o(11), {"price": 401})
+    s.wait(lambda: s.text(s.cell(1) + " .amt") == "$841", "the change made elsewhere")
+    s.wait(lambda: s.count(".sheet.show .order-err"), "the failed re-fetch to be shown in the sheet")
+    s.eq((s.title(), s.text(".sheet.show .order-err")), ("單 …0012", "讀唔到"), "the sheet of an order that could not be read again")
+    s.eq(s.count(".sheet.show .field-row"), 0, "fields of the order as it was before the reload")
+    # The next reload reads it again.
+    s.page.unroute(one)
+    s.api("PATCH", "/api/orders/" + o(11), {"price": 402})
+    s.wait(lambda: s.count(".sheet.show .field-row"), "the order to come back with the next reload")
+    s.eq(s.count(".sheet.show .order-err"), 0, "the error once the order was read")
+    s.eq(s.writes, [], "writes by the page")
+    s.settle()
+
+
 # ---- settle view: statement intake (inventory J) ----
 
 @check("settle.statement-read")
@@ -3368,6 +3490,29 @@ def settle_timing(s: Session) -> None:
     s.eq((s.page.url, s.page.evaluate("() => localStorage.getItem('perf')")), (s.base + "/settle", None),
          "the address and the key after ?perf=0")
     s.never(s.toast, "a timing toast with the readout off", ms=300)
+
+
+@check("settle.timing-readout-after-a-failed-load")
+def settle_timing_failed(s: Session) -> None:
+    """The tap that switched to the view is what its first paint is timed
+    from. When that load fails, a paint made later for another reason must
+    not be timed from it."""
+    ms = re.compile(r"\d+ ms")
+    s.allow("http 500", "status of 500")
+    s.open("/?perf=1", ".orders .row")
+    s.wait_toast(ms)
+    s.page.wait_for_timeout(2600)
+    s.stub("GET", "**/api/credits?platform=*", 500, "<html>boom</html>", "text/html")
+    s.press('[aria-label="埋數"]')
+    s.wait_toast("載入失敗")
+    s.page.wait_for_timeout(2600)
+    s.eq(s.count(".cell[data-d]"), 0, "a strip drawn from a load that failed")
+    # The strip is painted later, by a change made elsewhere.
+    s.page.unroute("**/api/credits?platform=*")
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.count(".cell[data-d]"), "the strip to be painted by the change")
+    s.never(lambda: ms.fullmatch(s.toast()), "a readout timed from the tap whose load failed", ms=600)
+    s.settle()
 
 
 @check("settle.expired-login-does-not-toast")
