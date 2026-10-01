@@ -316,3 +316,7 @@ body:has(> .shell-banner:not([hidden])) .header {
   max-width: 85%;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* With motion reduced it appears where it stands. */
+@media (prefers-reduced-motion: reduce) {
+  .toast { transform: translateX(-50%); transition: opacity .25s; }
+}
