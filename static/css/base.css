@@ -105,7 +105,7 @@ body:has(> .shell-banner:not([hidden])) .header {
 }
 
 .header-row { display: flex; align-items: center; gap: 8px; }
-/* Also worn by links (the cross-page jumps), hence text-decoration. */
+/* Also worn by links (the jumps to the other view), hence text-decoration. */
 .nav-btn, .icon-btn {
   background: var(--surface); border: none; border-radius: 10px;
   width: 42px; height: 40px; font-size: 17px; cursor: pointer;
