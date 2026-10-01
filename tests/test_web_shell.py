@@ -53,6 +53,18 @@ def test_an_asset_is_served_under_the_current_version_only(client):
     assert client.get(f"/assets/{v}/no-such-file.js").status_code == 404
 
 
+def test_a_font_is_served_as_a_font_and_kept(client):
+    v = web.asset_version()
+    for name in ("B612Mono-Regular.woff2", "B612Mono-Bold.woff2"):
+        res = client.get(f"/assets/{v}/fonts/{name}")
+        assert res.status_code == 200, name
+        assert res.mimetype == "font/woff2", name
+        assert res.headers["Cache-Control"] == "public, max-age=31536000, immutable", name
+        assert res.get_data()[:4] == b"wOF2", name
+    # The licence the fonts are distributed under travels with them.
+    assert os.path.isfile(os.path.join(web.app.static_folder, "fonts", "OFL.txt"))
+
+
 def _asset_urls(html: str) -> list[str]:
     return re.findall(r'(?:href|src)="(/assets/[^"]+)"', html)
 
@@ -61,14 +73,30 @@ def test_the_shell_links_its_styles_and_module_by_versioned_address(client):
     v = web.asset_version()
     html = client.get("/").get_data(as_text=True)
     urls = _asset_urls(html)
-    assert urls == [f"/assets/{v}/css/base.css", f"/assets/{v}/css/order-sheet.css",
+    assert urls == [f"/assets/{v}/fonts/B612Mono-Regular.woff2",
+                    f"/assets/{v}/fonts/B612Mono-Bold.woff2",
+                    f"/assets/{v}/css/base.css", f"/assets/{v}/css/order-sheet.css",
                     f"/assets/{v}/css/day.css", f"/assets/{v}/css/settle.css",
                     f"/assets/{v}/js/main.js"]
     assert f'<script type="module" src="/assets/{v}/js/main.js"></script>' in html
     for url in urls:
         res = client.get(url)
         assert res.status_code == 200, url
-        assert res.mimetype == ("text/css" if url.endswith(".css") else "text/javascript"), url
+        kind = {".css": "text/css", ".js": "text/javascript", ".woff2": "font/woff2"}
+        assert res.mimetype == kind[os.path.splitext(url)[1]], url
+
+
+def test_the_shell_preloads_the_fonts_the_stylesheet_names(client):
+    v = web.asset_version()
+    html = client.get("/").get_data(as_text=True)
+    css = client.get(f"/assets/{v}/css/base.css").get_data(as_text=True)
+    named = re.findall(r'url\("\.\./(fonts/[^"]+\.woff2)"\)', css)
+    assert sorted(named) == ["fonts/B612Mono-Bold.woff2", "fonts/B612Mono-Regular.woff2"]
+    for path in named:
+        # Without crossorigin the preloaded copy is not the one the stylesheet
+        # uses, and the file is fetched twice.
+        assert (f'<link rel="preload" as="font" type="font/woff2" '
+                f'href="/assets/{v}/{path}" crossorigin>') in html, path
 
 
 def test_every_module_the_shell_imports_is_served_as_javascript(client):
@@ -98,6 +126,7 @@ def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
     assert client.get(f"/assets/{v}/js/api.js").mimetype == "text/javascript"
     assert client.get(f"/assets/{v}/css/base.css").mimetype == "text/css"
     assert client.get(f"/assets/{v}/manifest.webmanifest").mimetype == "application/manifest+json"
+    assert client.get(f"/assets/{v}/fonts/B612Mono-Regular.woff2").mimetype == "font/woff2"
 
 
 def test_the_shell_holds_both_views_and_one_toast(client):
@@ -179,17 +208,23 @@ def test_the_worker_is_served_from_the_root_and_never_cached(client):
     assert f"/assets/{v}/css/base.css" in body
 
 
-def test_the_worker_lists_every_script_and_stylesheet(client):
+def test_the_worker_lists_every_script_stylesheet_and_font(client):
     body = client.get("/sw.js").get_data(as_text=True)
     v = web.asset_version()
     listed = 0
-    for sub in ("js", "css"):
+    for sub, kinds in (("js", (".js",)), ("css", (".css",)), ("fonts", (".woff2",))):
         base = os.path.join(web.app.static_folder, sub)
         for root, _d, files in os.walk(base):
             for name in files:
                 rel = os.path.relpath(os.path.join(root, name), web.app.static_folder)
-                assert f'"/assets/{v}/{rel}"' in body, rel
-                listed += 1
+                if name.endswith(kinds):
+                    assert f'"/assets/{v}/{rel}"' in body, rel
+                    listed += 1
+                else:
+                    assert rel == os.path.join("fonts", "OFL.txt"), rel
+                    assert f"/assets/{v}/{rel}" not in body
+    assert f'"/assets/{v}/fonts/B612Mono-Regular.woff2"' in body
+    assert f'"/assets/{v}/fonts/B612Mono-Bold.woff2"' in body
     # Everything the document links and every module those import is among them.
     for url in _asset_urls(client.get("/").get_data(as_text=True)):
         assert f'"{url}"' in body, url

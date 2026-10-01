@@ -3,6 +3,36 @@
    one view overrides belongs in that view instead, so this file never has to
    be read to predict what a view looks like. */
 * { margin: 0; padding: 0; box-sizing: border-box; }
+/* The figure face. The address is relative so it falls under the same
+   versioned path as this stylesheet. The files hold Basic Latin and the few
+   marks named in unicode-range; anything else falls through to the next
+   family. */
+@font-face {
+  font-family: "B612 Mono"; font-weight: 400; font-style: normal; font-display: swap;
+  src: url("../fonts/B612Mono-Regular.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00B7, U+00D7, U+2013, U+2039-203A, U+2190, U+2192, U+2212;
+}
+@font-face {
+  font-family: "B612 Mono"; font-weight: 700; font-style: normal; font-display: swap;
+  src: url("../fonts/B612Mono-Bold.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00B7, U+00D7, U+2013, U+2039-203A, U+2190, U+2192, U+2212;
+}
+/* What a figure is drawn in until the file above arrives. Menlo scaled so
+   its cell is as wide as B612 Mono's (0.65em against 0.602em) and its line
+   box as tall (ascent 0.965em, descent 0.25em, taken from the font's hhea
+   table and divided by the scale), so a row does not move at the swap. A
+   device with none of the local faces skips this family for the next one,
+   which is not matched. */
+@font-face {
+  font-family: "B612 Mono Fallback"; font-weight: 400;
+  src: local("Menlo"), local("Menlo-Regular"), local("SF Mono"), local("Courier New");
+  size-adjust: 107.97%; ascent-override: 89.2%; descent-override: 23.15%; line-gap-override: 0%;
+}
+@font-face {
+  font-family: "B612 Mono Fallback"; font-weight: 700;
+  src: local("Menlo Bold"), local("Menlo-Bold"), local("SF Mono Bold"), local("Courier New Bold");
+  size-adjust: 107.97%; ascent-override: 89.2%; descent-override: 23.15%; line-gap-override: 0%;
+}
 /* Dark is the base palette; light is a media-query override, so the page
    follows the OS with no toggle and no stored preference. */
 :root {
@@ -20,6 +50,10 @@
   --red: #ff6161;
   --green: #3ddc84;
   --scrim: rgba(0,0,0,.55);
+  /* Figures (times, flight numbers, money) are set in the mono face; the
+     second family is the metric-matched stand-in declared below. */
+  --mono: "B612 Mono", "B612 Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
+  --han: -apple-system, BlinkMacSystemFont, "PingFang HK", "PingFang TC", "Noto Sans HK", "Microsoft JhengHei", "Segoe UI", sans-serif;
   --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
   --paid-bg: rgba(61,220,132,.16);
   /* Colour ranks what is owed attention, loudest first: amber = the platform
@@ -63,7 +97,7 @@
 }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--han);
   background: var(--bg); color: var(--text);
   max-width: 480px; margin: 0 auto;
   padding-bottom: env(safe-area-inset-bottom);

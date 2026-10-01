@@ -2,3 +2,6 @@
 # After installing, fetch the browser: playwright install webkit
 playwright==1.63.0
 pillow==12.3.0
+# Rebuilding static/fonts/*.woff2 from the upstream TrueType files (pyftsubset).
+fonttools==4.66.1
+brotli==1.2.0

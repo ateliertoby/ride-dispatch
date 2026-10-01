@@ -75,6 +75,7 @@ _ASSET_MIMETYPES = {
     ".js": "text/javascript",
     ".css": "text/css",
     ".webmanifest": _MANIFEST_MIMETYPE,
+    ".woff2": "font/woff2",
 }
 _VERSION_TEMPLATES = ("app.html", "sw.js")
 _asset_version_cache = None
@@ -143,17 +144,21 @@ def versioned_asset(version, filename):
     return resp
 
 
-_PRECACHE_DIRS = ("js", "css")
+_PRECACHE_DIRS = ("js", "css", "fonts")
 
 
 def _precache_urls() -> list[str]:
-    """The versioned address of every script and stylesheet the shell can ask for."""
+    """The versioned address of every script, stylesheet and font the shell can ask for."""
     v = asset_version()
     urls = []
     for sub in _PRECACHE_DIRS:
         base = os.path.join(app.static_folder, sub)
         for root, _dirs, files in os.walk(base):
             for name in files:
+                # A file the page never asks for (the fonts' licence) is not
+                # worth holding.
+                if os.path.splitext(name)[1] not in _ASSET_MIMETYPES:
+                    continue
                 rel = os.path.relpath(os.path.join(root, name), app.static_folder)
                 urls.append(f"/assets/{v}/{rel.replace(os.sep, '/')}")
     return sorted(urls)
