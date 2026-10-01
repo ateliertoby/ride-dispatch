@@ -5,10 +5,12 @@
     python scripts/shots.py --diff DIR OTHER            compare two finished runs
 
 Each state is saved as `<state>-dark.png` and `<state>-light.png`, taken in
-Playwright WebKit as an iPhone 14. The day view's states are taken a second
-time in a window 340 wide (`<state>-340-…`), where its columns are tightest,
-and `stress-<width>-…` is the day view with long names, every mark and wide
-fares at each width it is laid out for. A comparison prints the number of differing
+Playwright WebKit as an iPhone 14. Every state is taken a second time in a
+window 340 wide (`<state>-340-…`), where the columns are tightest;
+`stress-<width>-…` is the day view with long names, every mark and wide
+fares at each width it is laid out for, and `stress-settle-…` is the settle
+strip with seven-figure labels, a week of five lanes, a batch in three runs
+across a month boundary and a credit that paid three batches. A comparison prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -34,10 +36,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import ROOT, SCHEMES, Driver, Server, new_context, paste_message  # noqa: E402
+from harness import (ROOT, SCHEMES, Driver, Server, new_context, paste_message,  # noqa: E402
+                     stress_strip)
 
 
-# The narrow window the day view's states are shot at a second time.
+# The narrow window every state is shot at a second time.
 NARROW = 340
 
 # The widths the day view is shot at with the rows under stress: the narrowest
@@ -141,6 +144,26 @@ class Shooter(Driver):
 
     def settle_page(self) -> None:
         self.open("/settle", ".cell[data-d]")
+
+    def reach(self, selector: str) -> None:
+        """Bring a mark onto the strip and its week row to the top of it. A
+        tap on a mark that is behind the header scrolls to it first, while
+        the strip may still be growing above it, and where that comes to rest
+        depends on timing; put there beforehand, the tap moves nothing."""
+        super().reach(selector)
+        for _ in range(6):
+            moved = self.page.evaluate("""sel => {
+              const seen = e => e.getClientRects().length;
+              const row = [...document.querySelectorAll(sel)].find(seen).closest('.wkblock');
+              const head = [...document.querySelectorAll('.header')].find(seen).getBoundingClientRect().bottom;
+              const by = row.getBoundingClientRect().top - head;
+              window.scrollBy(0, by);
+              return by;
+            }""", selector)
+            self.settle()
+            if abs(moved) < 1:
+                return
+        raise RuntimeError(f"the strip never came to rest under {selector}")
 
     def open_mark(self, selector: str, ready: str) -> None:
         """A bar or chip: the first tap lights its relation, the second opens it."""
@@ -253,7 +276,12 @@ def states() -> dict:
     def settle(s):
         s.settle_page()
         s.save("settle")
-        s.save("settle-full", full_page=True)
+        # The whole page shows how many months the strip loaded above the
+        # screen while it was growing to fill it. In the narrow window that
+        # count depends on which of two answers arrived first, and what is on
+        # screen is the same either way.
+        if not s.suffix:
+            s.save("settle-full", full_page=True)
 
     def settle_focus_bar(s):
         s.settle_page()
@@ -319,7 +347,7 @@ def states() -> dict:
 
     def settle_queue(s):
         s.settle_page()
-        s.tap(".sum-link")
+        s.tap(".foot [data-credits]")
         s.on(".sheet.show .qrow").first.wait_for()
         s.save("settle-queue")
 
@@ -334,6 +362,22 @@ def states() -> dict:
         s.tap(".sheet.show .xbtn")
         s.on(".sheet.show [data-unlinkgo]").wait_for()
         s.save("settle-unlink")
+
+    def settle_stressed(width, focus):
+        def run(s):
+            # Tall enough for two months of the strip above the fixed foot.
+            s.viewport = {"width": width, "height": 1500}
+            stress_strip(s.ctx, date.fromisoformat(s.t["today"]))
+            try:
+                s.settle_page()
+                s.tap('[aria-label="前一個月"]')
+                if focus:
+                    s.tap(f'[data-chip="{s.t["credit"]["group"]}"]')
+                s.save(f"stress-settle-{'focus-' if focus else ''}{width}")
+            finally:
+                s.ctx.unroute("**/api/settle?*")
+                s.ctx.unroute("**/api/credits?*")
+        return run
 
     def narrow(fn):
         def run(s):
@@ -367,9 +411,10 @@ def states() -> dict:
         "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
         "settle-undo": settle_undo, "settle-unlink": settle_unlink,
     }
-    return (wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()
-                    if name.startswith("day")}
-            | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS})
+    return (wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()}
+            | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS}
+            | {f"stress-settle-{'focus-' if f else ''}{w}": settle_stressed(w, f)
+               for w in (NARROW, 390) for f in (False, True)})
 
 
 def shoot(base_url: str, out: str, today: date, only: str) -> None:

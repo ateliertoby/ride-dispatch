@@ -37,8 +37,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (DEVICE, LOGIN_PATH, ROOT, TIMEOUT_MS, TIMEZONE, Driver,  # noqa: E402
-                     Server, copy_app, demo_now, new_context, paste_message)
+from harness import (DEVICE, LOGIN_PATH, LONG_AMOUNT, ROOT, TIMEOUT_MS, TIMEZONE, Driver,  # noqa: E402
+                     Server, copy_app, demo_now, new_context, paste_message, stress_strip)
 
 CHECKS = []
 
@@ -119,7 +119,9 @@ def week_id(d: date) -> str:
 
 
 def month_label(d: date, now: bool = False) -> str:
-    return f"{d.year} 年 {d.month} 月" + ("今個月" if now else "")
+    """What the settle view's month button says: year and month as one
+    figure, and that it is the current month when it is."""
+    return f"{d.year}·{d.month:02d}" + ("今個月" if now else "")
 
 
 def date_head(day: str, today: str = "") -> str:
@@ -172,6 +174,52 @@ STRIP_JS = """
     }
   }
   return bad;
+}
+"""
+
+# Every label on the strip against the room the packer gave it. A label was
+# reserved at the width the page measured (data-lw), so it has to be drawn
+# that wide; it has to lie inside the columns its mark reserved; and no two
+# labels of one lane row may touch. Returns how many labels were looked at,
+# the most lane rows any week has, and what is wrong.
+LABELS_JS = """
+() => {
+  const bad = [];
+  let n = 0, rows = 0;
+  for (const lane of document.querySelectorAll('#grid .lane')) {
+    const box = lane.getBoundingClientRect();
+    const col = (box.width - 6 * 4) / 7;
+    const seen = [];
+    for (const el of lane.children) {
+      const mark = el.matches('.slot') ? el.firstElementChild : el;
+      const cs = getComputedStyle(el);
+      const row = parseInt(cs.gridRowStart);
+      rows = Math.max(rows, row);
+      const lb = mark.querySelector('.lb');
+      if (!lb) continue;
+      n++;
+      const start = parseInt(cs.gridColumnStart), span = parseInt(cs.gridColumnEnd.replace('span', ''));
+      const left = box.left + (start - 1) * (col + 4), right = left + span * col + (span - 1) * 4;
+      const r = lb.getBoundingClientRect(), name = mark.textContent;
+      if (!(r.width > 0)) bad.push('not drawn: ' + name);
+      if (Math.abs(r.width - parseFloat(mark.dataset.lw)) > 1) {
+        bad.push('measured ' + mark.dataset.lw + ', drawn ' + r.width.toFixed(2) + ': ' + name);
+      }
+      if (r.left < left - 0.5 || r.right > right + 0.5) bad.push('outside its columns: ' + name);
+      // An outline or a chip's edge is part of what the reservation holds.
+      if (mark.matches('.cchip, .makeup')) {
+        const m = mark.getBoundingClientRect();
+        if (m.left < left - 0.5 || m.right > right + 0.5) bad.push('edge outside its columns: ' + name);
+        if (mark.matches('.makeup:not(.out)') && (r.left < m.left || r.right > m.right)) bad.push('label crosses its outline: ' + name);
+        if (mark.matches('.makeup.out') && r.left < m.right && m.left < r.right) bad.push('label over its outline: ' + name);
+      }
+      for (const o of seen) {
+        if (o.row === row && o.r.left < r.right - 0.5 && r.left < o.r.right - 0.5) bad.push('overlap: ' + o.name + ' / ' + name);
+      }
+      seen.push({ row, r, name });
+    }
+  }
+  return { n, rows, bad };
 }
 """
 
@@ -542,6 +590,10 @@ class Session(Driver):
     def month_text(self) -> str:
         return self.text(".date-btn")
 
+    def totals(self) -> list:
+        """The settle view's foot, cell by cell: label and figure run together."""
+        return self.texts(".foot .foot-in > *")
+
     def top_week(self) -> str:
         return self.page.evaluate(TOP_WEEK_JS)[0]
 
@@ -550,6 +602,23 @@ class Session(Driver):
 
     def strip_problems(self) -> list:
         return self.page.evaluate(STRIP_JS)
+
+    def labels(self) -> dict:
+        return self.page.evaluate(LABELS_JS)
+
+    def resize(self, width: int) -> None:
+        self.page.set_viewport_size({"width": width, "height": 800})
+        self.page.wait_for_timeout(400)      # the strip re-lays itself out 150 ms after the last resize
+        self.settle()
+
+    def colour(self, selector: str, prop: str = "color") -> str:
+        return self.on(selector).first.evaluate(f"e => getComputedStyle(e)['{prop}']")
+
+    def token(self, name: str) -> str:
+        """A palette token as the browser reports a colour."""
+        return self.page.evaluate(
+            "n => { const e = document.createElement('i'); e.style.color = 'var(' + n + ')';"
+            " document.body.appendChild(e); const c = getComputedStyle(e).color; e.remove(); return c; }", name)
 
     def cell(self, back: int) -> str:
         return f'.cell[data-d="{self.back(back).isoformat()}"]'
@@ -568,7 +637,7 @@ class Session(Driver):
         out = {}
         for mid, cls, text, style in got:
             entry = out.setdefault(int(mid), {"classes": set(), "labels": [], "style": ""})
-            entry["classes"].update(c for c in cls.split() if c not in ("cut-l", "cut-r", "spill-l", "lit", "dim"))
+            entry["classes"].update(c for c in cls.split() if c not in ("cut-l", "cut-r", "spill-l", "out", "lit", "dim"))
             entry["style"] += style or ""
             if text:
                 entry["labels"].append(("dashed " if "makeup" in cls else "") + text)
@@ -2137,21 +2206,25 @@ def settle_boot(s: Session) -> None:
     s.eq(s.page.title(), "埋數 · Ride Dispatch", "document title")
     s.eq(s.month_text(), month_label(s.today, now=True), "month button")
     s.eq(s.page.eval_on_selector_all(
-        ".header-row > *", "els => els.filter(e => e.getClientRects().length).map(e => e.getAttribute('aria-label'))"),
-        ["前一個月", None, "後一個月", "讀結算圖", "返日程"], "header controls")
+        ".header-row > .date-btn, .header-row .keys > *",
+        "els => els.filter(e => e.getClientRects().length).map(e => e.getAttribute('aria-label'))"),
+        [None, "前一個月", "後一個月", "讀結算圖", "返日程"], "header controls")
     s.eq(s.on('[aria-label="返日程"]').first.get_attribute("href"), "/", "the ✕ link")
     book = s.api("GET", settle_path(s.today))
     ledger = s.api("GET", CREDITS)
     waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
-    s.eq(s.text(".summary"),
-         f"未結算 ${fmt(book['totals']['unsettled'])} · 等過數 ${fmt(book['totals']['awaiting'])}"
-         f" · 入數未對 {len(waiting)} 筆 ${fmt(ledger['sums']['open'])}", "summary")
-    s.expect(s.count(".summary .warn") and s.count(".summary .sum-link"), "the summary's amber figure and queue link")
+    s.eq(s.totals(),
+         [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}",
+          f"入數未對 {len(waiting)} 筆${fmt(ledger['sums']['open'])}"], "totals")
+    s.expect(s.count(".foot .warn") and s.count(".foot [data-credits]"), "the totals' amber figure and queue link")
     n = book["counts"]
-    s.eq(s.texts(".chips .chip"), [f"接送 {n['ride']}", f"滴滴 {n['didi']}", f"Uber {n['uber']}", f"熊貓 {n['foodpanda']}"], "chips")
-    s.eq(s.text(".chip.on"), f"接送 {n['ride']}", "highlighted chip")
+    s.eq(s.texts(".tabs .tab"), [f"接送{n['ride']}", f"滴滴{n['didi']}", f"Uber{n['uber']}", f"熊貓{n['foodpanda']}"], "tabs")
+    s.eq(s.text(".tab.on"), f"接送{n['ride']}", "highlighted tab")
     s.eq(s.texts(".header .wk span"), list("日一二三四五六"), "weekday heads")
-    s.expect(s.text(".legend").startswith("琥珀 = 平台欠緊"), "the colour key")
+    s.eq(s.texts(".legend span"), ["平台欠緊（未結算 · 差數）", "入數未對", "入數已對但批次仍差", "等過數", "已收",
+                                   "已對／收埋", "補結／舉牌先結"], "the colour key")
+    s.eq(s.page.eval_on_selector_all(".legend .sw", "els => els.map(e => e.className.split(' ')[1])"),
+         ["owed", "open", "short", "wait", "paid", "done", "held"], "the colour key's swatches")
     s.eq(s.on(".cell.today").first.get_attribute("data-d"), s.day(), "today's cell")
     s.eq(s.top_week(), week_id(s.today.replace(day=1)), "the row at the top of the strip")
     # The strip keeps loading until neither end is within reach of the screen.
@@ -2198,13 +2271,13 @@ def settle_widths(s: Session) -> None:
         s.settle()
 
     s.open_settle()
-    s.eq(measure(), [390, "20px", 42], "settle at phone width: body width, bottom padding, round button")
+    s.eq(measure(), [390, "0px", 40], "settle at phone width: body width, bottom padding, header key")
     resize(1000)
-    s.eq(measure(), [640, "20px", 42], "settle on a wide screen")
+    s.eq(measure(), [640, "0px", 40], "settle on a wide screen")
     s.eq(s.page.eval_on_selector(".cell[data-d]", "e => getComputedStyle(e).minHeight"), "76px", "cell height on a wide screen")
     s.eq(s.strip_problems(), [], "the strip's lanes after a resize")
     resize(340)
-    s.eq(measure(), [340, "20px", 34], "settle below 361px")
+    s.eq(measure(), [340, "0px", 34], "settle below 361px")
     s.open_day()
     s.eq(measure(), [390, "0px", 40], "day at phone width")
     resize(1000)
@@ -2220,17 +2293,17 @@ def settle_platform(s: Session) -> None:
     s.eq(s.page.evaluate("() => localStorage.getItem('settlePlatform')"), None, "stored platform before any choice")
     s.tap('[aria-label="前一個月"]')
     asked = len(s.requests)
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     s.expect(settle_path(s.today, "didi") in s.asked(asked), "the current month of the chosen platform")
     s.expect("/api/credits?platform=didi" in s.asked(asked, "/api/credits"), "the chosen platform's ledger")
     s.expect(not any("platform=ride" in p for p in s.asked(asked, "/api/")), "a request for the platform left behind")
-    s.expect(s.text(".chip.on").startswith("滴滴"), "highlighted chip")
+    s.expect(s.text(".tab.on").startswith("滴滴"), "highlighted chip")
     s.eq(s.page.evaluate("() => localStorage.getItem('settlePlatform')"), "didi", "stored platform")
     # The strip starts again on the current month.
     s.eq(s.top_week(), week_id(s.today.replace(day=1)), "the row at the top after switching")
     s.eq(s.month_text(), month_label(s.today, now=True), "month button after switching")
     book = s.api("GET", settle_path(s.today, "didi"))
-    s.eq(s.text(".summary"), f"未結算 ${fmt(book['totals']['unsettled'])} · 等過數 ${fmt(book['totals']['awaiting'])}", "summary")
+    s.eq(s.totals(), [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}"], "totals")
     s.eq(s.count("#grid [data-bar]") + s.count("#grid [data-chip]"), 0, "another platform's bars and chips")
     s.tap(s.cell(10))
     s.eq(s.sub(), "滴滴", "day sheet subtitle")
@@ -2238,18 +2311,18 @@ def settle_platform(s: Session) -> None:
     s.close_sheets()
     # Tapping the chosen chip again does nothing.
     asked = len(s.requests)
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     s.eq(s.asked(asked, "/api/"), [], "requests for tapping the chosen chip")
     s.allow("request failed: GET /api/events")     # a reload cuts the event stream
     s.page.reload()
     s.on(".cell[data-d]").first.wait_for()
     s.settle()
-    s.expect(s.text(".chip.on").startswith("滴滴"), "the chosen platform after a reload")
+    s.expect(s.text(".tab.on").startswith("滴滴"), "the chosen platform after a reload")
     s.page.evaluate("() => localStorage.setItem('settlePlatform', 'no-such-platform')")
     s.page.reload()
     s.on(".cell[data-d]").first.wait_for()
     s.settle()
-    s.expect(s.text(".chip.on").startswith("接送"), "an unknown stored platform falls back to 接送")
+    s.expect(s.text(".tab.on").startswith("接送"), "an unknown stored platform falls back to 接送")
     s.eq(s.writes, [], "writes")
 
 
@@ -2398,7 +2471,9 @@ def settle_refound(s: Session) -> None:
     s.eq(got.count(settle_path(far)), 1, "requests for the month jumped to")
     # Not the month just above the old strip: bringing the chip under the
     # finger can scroll that one into reach, which is the strip's own growth.
-    between = [settle_path(add_months(first, -n)) for n in (2, 3, 4)]
+    # Nor the three after the month jumped to, which the new strip grows into
+    # to fill the screen.
+    between = [settle_path(add_months(first, -n)) for n in (2, 3)]
     s.eq([p for p in got if p in between], [], "months between were paid for")
     s.expect(week_id(s.today) not in s.weeks(), "the old strip is still there")
     s.expect(week_id(far) in s.weeks(), "the row carrying the far end is not on the new strip")
@@ -2453,7 +2528,13 @@ def settle_marks(s: Session) -> None:
     s.eq(amount(s.cell(34)), ("amt done", "$896.55"), "a day with a fined leg, to the cent")
     s.eq(amount(s.cell(-1)), ("amt future", "$900"), "a day still to come")
     s.eq(amount(s.cell(0)), ("amt unsettled", "$1890"), "today")
-    s.expect("today" in s.on(s.cell(0)).first.get_attribute("class"), "today's cell is not ringed")
+    s.expect("today" in s.on(s.cell(0)).first.get_attribute("class"), "today's cell is not marked")
+    # Today's number is an inverse block: the ink as its ground, the ground as its ink.
+    block = s.cell(0) + " .d"
+    s.eq((s.text(block), s.colour(block, "backgroundColor"), s.colour(block)),
+         (md_slash(s.today) if s.today.day == 1 else str(s.today.day), s.token("--text"), s.token("--bg")),
+         "today's day number")
+    s.eq(s.colour(s.cell(1) + " .d", "backgroundColor"), "rgba(0, 0, 0, 0)", "another day's number has a ground")
     empty = s.on(".cell.none").first
     s.expect(empty.is_disabled() and empty.get_attribute("data-d") is None, "an empty day can be opened")
     firsts = [t for t in s.texts("#grid .cell .d") if "/" in t]
@@ -2516,6 +2597,195 @@ def settle_focus(s: Session) -> None:
     s.tap(bar)
     s.on(".sheet.show .hero").wait_for()
     s.eq(s.title(), "結算 " + span_label(s.back(27), s.back(25)), "second tap on a bar opens its batch")
+    s.eq(s.writes, [], "writes")
+
+
+# The four widths the strip is laid out for: the narrowest phone, the usual
+# one, the widest column a phone gets, and the desktop rule.
+STRIP_WIDTHS = (340, 390, 480, 1000)
+
+
+def labels_hold(s: Session, least: int, what: str) -> dict:
+    got = s.labels()
+    s.eq(got["bad"], [], f"labels {what}")
+    s.expect(got["n"] >= least, f"only {got['n']} labels {what}")
+    s.eq(s.strip_problems(), [], f"the strip's lanes {what}")
+    s.expect(not s.page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth"), f"the page scrolls sideways {what}")
+    return got
+
+
+@check("settle.labels-are-drawn-as-measured")
+def settle_labels(s: Session) -> None:
+    """A label is packed by the width the page measured for it, so it has to
+    be drawn at that width, in the figure face, inside its own columns."""
+    s.open_settle()
+    s.reach(s.chip("archived"))
+    s.reach(s.bar("paid"))
+    s.expect(s.page.evaluate("() => document.fonts.check('700 11px \"B612 Mono\"') && document.fonts.check('400 11px \"B612 Mono\"')"),
+             "the figure face is not in")
+    for sel in ("#grid .bar", "#grid .cchip", "#grid .cell .amt", "#grid .cell .d"):
+        s.expect("B612 Mono" in s.colour(sel, "fontFamily"), f"{sel} is not set in the figure face")
+    s.expect(s.count("#grid .bar .lb .p") and s.count("#grid .cchip .lb .p") and s.count("#grid .amt .p"),
+             "punctuation in a figure is not pulled in")
+    for width in STRIP_WIDTHS:
+        s.resize(width)
+        labels_hold(s, 12, f"at {width}")
+    s.eq(round(s.page.evaluate("() => document.body.getBoundingClientRect().width")), 640, "the column at the desktop rule")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.labels-under-stress")
+def settle_labels_stress(s: Session) -> None:
+    """Seven-figure amounts, a week with more marks than columns to spare, a
+    batch in three runs: the packer adds lanes and nothing is shortened."""
+    stress_strip(s.ctx, s.today)
+    s.open_settle()
+    s.reach(s.bar("short"))
+    long = fmt(LONG_AMOUNT)
+    bars, chips = s.marks("bar"), s.marks("chip")
+    s.eq(bars[s.t["batch"]["short"]]["labels"], [f"${long} · 差 $380.55"], "a seven-figure batch paid short")
+    s.eq(bars[s.t["batch"]["group"]]["labels"], ["$1048576.50"], "a seven-figure batch awaiting money")
+    s.eq(chips[901]["labels"], [f"入${long}"], "a seven-figure credit")
+    runs = bars[s.t["batch"]["ahead"]]["labels"]
+    s.eq((len(runs), sorted(t.startswith("dashed →") for t in runs)), (3, [False, True, True]), f"a batch in three runs: {runs}")
+    for width in STRIP_WIDTHS:
+        s.resize(width)
+        got = labels_hold(s, 14, f"under stress at {width}")
+        s.expect(got["rows"] >= 5, f"the busiest week has {got['rows']} lanes at {width}")
+        # The foot's three figures stay whole on its one line.
+        foot = s.page.evaluate("""() => {
+          const f = [...document.querySelectorAll('.foot-in')].find(e => e.getClientRects().length);
+          const box = f.getBoundingClientRect();
+          const cells = [...f.querySelectorAll('.v')].map(e => e.getBoundingClientRect());
+          return { tops: [...new Set(cells.map(r => Math.round(r.top)))].length,
+                   inside: cells.every(r => r.left >= box.left - 0.5 && r.right <= box.right + 0.5),
+                   apart: cells.every((r, i) => !i || r.left >= cells[i - 1].right) };
+        }""")
+        s.eq(foot, {"tops": 1, "inside": True, "apart": True}, f"the foot under stress at {width}")
+    s.eq(s.totals(), [f"未結算${long}", "等過數$1048576.50", f"入數未對 8 筆${long}"], "totals under stress")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.labels-are-laid-again-when-a-face-arrives")
+def settle_labels_fonts(s: Session) -> None:
+    """A width measured before the figure face arrived was measured in its
+    stand-in: when a face finishes loading, a strip holding a label that is
+    no longer drawn at the width it was reserved at is laid out again, and
+    stays where it was."""
+    # The face arrives late: the first paint cannot have had it.
+    def late(route):
+        time.sleep(1.2)
+        route.continue_()
+    s.ctx.route("**/fonts/*.woff2", late)
+    s.ctx.add_init_script("""
+      window.__lays = [];
+      document.addEventListener('DOMContentLoaded', () => {
+        const bold = () => [...document.fonts].find(f => f.family.includes('B612 Mono') && f.weight === '700');
+        new MutationObserver(() => window.__lays.push(bold().status === 'loaded'))
+          .observe(document.getElementById('grid'), { childList: true });
+      });
+    """)
+    s.open_settle()
+    lays = s.page.evaluate("() => window.__lays")
+    s.expect(lays and lays[0] is False, f"the strip was not first laid out before the face arrived: {lays}")
+    s.reach(s.bar("short"))
+    labels_hold(s, 8, "after a late face")
+    s.page.evaluate("() => window.scrollBy(0, 120)")
+    s.settle()
+    top = s.page.evaluate(TOP_WEEK_JS)
+    asked = len(s.requests)
+
+    def face_arrives(stale: bool) -> bool:
+        """A face finishes loading, with one label reserved at a width it
+        is not drawn at or with none; whether the strip was laid out again."""
+        s.page.evaluate("stale => { window.__row = document.querySelector('#grid .wkblock');"
+                        " if (stale) document.querySelector('#grid [data-lw]').dataset.lw = '1';"
+                        " document.fonts.dispatchEvent(new Event('loadingdone')); }", stale)
+        return not s.page.evaluate("() => window.__row.isConnected")
+
+    # Every label as wide as it was measured: nothing to lay out again.
+    s.expect(not face_arrives(False), "the strip was laid out again with every label at its width")
+    s.expect(face_arrives(True), "the strip was not laid out again")
+    s.settle()
+    s.eq(s.page.evaluate(TOP_WEEK_JS), top, "the top row after laying the strip out again")
+    s.eq(s.asked(asked, "/api/"), [], "requests for laying the strip out again")
+    labels_hold(s, 8, "after laying out again")
+    # Not while the view is hidden, which has no width to measure in.
+    s.go_day()
+    s.expect(not face_arrives(True), "the hidden strip was laid out")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.foot")
+def settle_foot(s: Session) -> None:
+    s.open_settle()
+    book, ledger = s.api("GET", settle_path(s.today)), s.api("GET", CREDITS)
+    waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
+    s.eq(s.totals(), [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}",
+                      f"入數未對 {len(waiting)} 筆${fmt(ledger['sums']['open'])}"], "totals against the server's")
+    s.eq(s.texts(".foot .k"), ["未結算", "等過數", f"入數未對 {len(waiting)} 筆"], "labels")
+    # Amber is what the platform still owes, blue the bank money not matched.
+    s.eq([s.colour(".foot .warn .v"), s.colour(".foot .queue .v")], [s.token("--amber"), s.token("--blue")], "the figures' colours")
+    s.expect("B612 Mono" in s.colour(".foot .v", "fontFamily"), "the figures are not in the figure face")
+    foot = s.page.evaluate("""() => {
+      const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+      const f = seen('.foot'), q = seen('.foot [data-credits]'), cs = getComputedStyle(f);
+      return { fixed: cs.position, bottom: Math.round(window.innerHeight - f.getBoundingClientRect().bottom),
+               inView: !!f.closest('#view-settle'), tag: q.tagName,
+               tall: q.getBoundingClientRect().height >= 44, line: getComputedStyle(q.querySelector('.v')).textDecorationLine,
+               height: f.getBoundingClientRect().height,
+               room: parseFloat(getComputedStyle(seen('.cal')).paddingBottom) };
+    }""")
+    s.eq({k: foot[k] for k in ("fixed", "bottom", "inView", "tag", "tall", "line")},
+         {"fixed": "fixed", "bottom": 0, "inView": True, "tag": "BUTTON", "tall": True, "line": "underline"}, "the foot")
+    s.expect(foot["room"] >= foot["height"], f"the strip's end does not clear the foot: {foot}")
+    # The strip's true end clears the foot, and reaching it still loads on.
+    weeks = len(s.weeks())
+    s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    s.settle()
+    s.expect(len(s.weeks()) > weeks, "nothing was loaded at the strip's end")
+    # The way into the queue.
+    s.tap(".foot [data-credits]")
+    s.eq((s.title(), s.sub()), ("入數未對", f"接送 · {len(waiting)} 筆 ${fmt(ledger['sums']['open'])}"), "the queue from the foot")
+    s.close_sheets()
+    # Nothing unmatched: no way in. Another platform has no credits at all.
+    s.tap(".tab", has_text="滴滴")
+    s.eq((len(s.totals()), s.count(".foot [data-credits]")), (2, 0), "the foot with nothing unmatched")
+    # The foot belongs to the view: the day view shows its own.
+    s.go_day()
+    s.eq((s.count(".foot [data-credits]"), s.count(".foot .foot-in")), (0, 1), "feet on the day view")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.month-figure")
+def settle_month_figure(s: Session) -> None:
+    def head() -> list:
+        return s.page.evaluate("""() => {
+          const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+          const d = seen('.date-btn .d');
+          return [d.textContent, seen('.date-btn .w').textContent.trim(), d.querySelectorAll('.p').length,
+                  Math.round(seen('.header').getBoundingClientRect().height)];
+        }""")
+
+    s.open_settle()
+    now = f"{s.today.year}·{s.today.month:02d}"
+    figure, word, pulled, height = head()
+    s.eq((figure, word, pulled), (now, "今個月", 1), "the current month")
+    s.expect("B612 Mono" in s.colour(".date-btn .d", "fontFamily"), "the month is not in the figure face")
+    # Back into the year before: always the year and a two-digit month.
+    for _ in range(s.today.month):
+        s.tap('[aria-label="前一個月"]')
+    s.eq(head(), [f"{s.today.year - 1}·12", "", 1, height], "a month in another year, and the header's height")
+    s.tap(".date-btn")
+    s.eq(head(), [now, "今個月", 1, height], "back on the current month")
+    # Where the words drop under the figure, they keep their line when empty.
+    s.resize(340)
+    s.tap(".date-btn")
+    narrow = head()
+    s.eq(narrow[:3], [now, "今個月", 1], "the current month on a narrow screen")
+    s.tap('[aria-label="前一個月"]')
+    prev = add_months(s.today, -1)
+    s.eq(head(), [f"{prev.year}·{prev.month:02d}", "", 1, narrow[3]], "another month on a narrow screen, and the header's height")
     s.eq(s.writes, [], "writes")
 
 
@@ -2629,7 +2899,7 @@ def settle_batch_sheets(s: Session) -> None:
 def settle_credit_sheets(s: Session) -> None:
     s.open_settle()
     c = s.t["credit"]
-    s.tap(".sum-link")
+    s.tap(".foot [data-credits]")
     s.eq((s.title(), s.sub()), ("入數未對", "接送 · 3 筆 $4440"), "queue")
     s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => [e.dataset.credit, e.textContent])"), [
         [str(c["exact"]), f"{md_slash(s.back(14))} · $1270未對›"],
@@ -2675,7 +2945,7 @@ def settle_credit_sheets(s: Session) -> None:
 def settle_allocate(s: Session) -> None:
     s.open_settle()
     b, c = s.t["batch"], s.t["credit"]
-    s.tap(".sum-link")
+    s.tap(".foot [data-credits]")
     s.press(f'.sheet.show .pbtn[data-alloc-credit="{c["exact"]}"]')
     s.wait_toast("已對 $1270 · 批次收齊")
     s.eq(s.writes[-1], ("POST", f"/api/credits/{c['exact']}/allocate", json.dumps({"settlement_id": b["awaiting"]}, separators=(",", ":"))),
@@ -2686,7 +2956,7 @@ def settle_allocate(s: Session) -> None:
     s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => e.dataset.credit)"),
          [str(c["partial"]), str(c["group"])], "queue rows after 對")
     s.close_sheets()
-    s.expect(s.text(".summary").endswith("入數未對 2 筆 $3170"), f"summary after 對: {s.text('.summary')!r}")
+    s.eq(s.totals()[-1], "入數未對 2 筆$3170", "totals after 對")
     s.eq(s.marks("bar")[b["awaiting"]]["classes"], {"bar", "paid"}, "the bar of the batch just paid")
     s.eq(s.marks("chip")[c["exact"]]["classes"], {"cchip"}, "the chip of the credit just matched")
     s.page.wait_for_timeout(2500)
@@ -2741,7 +3011,7 @@ def settle_unlink(s: Session) -> None:
     s.eq(s.texts(".sheet.show .hero > div")[2], "等過數", "the batch with its money taken back")
     s.eq(s.count(".sheet.show .xbtn"), 0, "allocations left on the batch")
     s.close_sheets()
-    s.expect(s.text(".summary").endswith("入數未對 3 筆 $6220"), f"summary after 解除: {s.text('.summary')!r}")
+    s.eq(s.totals()[-1], "入數未對 3 筆$6220", "totals after 解除")
     s.eq(len(s.writes), 1, "writes")
 
 
@@ -2815,7 +3085,7 @@ def settle_refused(s: Session) -> None:
                                   ("**/api/settlements/*", "DELETE", "拒絕撤銷"),
                                   ("**/api/settlements/*/unpaid", "POST", "拒絕記低")):
         s.refuse(method, glob, message)
-    s.tap(".sum-link")
+    s.tap(".foot [data-credits]")
     s.press(".sheet.show .qprop .pbtn", has_text="對")
     s.wait_toast("拒絕對")
     s.press(".sheet.show .pbtn[data-alloc-all]")
@@ -3035,7 +3305,7 @@ def settle_live(s: Session) -> None:
     s.wait(lambda: s.marks("bar")[b["awaiting"]]["classes"] == {"bar", "paid"}, "the bar to follow a change made elsewhere")
     s.settle()
     s.eq((s.scroll_y(), s.top_week()), (at, top), "the strip's position after a live update")
-    s.expect(s.text(".summary").endswith("入數未對 2 筆 $3170"), "the summary after a live update")
+    s.eq(s.totals()[-1], "入數未對 2 筆$3170", "the totals after a live update")
     # An open sheet follows too.
     s.open_mark(s.bar("awaiting"))
     s.eq(s.texts(".sheet.show .hero > div")[2], "已收齊 · " + md_slash(s.back(14)), "the batch, collected")
@@ -3111,7 +3381,7 @@ def settle_auth_expired(s: Session) -> None:
         s.stub(method, glob, 401, "<html>log in</html>", "text/html")
 
     expired(("POST", "PATCH", "DELETE"), "**/api/**")
-    s.tap(".sum-link")
+    s.tap(".foot [data-credits]")
     sent = len(s.writes)
     s.press(".sheet.show .qprop .pbtn", has_text="對")
     s.wait(lambda: len(s.writes) > sent, "the allocate write")
@@ -4472,7 +4742,7 @@ def inventory_styles(s: Session) -> None:
 
     s.open_settle()
     promised((".bar:active", ".cell:not(.none):active", ".orow.tap:active", ".pbtn:active", ".nav-btn:active", ".field-row:active"),
-             ("body", ".header", ".sheet", ".toast"), (".sheet", ".scrim", ".np-pad"))
+             ("body", ".header", ".sheet", ".toast", ".foot"), (".sheet", ".scrim", ".np-pad"))
     s.open_day()
     promised((".row:active", ".field-row:active", ".key:active", ".nav-btn:active"),
              ("body", ".header", ".sheet", ".toast", ".drop", ".foot"),

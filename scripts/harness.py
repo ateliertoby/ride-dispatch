@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -395,6 +395,62 @@ class Driver:
         """Type on the on-screen numpad inside `host`."""
         for d in digits:
             self.tap(f'{host} .key[data-k="{d}"]')
+
+
+# ---- the settle strip under stress ----
+
+LONG_AMOUNT = 1234567.89
+
+
+def stress_settle(body: dict, today: date) -> None:
+    """Rewrite one month's answer from /api/settle so the strip carries what
+    strains its lanes: seven-figure amounts with cents on a short-paid and an
+    awaiting batch, and a batch whose days are three separate runs either
+    side of the first of today's month."""
+    first = today.replace(day=1)
+    runs = [first - timedelta(days=3), first - timedelta(days=1), first + timedelta(days=1)]
+    for b in body["settlements"]:
+        if b["id"] == seed_demo_db.BATCH["short"]:
+            b.update(confirmed_amount=LONG_AMOUNT, received=LONG_AMOUNT - 380.55, outstanding=380.55)
+        elif b["id"] == seed_demo_db.BATCH["group"]:
+            b.update(confirmed_amount=1048576.5, outstanding=1048576.5)
+        elif b["id"] == seed_demo_db.BATCH["ahead"]:
+            b["adjustments"] = []
+            for o, d in zip(b["orders"], runs):
+                o["scheduled_time"] = d.isoformat() + o["scheduled_time"][10:]
+    body["totals"].update(unsettled=LONG_AMOUNT, awaiting=1048576.5)
+
+
+def stress_credits(body: dict, today: date) -> None:
+    """Rewrite the answer from /api/credits to match: five more unmatched
+    credits with seven-figure amounts, all on one day of a week that already
+    holds bars, so that week needs a lane for each; and today's credit paid
+    into three batches."""
+    like = next(c for c in body["credits"] if c["id"] == seed_demo_db.CREDIT["exact"])
+    for i in range(5):
+        body["credits"].append(dict(like, id=901 + i, ref=f"DEMO-REF-09{i}", amount=LONG_AMOUNT - i,
+                                    remaining=LONG_AMOUNT - i, proposals=[], batches=[], combo=None,
+                                    value_date=seed_demo_db.day(today, 8)))
+    paid = next(c for c in body["credits"] if c["id"] == seed_demo_db.CREDIT["group"])
+    for key, backs in (("short", (27, 26, 25)), ("awaiting", (19, 18)), ("group", (9, 8))):
+        paid["batches"].append({
+            "id": seed_demo_db.BATCH[key], "dates": [seed_demo_db.day(today, n) for n in backs],
+            "orders": len(backs), "amount": 100.0, "confirmed_amount": 100.0, "outstanding": 0.0,
+            "state": "paid", "has_image": False})
+    body["sums"]["open"] = LONG_AMOUNT
+
+
+def stress_strip(ctx, today: date) -> None:
+    """From now on, every page of this context is served the settle view's
+    data rewritten by the two functions above."""
+    def rewrite(change):
+        def handler(route):
+            body = route.fetch().json()
+            change(body, today)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+        return handler
+    ctx.route("**/api/settle?*", rewrite(stress_settle))
+    ctx.route("**/api/credits?*", rewrite(stress_credits))
 
 
 def paste_message() -> str:
