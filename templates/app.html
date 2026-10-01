@@ -45,24 +45,34 @@
 <div id="view-settle" class="view view-settle" hidden>
 <div class="header">
   <div class="header-row">
-    <button class="nav-btn" id="prevM" aria-label="前一個月">&larr;</button>
     <button class="date-btn" id="monthBtn"></button>
-    <button class="nav-btn" id="nextM" aria-label="後一個月">&rarr;</button>
-    <button class="icon-btn" id="stmtBtn" aria-label="讀結算圖">圖</button>
-    <a class="icon-btn" href="/" data-nav aria-label="返日程">&#10005;</a>
+    <div class="keys">
+      <button class="nav-btn" id="prevM" aria-label="前一個月">&larr;</button>
+      <button class="nav-btn" id="nextM" aria-label="後一個月">&rarr;</button>
+      <button class="icon-btn" id="stmtBtn" aria-label="讀結算圖">圖</button>
+      <a class="icon-btn" href="/" data-nav aria-label="返日程">&#10005;</a>
+    </div>
   </div>
-  <div class="summary" id="settle-summary"></div>
-  <div class="chips" id="settle-chips"></div>
-  <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
+  <div class="tabs" id="settle-tabs" role="group" aria-label="平台"></div>
+  <div class="cols wk" aria-hidden="true"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
 </div>
 <div class="cal">
   <!-- The colour key is read once and sits above the strip: the strip has no
        end to put it after, since scrolling to either end loads another month. -->
-  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結／舉牌先結</div>
+  <div class="legend">
+    <span><i class="sw owed"></i>平台欠緊（未結算 · 差數）</span>
+    <span><i class="sw open"></i>入數未對</span>
+    <span><i class="sw short"></i>入數已對但批次仍差</span>
+    <span><i class="sw wait"></i>等過數</span>
+    <span><i class="sw paid"></i>已收</span>
+    <span><i class="sw done"></i>已對／收埋</span>
+    <span><i class="sw held"></i>補結／舉牌先結</span>
+  </div>
   <div class="sent" id="sentTop"></div>
   <div class="weeks" id="grid"></div>
   <div class="sent" id="sentBot"></div>
 </div>
+<div class="foot"><div class="foot-in" id="settle-foot"></div></div>
 <div class="scrim" id="settle-scrim"></div>
 <div class="sheet" id="settle-sheet"></div>
 <div class="drop" id="settle-drop"><span>放低張結算圖</span></div>

@@ -152,7 +152,7 @@ def test_no_id_appears_twice_in_the_shell(client):
     day, settle = html.split('<div id="view-settle"')
     assert all(i in day for i in ('id="day-tabs"', 'id="day-foot"', 'id="day-scrim"',
                                   'id="day-sheet"', 'id="day-drop"'))
-    assert all(i in settle for i in ('id="settle-summary"', 'id="settle-chips"',
+    assert all(i in settle for i in ('id="settle-tabs"', 'id="settle-foot"',
                                      'id="settle-scrim"', 'id="settle-sheet"',
                                      'id="settle-drop"'))
 

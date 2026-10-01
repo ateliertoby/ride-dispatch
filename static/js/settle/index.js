@@ -10,7 +10,7 @@
 // loads again.
 
 import { $, PLATFORMS, apiWrite, esc, expectedOf, fmtDate, money, orderTime, owedOf,
-         platform, shortId, svcLabel, toast, weekday } from '../shared.js';
+         platform, shortId, svcLabel, tight, toast, weekday } from '../shared.js';
 import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
@@ -19,7 +19,7 @@ import { packLanes } from '../lanes.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
-// in the document and has a summary, chips, a scrim and a sheet of its own.
+// in the document and has a foot, tabs, a scrim and a sheet of its own.
 const byId = id => root.querySelector('#' + id);
 // Whether the view is the one on screen; set by show and hide.
 let showing = false;
@@ -377,35 +377,53 @@ function repaintOpenView() {
 // The calendar goes first: the header names the month the strip is showing, and
 // that is read off the rows the calendar has just laid out.
 function render() {
-  renderChips();
+  renderTabs();
   renderCalendar();
   renderHeader();
 }
 
 function renderHeader() {
-  const y = +viewMonth.slice(0, 4), m = +viewMonth.slice(5, 7);
+  // YYYY·MM in the figure face. The second span is always there, empty when
+  // the month is not the current one: the stylesheet gives it a line of its
+  // own on a narrow screen, and the header must not change height with the
+  // month it names.
   byId('monthBtn').innerHTML =
-    y + ' 年 ' + m + ' 月' + (viewMonth === todayMonth() ? '<small>今個月</small>' : '<small>&nbsp;</small>');
+    '<span class="d">' + tight(viewMonth.slice(0, 4) + '·' + viewMonth.slice(5, 7)) + '</span>' +
+    '<span class="w">' + (viewMonth === todayMonth() ? '<b>今個月</b>' : '&nbsp;') + '</span>';
   // Totals span the whole book, not the months the strip has loaded: old
   // unsettled days are exactly the ones the operator is here to clear. The
-  // server computes them, so the chips and the calendar cannot disagree about
+  // server computes them, so the tabs and the calendar cannot disagree about
   // the same money.
   // Only what is still to be done: a matched or archived credit is finished
   // business and is read off the calendar by its value date instead.
   const open = openCredits();
-  byId('settle-summary').innerHTML =
-    '未結算 <span class="warn">' + money(data.totals.unsettled) + '</span> · 等過數 $' + $(data.totals.awaiting) +
-    (open.length ? ' · <button class="sum-link" data-credits="1">入數未對 ' + open.length +
-      ' 筆 $' + $(ledger.sums.open) + '</button>' : '');
+  const figs = [money(data.totals.unsettled), '$' + $(data.totals.awaiting)]
+    .concat(open.length ? ['$' + $(ledger.sums.open)] : []).map(tight);
+  const foot = byId('settle-foot');
+  // The stylesheet sizes the figures so that all of them fit the one line.
+  foot.style.setProperty('--n', figs.reduce((n, f) => n + +cellsOf(f), 0).toFixed(2));
+  foot.innerHTML =
+    '<div class="warn"><span class="k">未結算</span><span class="v">' + figs[0] + '</span></div>' +
+    '<div><span class="k">等過數</span><span class="v">' + figs[1] + '</span></div>' +
+    (open.length ? '<button class="tot queue" data-credits="1"><span class="k">入數未對 ' + open.length +
+      ' 筆</span><span class="v">' + figs[2] + '</span></button>' : '');
 }
 
-function renderChips() {
-  byId('settle-chips').innerHTML = PLATFORMS.map(p => {
+function renderTabs() {
+  byId('settle-tabs').innerHTML = PLATFORMS.map(p => {
     const n = data.counts[p.key] || 0;
     const on = curPlat === p.key;
-    return '<button class="chip' + (on ? ' on' : (n ? '' : ' zero')) + '" data-f="' + p.key + '">' +
-      esc(p.label) + ' ' + n + '</button>';
+    return '<button class="tab' + (on ? ' on' : (n ? '' : ' zero')) + '" data-f="' + p.key + '">' +
+      esc(p.label) + '<span class="n">' + n + '</span></button>';
   }).join('');
+}
+
+// How many character cells a figure takes once its punctuation is pulled in:
+// tight() takes about half a cell off each mark it wraps (.34em of a .65em
+// cell).
+function cellsOf(html) {
+  const text = html.replace(/<[^>]*>/g, '');
+  return (text.length - 0.52 * (html.match(/class="p"/g) || []).length).toFixed(2);
 }
 
 function cellHtml(dateStr) {
@@ -416,12 +434,14 @@ function cellHtml(dateStr) {
   const info = dayInfo(dateStr);
   const today = dateStr === TODAY ? ' today' : '';
   // Only an empty day is inert; every day holding work opens, past or future.
-  if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + num + '</span></button>';
+  if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + tight(num) + '</span></button>';
   const future = dateStr > TODAY;
   const cls = future ? 'future' : (info.loose > 0 ? 'unsettled' : 'done');
   const amt = future ? info.total : (info.loose > 0 ? info.loose : info.total);
+  const fig = tight(money(amt));
   return '<button class="cell' + today + '" data-d="' + dateStr + '">' +
-    '<span class="d">' + num + '</span><span class="amt ' + cls + '">' + money(amt) + '</span></button>';
+    '<span class="d">' + tight(num) + '</span><span class="amt ' + cls + '" style="--n:' + cellsOf(fig) + '">' +
+    fig + '</span></button>';
 }
 
 // Every week of the loaded run, end to end, with no month break in it: from the
@@ -509,41 +529,75 @@ function weekEvents(week) {
 // its days occupy -- and that has to be measured rather than guessed. The
 // desktop rule changes both the font size and the column width, so the metrics
 // are read off the live grid on every paint.
-let calCanvas = null;
-function textWidth(font, s) {
-  if (!calCanvas) calCanvas = document.createElement('canvas');
-  const ctx = calCanvas.getContext('2d');
-  ctx.font = font;
-  return ctx.measureText(s).width;
+//
+// A label is measured as it will be drawn: a hidden element of the mark's own
+// class holding the label's own markup, laid out by the browser. The label is
+// set in the figure face with its punctuation pulled in and falls back to the
+// system face for Chinese, and no arithmetic on a canvas metric reproduces
+// all of that to the pixel; the element does by construction. Widths are kept
+// per class, type and label, and thrown away when a face finishes loading,
+// since a label measured before the figure face arrived was measured in its
+// stand-in.
+const KINDS = { bar: 'bar', makeup: 'bar makeup', chip: 'cchip' };
+let labelW = new Map();
+let calProbe = null;
+function probe(grid, cls) {
+  if (!calProbe) {
+    calProbe = document.createElement('span');
+    calProbe.style.cssText = 'position:absolute;visibility:hidden;left:0;top:0;width:max-content;' +
+      'max-width:none;container-type:normal';
+    calProbe.setAttribute('aria-hidden', 'true');
+  }
+  if (calProbe.parentNode !== grid.parentNode) grid.parentNode.appendChild(calProbe);
+  calProbe.className = cls;
+  return calProbe;
 }
 function calMetrics(grid) {
-  const probe = document.createElement('span');
-  probe.style.cssText = 'position:absolute;visibility:hidden';
-  const font = {};
-  for (const k of ['bar', 'cchip']) {
-    probe.className = k;
-    grid.appendChild(probe);
-    const cs = getComputedStyle(probe);
-    font[k] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
-    grid.removeChild(probe);
+  // Per kind of mark: the type it is set in, which keys the kept widths (the
+  // desktop rule sets another size), and the padding and border its label
+  // sits inside, read off the stylesheet.
+  const kinds = {};
+  for (const k in KINDS) {
+    const cs = getComputedStyle(probe(grid, KINDS[k]));
+    kinds[k] = {
+      key: k + '|' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily + '|',
+      pad: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) +
+           parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth),
+    };
   }
   // The grid divides its width the way the CSS does: seven columns and the six
   // 4px gaps between them. A hidden page measures zero, and zero would reserve
-  // every label the whole week, so it falls back to the phone-width grid.
-  return { colW: ((grid.clientWidth || 362) - 6 * 4) / 7, font };
+  // every label the whole week, so it falls back to the phone-width grid (390
+  // less the two 16px gutters).
+  return { colW: ((grid.clientWidth || 358) - 6 * 4) / 7, kinds, grid };
 }
+function kindOf(e) { return e.type === 'chip' ? 'chip' : e.makeup ? 'makeup' : 'bar'; }
+function labelHtml(e) { return '<span class="lb">' + tight(esc(e.label)) + '</span>'; }
+// The width of an event's label as drawn, without the mark's padding.
+function labelWidth(e, m) {
+  const kind = m.kinds[kindOf(e)];
+  const key = kind.key + e.label;
+  if (!labelW.has(key)) {
+    const el = probe(m.grid, KINDS[kindOf(e)]);
+    el.innerHTML = labelHtml(e);
+    labelW.set(key, el.firstChild.getBoundingClientRect().width);
+    el.innerHTML = '';
+  }
+  return labelW.get(key);
+}
+// n columns are n column widths plus the n - 1 gaps they span.
+function spanW(n, m) { return n * m.colW + (n - 1) * 4; }
 function reachOf(e, m) {
-  const chip = e.type === 'chip';
-  // The label sits inside the element's horizontal padding, and the chip has a
-  // border on top of that.
-  const pad = chip || e.makeup ? 6 : 10;
-  // letter-spacing is not part of the canvas metric; the browser applies it
-  // once between each pair of characters.
-  const w = textWidth(chip ? m.font.cchip : m.font.bar, e.label) +
-    (e.label.length - 1) * -0.2 + pad;
-  // n columns are n column widths plus the n - 1 gaps they span.
+  e.lw = labelWidth(e, m);
+  let w = e.lw + m.kinds[kindOf(e)].pad;
+  // A pointer's outline stands on its own days and cannot be widened to hold
+  // a longer label, and a label printed across a dashed edge reads as
+  // neither. One that does not fit inside is written beside the outline, so
+  // the reservation is the outline, the gap and the label.
+  e.out = !!e.makeup && w > spanW(e.cols, m) + 0.5;
+  if (e.out) w = spanW(e.cols, m) + 4 + e.lw;
   let n = e.cols;
-  while (n < 7 && n * m.colW + (n - 1) * 4 < w + 1) n++;
+  while (n < 7 && spanW(n, m) < w + 1) n++;
   return n;
 }
 // The packer collides on the reservation, not on the days: two labels that
@@ -557,6 +611,22 @@ function reserve(events, m) {
     e.rs = e.spillL ? Math.max(0, 7 - e.reach) : e.start;
   }
 }
+// A face that finishes loading can change what every label measures, so the
+// kept widths go. A strip on screen is laid out again only if a label is no
+// longer drawn at the width it was reserved at: the stand-in face is matched
+// to the figure face's metrics, so as a rule nothing has moved, and a paint
+// that changes nothing is still one more paint for the scroll anchor to
+// carry the strip through while it may be growing.
+function fontsChanged() {
+  labelW = new Map();
+  if (!showing || !months.size) return;
+  for (const el of byId('grid').querySelectorAll('[data-lw]')) {
+    if (Math.abs(el.querySelector('.lb').getBoundingClientRect().width - el.dataset.lw) > 0.5) {
+      renderCalendar();
+      return;
+    }
+  }
+}
 
 // A 補結 segment carries no amount: it points at the run that does.
 function makeupLabel(point, from) {
@@ -568,6 +638,9 @@ function eventHtml(e, lane) {
   // backwards, so an item whose column precedes its predecessor's would be
   // pushed to a new row and the lane would silently stop being one row.
   const place = 'grid-column:' + (e.rs + 1) + '/span ' + e.reach + ';grid-row:' + (lane + 1);
+  // The width the label was reserved at, for whoever checks the layout
+  // against what was drawn.
+  const lw = e.label ? ' data-lw="' + e.lw.toFixed(2) + '"' : '';
   if (e.type === 'bar') {
     const b = e.batch;
     const cls = ['bar', b.state];
@@ -575,6 +648,7 @@ function eventHtml(e, lane) {
     if (e.cutR) cls.push('cut-r');
     if (e.cutL) cls.push('cut-l');
     if (e.spillL) cls.push('spill-l');
+    if (e.out) cls.push('out');
     // Repeating the lane's track inside the reservation puts the fill's edges
     // on the same column edges the cells above use.
     const at = e.spillL ? e.reach - e.cols + 1 : 1;
@@ -584,18 +658,18 @@ function eventHtml(e, lane) {
     let fill = '';
     if (b.state === 'partial' && !e.makeup && b.confirmed_amount > 0) {
       const pct = Math.max(0, Math.min(100, (b.received / b.confirmed_amount) * 100)).toFixed(2);
-      fill = ';background:linear-gradient(90deg,var(--paid-bg) 0 ' + pct + '%,var(--banner-bg) ' +
+      fill = ';background:linear-gradient(90deg,var(--green) 0 ' + pct + '%,var(--amber) ' +
         pct + '% 100%)';
     }
     return '<span class="slot" style="' + place +
       ';grid-template-columns:repeat(' + e.reach + ',minmax(0,1fr))">' +
       '<button class="' + cls.join(' ') + '" style="grid-column:' + at + '/span ' + e.cols + fill +
-      '" data-bar="' + b.id + '">' + e.label + '</button></span>';
+      '" data-bar="' + b.id + '"' + lw + '>' + (e.label ? labelHtml(e) : '') + '</button></span>';
   }
   const c = e.credit;
   const cls = 'cchip' + chipState(c) + (e.spillL ? ' spill-l' : '');
-  return '<button class="' + cls + '" style="' + place + '" data-chip="' + c.id + '">' +
-    e.label + '</button>';
+  return '<button class="' + cls + '" style="' + place + '" data-chip="' + c.id + '"' + lw + '>' +
+    labelHtml(e) + '</button>';
 }
 
 function renderCalendar() {
@@ -1811,8 +1885,8 @@ export const settleView = {
       if (key === viewMonth) return;
       if (await ensureMonth(key)) scrollToMonth(key, true);
     });
-    byId('settle-chips').addEventListener('click', e => {
-      const c = e.target.closest('.chip');
+    byId('settle-tabs').addEventListener('click', e => {
+      const c = e.target.closest('.tab');
       if (!c || c.dataset.f === curPlat) return;
       curPlat = c.dataset.f;
       savePlat();
@@ -1820,7 +1894,7 @@ export const settleView = {
       // strip starts again where the operator would start reading it.
       refound(todayMonth());
     });
-    byId('settle-summary').addEventListener('click', e => {
+    byId('settle-foot').addEventListener('click', e => {
       if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
     });
     // The whole calendar area, not just the week rows: the legend and the padding
@@ -1849,6 +1923,8 @@ export const settleView = {
       if (t) setFocus(t); else clearFocus();
     });
     cal.addEventListener('pointerleave', e => { if (hovering(e)) clearFocus(); });
+    document.fonts.ready.then(fontsChanged);
+    document.fonts.addEventListener('loadingdone', fontsChanged);
     // Column width and font size are measured, so a rotation or a resized window
     // has to re-reserve every label against the new geometry.
     window.addEventListener('resize', () => {

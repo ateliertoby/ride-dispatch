@@ -948,11 +948,13 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
 
     'od' is the day row opening the order it stands for: the row carries the
     reconciliation view, the sheet behind it carries the order.  'k' and 's'
-    are the keys and steppers of that sheet's numpad, the day view's too."""
+    are the keys and steppers of that sheet's numpad, the day view's too.
+    'lw' is no action: the width a calendar label was reserved at, which the
+    browser checks compare with the width it was drawn at."""
     page = settle_view(client)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
-        "fold", "k", "od", "s", "upbatch", "upguess", "uptick", "upsave",
+        "fold", "k", "lw", "od", "s", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 
@@ -1178,7 +1180,7 @@ def test_settle_page_carries_the_copy_for_a_short_batch(client):
     """The sheets that close a short-paid batch are built from these phrases."""
     page = settle_view(client)
     for phrase in ("等緊補數", "未收到補數", "可能對", "補收 ", "解除", "啱數",
-                   "琥珀框 = 入數已對但批次仍差"):
+                   "入數已對但批次仍差"):
         assert phrase in page
 
 
