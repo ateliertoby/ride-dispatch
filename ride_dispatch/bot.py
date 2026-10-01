@@ -16,15 +16,17 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from .ingest import parse_any, parking_fee, banner_fee
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
+from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PICKUP_POINTS
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, parking_sessions_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
                       db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS,
-                      car_park_point, hourly_fee, has_allowance, TRACKED_CAR_PARKS)
+                      car_park_point, hourly_fee, has_allowance, TRACKED_CAR_PARKS,
+                      no_entry_orders, no_entry_sessions_since,
+                      NO_ENTRY_MINUTES, NO_ENTRY_TAG, NO_ENTRY_FROM, NO_ENTRY_TO)
 from .phone import format_phone_e164
 from .service import expected_of, is_flight_pickup, label as service_label
 from . import statement
@@ -488,6 +490,19 @@ async def handle_callback(update: Update, context):
         word = f"人手改：{_VERDICT_WORDS[verdict]}"
         await query.message.edit_text(f"{query.message.text}\n{word}", reply_markup=None)
         await query.answer(word)
+
+    elif query.data.startswith("park:point:"):
+        # The order id comes last because it is the one part that may itself
+        # contain a colon.
+        _, _, point, order_id = query.data.split(":", 3)
+        if point not in PICKUP_POINTS or get_order_by_id(DB_PATH, order_id) is None:
+            await query.answer("搵唔到呢張單，或者已經取消")
+            return
+        fields = pickup_point_fields(point)
+        update_order_fields(DB_PATH, order_id, fields)
+        await query.message.edit_text(
+            f"#{order_id[-4:]} 已改 {point}，停車費 ${fields['parking_fee']:g}", reply_markup=None)
+        await query.answer(f"已改 {point}")
 
     elif query.data.startswith("park:pay:"):
         session_id = int(query.data.rsplit(":", 1)[1])
@@ -1117,6 +1132,12 @@ async def _parking_tick(context):
         chat_id = _notify_chat_id()
         if chat_id:
             await _check_parking(context.application.bot, chat_id, tick_start)
+            # After the car park check, so a visit it has just opened is seen;
+            # guarded on its own so it can never cost the tick its cadence.
+            try:
+                await _check_no_entry(context.application.bot, chat_id, tick_start)
+            except Exception:
+                logger.exception("no-entry check error")
         # Read after the check, so a visit that just opened or closed is
         # already on the cadence it calls for.
         interval = _parking_interval()
@@ -1611,6 +1632,59 @@ async def _check_parking(bot, chat_id: int, now: datetime):
             sent = False
         if sent:
             update_parking_session(DB_PATH, session["id"], auto_link_sent=1)
+
+
+# What the operator can answer a no-entry verdict with. Car Park 1 is invisible
+# to the lookup, so only the operator can say the car was there; Car Park 4 is
+# for a visit the tracker missed.
+_NO_ENTRY_OVERRULES = (("P1", "其實去咗"), ("P4", "其實係"))
+# Telegram refuses a message whose callback_data exceeds this many bytes.
+CALLBACK_DATA_MAX = 64
+
+
+def _no_entry_buttons(order_id: str) -> InlineKeyboardMarkup | None:
+    row = [InlineKeyboardButton(f"{words} {point} ${PICKUP_POINTS[point]:g}",
+                                callback_data=f"park:point:{point}:{order_id}")
+           for point, words in _NO_ENTRY_OVERRULES]
+    # An order id too long to fit would make Telegram reject the whole push;
+    # the verdict then goes out bare and is corrected on the dashboard.
+    if any(len(b.callback_data.encode()) > CALLBACK_DATA_MAX for b in row):
+        return None
+    return InlineKeyboardMarkup([row])
+
+
+async def _check_no_entry(bot, chat_id: int, now: datetime):
+    """Move a Car Park 4 pickup the car never entered for to the hotel.
+
+    Reads the database only: the verdict rests on visits already recorded, so
+    it does not wait for HKIA to answer on this tick, nor for any order to be
+    armed. Without a plate there is no tracker and so no evidence of absence.
+    """
+    if _get_parking_client() is None:
+        return
+    orders = _orders_in(get_tracking_dates(DB_PATH, now))
+    if not orders:
+        return
+    sessions = parking_sessions_since(DB_PATH, db_time(no_entry_sessions_since(now)),
+                                      [o["order_id"] for o in orders])
+    for order in no_entry_orders(orders, sessions, now):
+        order_id = order["order_id"]
+        try:
+            fields = pickup_point_fields(NO_ENTRY_TO)
+            flight = display_flight_no(order.get("flight_number"))
+            msg = (f"#{order_id[-4:]} {flight} 落地 {NO_ENTRY_MINUTES} 分鐘冇 {NO_ENTRY_FROM} 入場紀錄\n"
+                   f"已轉{NO_ENTRY_TO}上車，停車費 ${(order.get('parking_fee') or 0):g} → ${fields['parking_fee']:g}")
+            # Push first, then write: a push that fails leaves the order
+            # untouched, so the next tick retries with the planned fee still
+            # there to quote. Once the push is out either write alone stops a
+            # second one: the order is no longer at Car Park 4, and the tag
+            # keeps it from being judged again if the operator puts it back.
+            await bot.send_message(chat_id=chat_id, text=msg, reply_markup=_no_entry_buttons(order_id))
+            update_order_fields(DB_PATH, order_id, fields)
+            mark_reminder_sent(DB_PATH, order_id, NO_ENTRY_TAG)
+            logger.info("no-entry switch to %s for %s", NO_ENTRY_TO, order_id[-4:])
+        except Exception:
+            logger.exception("no-entry switch failed for %s", order_id[-4:])
 
 
 def _clamp_for_reminders(interval: int, now: datetime) -> int:
