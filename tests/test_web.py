@@ -21,6 +21,22 @@ def client(monkeypatch):
     os.unlink(path)
 
 
+def asset(client, path: str) -> str:
+    """A script or stylesheet of the shell, as the app serves it."""
+    res = client.get(f"/assets/{web.asset_version()}/{path}")
+    assert res.status_code == 200, path
+    return res.get_data(as_text=True)
+
+
+def settle_view(client) -> str:
+    """Everything the settle view is drawn from: its root in the shell
+    document, its own module, and the order sheet it opens."""
+    with open(os.path.join(web.app.template_folder, "app.html"), encoding="utf-8") as f:
+        html = f.read()
+    root = html[html.index('<div id="view-settle"'):html.index('<div class="toast"')]
+    return root + asset(client, "js/settle/index.js") + asset(client, "js/order-sheet.js")
+
+
 def seed_order(order_id="Q1", scheduled="2026-07-01 14:30:00"):
     save_quick_order(web.DB_PATH, order_id, "滴滴", scheduled, 200.0, 50.0, source="滴滴")
 
@@ -932,8 +948,8 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
 
     'od' is the day row opening the order it stands for: the row carries the
     reconciliation view, the sheet behind it carries the order.  'k' and 's'
-    are the keys and steppers of that sheet's numpad, the dashboard's own."""
-    page = client.get("/settle").get_data(as_text=True)
+    are the keys and steppers of that sheet's numpad, the day view's too."""
+    page = settle_view(client)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
         "fold", "k", "od", "s", "upbatch", "upguess", "uptick", "upsave",
@@ -941,15 +957,20 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
         "unlink-batch", "unlink-credit", "unlinkgo"}
 
 
-def test_both_pages_open_the_same_order_sheet(client):
-    """An order found while settling is corrected in the sheet the dashboard
-    opens: one component that both pages include, each supplying only its
-    host, so the two cannot drift apart."""
-    for path in ("/", "/settle"):
-        page = client.get(path).get_data(as_text=True)
-        assert page.count("function detailView(") == 1
-        assert page.count("function numpadView(") == 1
-        assert page.count("const orderHost = {") == 1
+def test_both_views_open_the_same_order_sheet(client):
+    """An order found while settling is corrected in the sheet the day view
+    opens: one module that both views import, each supplying only its host,
+    so the two cannot drift apart."""
+    sheet = asset(client, "js/order-sheet.js")
+    assert sheet.count("function detailView(") == 1
+    assert sheet.count("function numpadView(") == 1
+    for path in ("js/day/index.js", "js/settle/index.js"):
+        view = asset(client, path)
+        assert "function detailView(" not in view
+        assert "function numpadView(" not in view
+        assert len(re.findall(r"from '\.\./order-sheet\.js'", view)) == 1
+        assert view.count("const orderHost = {") == 1
+        assert "useOrderHost(orderHost)" in view
 
 
 def test_allocating_the_whole_batch_pays_it(client):
@@ -1155,7 +1176,7 @@ def test_unlink_endpoint_takes_one_credit_off_a_batch(client):
 
 def test_settle_page_carries_the_copy_for_a_short_batch(client):
     """The sheets that close a short-paid batch are built from these phrases."""
-    page = client.get("/settle").get_data(as_text=True)
+    page = settle_view(client)
     for phrase in ("等緊補數", "未收到補數", "可能對", "補收 ", "解除", "啱數",
                    "琥珀框 = 入數已對但批次仍差"):
         assert phrase in page
