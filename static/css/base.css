@@ -102,10 +102,15 @@ body {
 .p { margin-inline: 0 -.34em; }
 button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
+/* ---- masthead ----
+   Both views open with the same head: a figure and its keys, a line of text
+   tabs, a column head, then the list; and both close with a fixed foot of
+   totals. The inset for the status bar is on the header itself: the banner
+   rule below replaces this padding when a banner takes the top. */
+:root { --gutter: 16px; }
 .header {
   position: sticky; top: 0; z-index: 10;
-  background: var(--bg); padding: 10px 14px 8px;
-  padding-top: calc(10px + env(safe-area-inset-top));
+  background: var(--bg); padding: calc(14px + env(safe-area-inset-top)) 0 0;
   border-bottom: 1px solid var(--line);
 }
 /* ---- shell banners ---- */
@@ -135,39 +140,74 @@ body:has(> .shell-banner:not([hidden])) .header {
   padding-top: 10px;
 }
 
-.header-row { display: flex; align-items: center; gap: 8px; }
+.header-row { display: flex; align-items: flex-end; gap: 10px; padding: 0 var(--gutter) 10px; }
+/* The figure a view is turned to (a day, a month) and the words beside it.
+   The words drop under the figure when the keys leave them no room, rather
+   than being cut. */
+.date-btn {
+  background: none; border: none; cursor: pointer; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  flex: 1; min-width: 0; min-height: 40px; text-align: left;
+  display: flex; flex-wrap: wrap; align-items: baseline; align-content: flex-end; gap: 2px 8px;
+  font-size: 13px; font-weight: 400;
+}
+.date-btn .d { font-family: var(--mono); font-weight: 700; font-size: 30px; line-height: 1; letter-spacing: -.03em; }
+.date-btn .w { color: var(--text-2); white-space: nowrap; }
+.date-btn .w b { color: var(--text); font-weight: 600; }
+.date-btn .y { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-left: 6px; }
+.keys { display: flex; gap: 6px; flex-shrink: 0; }
 /* Also worn by links (the jumps to the other view), hence text-decoration. */
 .nav-btn, .icon-btn {
-  background: var(--surface); border: none; border-radius: 10px;
-  width: 42px; height: 40px; font-size: 17px; cursor: pointer;
-  color: var(--text-2); flex-shrink: 0; text-decoration: none;
+  width: 40px; height: 40px; background: none; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px;
+  font-family: var(--mono); font-size: 16px; color: var(--text-2);
+  flex-shrink: 0; text-decoration: none;
   display: flex; align-items: center; justify-content: center;
 }
-.nav-btn:active, .icon-btn:active { background: var(--surface-press); }
-.date-btn {
-  background: none; border: none; cursor: pointer;
-  font-size: 17px; font-weight: 650; color: var(--text);
-  font-variant-numeric: tabular-nums;
-  flex: 1; text-align: center; height: 40px;
-}
-.date-btn small { display: block; font-size: 11px; font-weight: 500; color: var(--text-3); }
+.nav-btn:active, .icon-btn:active { background: var(--surface); color: var(--text); }
 
-.summary {
-  text-align: center; font-size: 13px; color: var(--text-2);
-  font-variant-numeric: tabular-nums; padding-top: 4px;
+/* As tall as its tabs before they are written, so the masthead does not
+   grow when the first answer lands. */
+.tabs {
+  display: flex; gap: 18px; min-height: 37px; padding: 0 var(--gutter);
+  overflow-x: auto; scrollbar-width: none;
 }
-.summary .warn { color: var(--amber); }
+.tabs::-webkit-scrollbar { display: none; }
+/* Taller than the text needs: a tab is tapped with a thumb while driving. */
+.tab {
+  flex-shrink: 0; background: none; border: none; cursor: pointer;
+  padding: 8px 0 9px; font-size: 13px; line-height: 1.35; color: var(--text-3); white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.tab .n { font-family: var(--mono); font-size: 12px; margin-left: 4px; }
+.tab.on { color: var(--text); border-bottom-color: var(--text); }
+/* A platform with nothing to show recedes, unless it is the one chosen. */
+.tab.zero:not(.on) { opacity: .45; }
 
-.chips { display: flex; gap: 6px; padding: 10px 14px 2px; }
-.chip {
-  position: relative; flex: 1; height: 28px; border: none; border-radius: 8px;
-  cursor: pointer; background: var(--surface); color: var(--text-2);
-  font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+/* The column head: what the columns under it hold. Each view lays its own
+   columns out. */
+.cols {
+  padding-block: 7px; padding-inline: var(--gutter);
+  font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3);
+  border-top: 1px solid var(--line);
 }
-/* The pill is 28px by design, but the tappable area must stay >= 44px. */
-.chip::after { content: ""; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px; }
-.chip.on { background: var(--text); color: var(--bg); }
-.chip.zero { opacity: .4; }
+
+/* ---- foot ----
+   A view's totals. Under the sheets and their scrim, level with the
+   masthead. */
+.foot {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+  background: var(--bg); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.foot-in {
+  max-width: 480px; margin: 0 auto; padding: 10px var(--gutter) 12px; min-height: 61px;
+  display: flex; align-items: baseline; gap: 14px;
+}
+.foot .k { display: block; font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); margin-bottom: 2px; }
+.foot .v { font-family: var(--mono); font-size: 17px; line-height: 1.35; font-weight: 700; }
+.foot .tot { margin-left: auto; text-align: right; }
+.foot .warn .v { color: var(--amber); }
 
 .empty { text-align: center; color: var(--text-3); padding: 60px 0; font-size: 15px; }
 
@@ -260,9 +300,10 @@ body:has(> .shell-banner:not([hidden])) .header {
 }
 .sheet:has(> .os) .sheet-back:active { background: var(--surface-press); color: var(--text); }
 
+/* Above the foot, where each view keeps its totals. */
 .toast {
   position: fixed; z-index: 30; left: 50%; transform: translateX(-50%) translateY(20px);
-  bottom: calc(30px + env(safe-area-inset-bottom));
+  bottom: calc(78px + env(safe-area-inset-bottom));
   background: var(--text); color: var(--bg);
   padding: 10px 16px; border-radius: 3px; font-size: 14px; font-weight: 600;
   opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none;
