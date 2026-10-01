@@ -172,15 +172,6 @@ export function svcLabel(st) {
   return '單程';
 }
 export function isFlightPickup(st) { return st === '接机'; }
-// Badge class encodes trip direction.
-export function svcBadge(o) {
-  const p = platform(o);
-  if (p !== 'ride') return p;
-  const st = o.service_type;
-  if (st === '接机' || st === '接站') return 'pickup';
-  if (st === '送机') return 'dropoff';
-  return 'transfer';
-}
 // The tail an order is known by on screen: a quick order's own suffix, else
 // the last six digits.
 export function shortId(id) {

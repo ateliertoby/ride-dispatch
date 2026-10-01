@@ -62,13 +62,6 @@
      still owes money, blue = bank money in but not matched to a statement,
      neutral = waiting on someone else, dimmed green = finished business. */
   --blue: #5aa9ff;  --blue-bg: rgba(90,169,255,.16);
-  /* Service badges: trip direction for 接送, the app for everything else. */
-  --pickup-bg: rgba(77,163,255,.16);  --pickup-fg: #6ab2ff;
-  --dropoff-bg: rgba(255,159,74,.16); --dropoff-fg: #ffb066;
-  --didi-bg: rgba(61,220,132,.14);    --didi-fg: #52d98b;
-  --uber-bg: rgba(186,140,255,.16);   --uber-fg: #c9a2ff;
-  --fp-bg: rgba(255,63,133,.16);      --fp-fg: #ff6ba3;
-  --transfer-bg: rgba(150,160,175,.14); --transfer-fg: #a8b1c0;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -90,12 +83,6 @@
     --banner-bg: #f6e4b9;  --banner-fg: #a86400;
     --paid-bg: #d3ecdb;
     --blue: #1f6fd6;  --blue-bg: #e3eefb;
-    --pickup-bg: #e8f4fd;  --pickup-fg: #0a84ff;
-    --dropoff-bg: #fff3e0; --dropoff-fg: #f57c00;
-    --didi-bg: #e8f5e9;    --didi-fg: #2e9e52;
-    --uber-bg: #f3e5f5;    --uber-fg: #8e24aa;
-    --fp-bg: #fce4ef;      --fp-fg: #d70f64;
-    --transfer-bg: #f0f1f3; --transfer-fg: #666;
   }
 }
 html { -webkit-text-size-adjust: 100%; }
@@ -227,17 +214,6 @@ body:has(> .shell-banner:not([hidden])) .header {
 .sum-row { display: flex; justify-content: space-between; padding: 9px 2px; font-size: 16px; }
 .sum-row .k { color: var(--text-2); }
 .sum-row .v { font-weight: 650; font-variant-numeric: tabular-nums; }
-
-.badge {
-  font-size: 12px; font-weight: 650; padding: 3px 8px;
-  border-radius: 6px; display: inline-block;
-}
-.badge.pickup { background: var(--pickup-bg); color: var(--pickup-fg); }
-.badge.dropoff { background: var(--dropoff-bg); color: var(--dropoff-fg); }
-.badge.didi { background: var(--didi-bg); color: var(--didi-fg); }
-.badge.uber { background: var(--uber-bg); color: var(--uber-fg); }
-.badge.foodpanda { background: var(--fp-bg); color: var(--fp-fg); }
-.badge.transfer { background: var(--transfer-bg); color: var(--transfer-fg); }
 
 /* ---- the board's manner ----
    The day view's panels, and the order's own sheet wherever it is opened,
