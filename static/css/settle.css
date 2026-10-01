@@ -186,10 +186,13 @@
   .bar.awaiting.makeup { color: var(--text-2); }
   .bar.partial.makeup { color: var(--amber); }
   /* A pointer too long for the days it stands on is written beside the
-     outline, not across its edge: the script reserves the outline, the gap
-     and the label, and marks the bar. */
-  .bar.makeup.out .lb { position: absolute; left: calc(100% + 4px); }
-  .bar.makeup.out.spill-l .lb { left: auto; right: calc(100% + 4px); }
+     outline, not across its edge, and so is the label of a bar on the last
+     columns that is too long for it: the script reserves the mark, the gap
+     and the label, and marks the bar. Beside a solid bar the label is on
+     the page and takes the page's ink. */
+  .bar.out .lb { position: absolute; left: calc(100% + 4px); }
+  .bar.out.spill-l .lb { left: auto; right: calc(100% + 4px); }
+  .bar.partial.out:not(.makeup, .dim) .lb { color: var(--text); background-image: none; }
   /* An event sitting on the last column reserves its room to the left, so its
      label has to leave the fill leftwards as well. */
   .bar.spill-l { justify-content: flex-end; }

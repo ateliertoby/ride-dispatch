@@ -628,6 +628,18 @@ function reserve(events, m) {
   for (const e of events) {
     e.reach = e.label ? reachOf(e, m) : e.cols;
     e.spillL = e.start + e.reach > 7;
+    // A label longer than its bar starts inside the bar and runs out of its
+    // far end. Anchored to the right edge it would have to run out of the
+    // near end instead, starting wherever its length put it: on the bar's
+    // own edge as often as not, with its first figure cut by it. Such a
+    // label is written whole beside the bar, as a pointer's is, and the
+    // reservation is the bar, the gap and the label.
+    if (e.spillL && e.type === 'bar' && !e.makeup && e.label &&
+        e.lw + m.kinds.bar.pad > spanW(e.cols, m) + 0.5) {
+      e.out = true;
+      const w = spanW(e.cols, m) + 4 + e.lw;
+      while (e.reach < 7 && spanW(e.reach, m) < w + 1) e.reach++;
+    }
     e.rs = e.spillL ? Math.max(0, 7 - e.reach) : e.start;
   }
 }
