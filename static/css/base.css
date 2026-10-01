@@ -108,8 +108,11 @@ body {
 }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 /* A monospaced colon, comma or point takes a whole cell; pulled in so 13:42
-   and $2169.50 read as one figure. shared.js:tight() writes the wrapper. */
-.p { margin-inline: -.2em; }
+   and $2169.50 read as one figure. shared.js:tight() writes the wrapper. All
+   of it comes off the right: B612 Mono draws these marks at the left of
+   their cell (about .06em before the ink, .4em after), so a pull on the left
+   would run the mark into the figure before it. */
+.p { margin-inline: 0 -.34em; }
 button { font-family: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
 .header {
