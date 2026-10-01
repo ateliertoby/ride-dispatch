@@ -293,6 +293,7 @@ class Driver:
         self.ctx = ctx
         self.base = base_url
         self.page = None
+        self.viewport = None    # a window size to open pages at, in place of the device's
 
     # -- waiting --
 
@@ -367,6 +368,8 @@ class Driver:
         self.page = self.ctx.new_page()
         self.page.set_default_timeout(TIMEOUT_MS)
         self._watch(self.page)
+        if self.viewport:
+            self.page.set_viewport_size(self.viewport)
         self.page.goto(self.base + path)
         self.on(ready).first.wait_for()
         # Each connection of the event stream begins with a greeting, and a

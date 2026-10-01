@@ -5,7 +5,8 @@
     python scripts/shots.py --diff DIR OTHER            compare two finished runs
 
 Each state is saved as `<state>-dark.png` and `<state>-light.png`, taken in
-Playwright WebKit as an iPhone 14. A comparison prints the number of differing
+Playwright WebKit as an iPhone 14. The day view's states are taken a second
+time in a window 340 wide (`<state>-340-…`), where its columns are tightest. A comparison prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -33,6 +34,10 @@ import seed_demo_db  # noqa: E402
 from harness import ROOT, SCHEMES, Driver, Server, new_context, paste_message  # noqa: E402
 
 
+# The narrow window the day view's states are shot at a second time.
+NARROW = 340
+
+
 class Shooter(Driver):
     """One page per state: open it, drive it to the state, save the image."""
 
@@ -41,11 +46,12 @@ class Shooter(Driver):
         self.out = out
         self.scheme = scheme
         self.t = targets
+        self.suffix = ""
 
     def save(self, name: str, full_page: bool = False) -> None:
         if self.errors:
             raise RuntimeError(f"{name}: page error: {self.errors[0]}")
-        self.page.screenshot(path=os.path.join(self.out, f"{name}-{self.scheme}.png"),
+        self.page.screenshot(path=os.path.join(self.out, f"{name}{self.suffix}-{self.scheme}.png"),
                              full_page=full_page, animations="disabled", caret="hide")
 
     def done(self) -> None:
@@ -101,7 +107,7 @@ def states() -> dict:
 
     def day_filter(s):
         s.day()
-        s.tap(".chip", has_text="接送")
+        s.tap(".tab", has_text="接送")
         s.save("day-filter")
 
     def day_order_sheet(s):
@@ -205,7 +211,14 @@ def states() -> dict:
         s.on(".sheet.show [data-unlinkgo]").wait_for()
         s.save("settle-unlink")
 
-    return {
+    def narrow(fn):
+        def run(s):
+            s.viewport = {"width": NARROW, "height": 844}
+            s.suffix = f"-{NARROW}"
+            fn(s)
+        return run
+
+    wide = {
         "day": day, "day-filter": day_filter, "day-order-sheet": day_order_sheet,
         "day-numpad": day_numpad, "day-cancel-confirm": day_cancel_confirm,
         "day-add": day_add, "day-add-price": day_add_price,
@@ -217,6 +230,8 @@ def states() -> dict:
         "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
         "settle-undo": settle_undo, "settle-unlink": settle_unlink,
     }
+    return wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()
+                   if name.startswith("day")}
 
 
 def shoot(base_url: str, out: str, today: date, only: str) -> None:

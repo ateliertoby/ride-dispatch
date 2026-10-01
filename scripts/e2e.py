@@ -31,7 +31,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -120,6 +120,15 @@ def week_id(d: date) -> str:
 
 def month_label(d: date, now: bool = False) -> str:
     return f"{d.year} 年 {d.month} 月" + ("今個月" if now else "")
+
+
+def date_head(day: str, today: str = "") -> str:
+    """What the day view's date button says for a day: month and day as one
+    figure, then the weekday; the year only when it is not `today`'s."""
+    d = date.fromisoformat(day)
+    return (f"{d.month:02d}·{d.day:02d}星期{WEEKDAY[d.weekday()]}"
+            + (" · 今日" if day == today else "")
+            + (str(d.year) if today and d.year != date.fromisoformat(today).year else ""))
 
 
 def settle_path(d: date, platform: str = "ride") -> str:
@@ -418,6 +427,10 @@ class Session(Driver):
     def row(self, oid: str) -> str:
         return f'.orders .row[data-oid="{oid}"]'
 
+    def foot(self) -> list:
+        """The day view's foot, cell by cell: label and figure run together."""
+        return self.texts(".foot .foot-in > div")
+
     def date_text(self) -> str:
         return self.text(".date-btn")
 
@@ -685,7 +698,7 @@ class Session(Driver):
 def day_boot(s: Session) -> None:
     s.open_day()
     s.eq(s.page.title(), "Ride Dispatch", "document title")
-    s.eq(s.date_text(), s.day() + "星期" + "一二三四五六日"[s.today.weekday()] + " · 今日", "date button")
+    s.eq(s.date_text(), date_head(s.day(), s.day()), "date button")
     s.eq(s.rows(), s.ids(), "rows, in the server's order")
     s.expect(s.t["order"]["cancelled"] not in s.rows(), "a cancelled order is listed")
     s.expect(("GET", "/api/orders?date=" + s.day(), "fetch") in s.requests or
@@ -749,7 +762,7 @@ def day_handlers_resolve(s: Session) -> None:
 def day_navigation(s: Session) -> None:
     s.open_day()
     s.go_days(1)
-    s.expect(s.date_text().startswith(s.day(1)) and "今日" not in s.date_text(), "date button on tomorrow")
+    s.expect(s.date_text().startswith(date_head(s.day(1))) and "今日" not in s.date_text(), "date button on tomorrow")
     s.eq(s.rows(), s.ids(1), "tomorrow's rows")
     s.go_days(-1)
     s.eq(s.rows(), s.ids(), "today's rows after going back")
@@ -758,7 +771,7 @@ def day_navigation(s: Session) -> None:
     s.eq(s.rows(), s.ids(-1), "yesterday's rows")
     s.tap(".date-btn")
     s.eq(s.rows(), s.ids(), "today's rows after tapping the date")
-    s.expect(s.date_text().startswith(s.day()), "date button after tapping the date")
+    s.expect(s.date_text().startswith(date_head(s.day())), "date button after tapping the date")
     # The viewed date is not kept across a reload.
     s.go_days(1)
     s.allow("request failed: GET /api/events")     # the reload cuts the event stream
@@ -775,10 +788,10 @@ def to_a_day_never_seen(s: Session) -> tuple:
     s.hold(near, "/api/orders?date=" + s.day(2))
     s.press('[aria-label="後一日"]')
     s.wait(lambda: s.holding(near), "the request for tomorrow")
-    s.expect(s.date_text().startswith(s.day(1)), "the date button did not change at once")
+    s.expect(s.date_text().startswith(date_head(s.day(1))), "the date button did not change at once")
     shown = s.rows()
     s.press('[aria-label="後一日"]')
-    s.wait(lambda: s.date_text().startswith(s.day(2)), "the date button to change")
+    s.wait(lambda: s.date_text().startswith(date_head(s.day(2))), "the date button to change")
     return near, shown
 
 
@@ -834,7 +847,7 @@ def day_out_of_order(s: Session) -> None:
              body=json.dumps({"orders": late, "date": s.day(1)}))
     s.never(lambda: "LATE-ANSWER" in s.rows() or s.rows() != s.ids(),
             "a late answer painted a day the operator had left")
-    s.expect(s.date_text().startswith(s.day()), "date button")
+    s.expect(s.date_text().startswith(date_head(s.day())), "date button")
     s.release_all()
     s.settle()
     s.go_days(1)
@@ -849,7 +862,7 @@ def day_failed_load(s: Session) -> None:
     s.answer("/api/orders?date=" + s.day(2), status=500, content_type="text/html", body="<html>boom</html>")
     s.wait_toast("載入失敗")
     s.eq(s.rows(), shown, "the previous rows stay on screen")
-    s.expect(s.date_text().startswith(s.day(2)), "date button")
+    s.expect(s.date_text().startswith(date_head(s.day(2))), "date button")
     s.release_all()
     s.settle()
 
@@ -883,10 +896,10 @@ def day_auth_expired(s: Session) -> None:
     s.on(".scrim").first.tap(position={"x": 8, "y": 120})
     s.stub("GET", "**/api/orders?date=*", 401, "<html>log in</html>", "text/html")
     s.press('[aria-label="後一日"]')
-    s.wait(lambda: s.date_text().startswith(s.day(1)), "the date to change")
+    s.wait(lambda: s.date_text().startswith(date_head(s.day(1))), "the date to change")
     s.never(s.toast, "a toast for an expired login (held day)")
     s.press('[aria-label="後一日"]')
-    s.wait(lambda: s.date_text().startswith(s.day(2)), "the date to change")
+    s.wait(lambda: s.date_text().startswith(date_head(s.day(2))), "the date to change")
     s.never(s.toast, "a toast for an expired login (day never seen)")
     s.settle()
 
@@ -910,10 +923,10 @@ def day_timing(s: Session) -> None:
     s.wait_toast("計時 關")
     s.page.mouse.up()
     s.settle()
-    s.expect(s.date_text().startswith(s.day(1)), "the hold's release went to today")
+    s.expect(s.date_text().startswith(date_head(s.day(1))), "the hold's release went to today")
     s.page.wait_for_timeout(2600)
     s.press('[aria-label="後一日"]')
-    s.wait(lambda: s.date_text().startswith(s.day(2)), "the date to change")
+    s.wait(lambda: s.date_text().startswith(date_head(s.day(2))), "the date to change")
     s.settle()
     s.never(s.toast, "a timing toast with the readout off", ms=500)
     s.page.mouse.down()
@@ -927,9 +940,9 @@ def day_timing(s: Session) -> None:
     s.eq(s.page.evaluate("() => localStorage.getItem('perf')"), None, "the key after ?perf=0")
 
 
-# ---- day view: chips, rows and marks (inventory A11-A12, B, C, K9) ----
+# ---- day view: tabs, foot, rows and marks (inventory A11-A12, B, C, K9) ----
 
-@check("day.filter-chips")
+@check("day.filter-tabs")
 def day_filter(s: Session) -> None:
     s.open_day()
     orders = s.orders()
@@ -943,40 +956,58 @@ def day_filter(s: Session) -> None:
     def summary(shown):
         priced = [o for o in shown if o["price"]]
         total = sum(o["price"] + (o["banner_fee"] or 0) for o in priced)
-        text = f"{len(shown)} 程 · ${money(total)}"
+        cells = [f"程數{len(shown)}"]
         if len(shown) > len(priced):
-            text += f" · {len(shown) - len(priced)} 未入價"
-        return text
+            cells.append(f"未入價{len(shown) - len(priced)}")
+        return cells + [f"當日車費${money(total)}"]
 
     n = {k: len([o for o in orders if plat(o) == k]) for k in ("ride", "didi", "uber", "foodpanda")}
-    chips = s.page.eval_on_selector_all(".chips .chip", "els => els.map(e => e.textContent)")
-    s.eq(chips, [f"接送 {n['ride']}", f"滴滴 {n['didi']}", f"Uber {n['uber']}", f"熊貓 {n['foodpanda']}"], "chips")
-    s.eq(s.text(".summary"), summary(orders), "summary, no filter")
-    s.expect(s.count(".summary .warn"), "the unpriced count is not marked")
+    every = f"全部{len(orders)}"
+    tabs = s.page.eval_on_selector_all(".tabs .tab", "els => els.map(e => e.textContent)")
+    s.eq(tabs, [every, f"接送{n['ride']}", f"滴滴{n['didi']}", f"Uber{n['uber']}", f"熊貓{n['foodpanda']}"], "tabs")
+    s.eq(s.texts(".tab.on"), [every], "highlighted tab with no filter")
+    s.eq(s.foot(), summary(orders), "foot, no filter")
+    s.expect(s.count(".foot .warn"), "the unpriced count is not marked")
 
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     didi = [o for o in orders if plat(o) == "didi"]
     s.eq(s.rows(), [o["order_id"] for o in didi], "rows under the 滴滴 filter")
-    s.eq(s.text(".summary"), summary(didi), "summary under the filter")
-    s.eq(s.text(".chip.on"), f"滴滴 {n['didi']}", "highlighted chip")
-    s.tap(".chip", has_text="接送")
+    s.eq(s.foot(), summary(didi), "foot under the filter")
+    s.eq(s.count(".foot .warn"), 0, "an unpriced count with every row showing priced")
+    s.eq(s.texts(".tab.on"), [f"滴滴{n['didi']}"], "highlighted tab")
+    s.tap(".tab", has_text="接送")
     ride = [o for o in orders if plat(o) == "ride"]
     s.eq(s.rows(), [o["order_id"] for o in ride], "rows under the 接送 filter")
-    s.eq(s.text(".summary"), summary(ride), "summary under the filter")
+    s.eq(s.foot(), summary(ride), "foot under the filter")
     # NEXT and NOW are worked out over the rows showing.
     s.eq(s.count(".orders .row.next"), 1, "NEXT rows under a filter")
     s.eq(s.count(".orders .now"), 1, "NOW lines under a filter")
-    s.tap(".chip", has_text="接送")
-    s.eq(s.count(".chip.on"), 0, "highlighted chips after tapping the filter again")
+    s.tap(".tab", has_text="接送")
+    s.eq(s.texts(".tab.on"), [every], "highlighted tabs after tapping the filter again")
     s.eq(s.rows(), [o["order_id"] for o in orders], "rows with the filter cleared")
+    s.eq(s.foot(), summary(orders), "foot with the filter cleared")
+    # 全部 clears whatever filter is on.
+    s.tap(".tab", has_text="Uber")
+    s.eq(len(s.rows()), n["uber"], "rows under the Uber filter")
+    s.tap(".tab", has_text="全部")
+    s.eq((s.texts(".tab.on"), s.rows()), ([every], [o["order_id"] for o in orders]), "after tapping 全部")
 
     # The filter survives a change of date; a platform with nothing is dimmed.
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     s.go_days(1)
-    s.eq(s.text(".chip.on"), "滴滴 0", "filter after changing date")
-    s.expect("zero" in s.on(".chip.on").first.get_attribute("class"), "an empty platform's chip is not dimmed")
+    s.eq(s.text(".tab.on"), "滴滴0", "filter after changing date")
+    s.expect("zero" in s.on(".tab.on").first.get_attribute("class"), "an empty platform's tab is not dimmed")
     s.eq(s.text(".empty"), "冇滴滴訂單", "empty text under a filter")
-    s.eq(s.text(".summary"), "0 程 · $0", "summary of nothing")
+    s.eq(s.foot(), ["程數0", "當日車費$0"], "foot of nothing")
+    # The foot is the bottom of the screen, and the last row scrolls clear of it.
+    s.tap(".tab", has_text="全部")
+    s.go_days(-1)
+    s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    s.settle()
+    foot = s.on(".foot").first.bounding_box()
+    last = s.on(s.row(s.rows()[-1])).first.bounding_box()
+    s.eq(round(foot["y"] + foot["height"]), s.page.viewport_size["height"], "the foot's bottom edge")
+    s.expect(last["y"] + last["height"] <= foot["y"], f"the last row is under the foot: {last} / {foot}")
 
 
 @check("day.rows-and-marks")
@@ -988,7 +1019,10 @@ def day_rows(s: Session) -> None:
         return s.on(s.row(oid)).first.get_attribute("class").split()
 
     def rail(oid):
-        return s.page.eval_on_selector_all(s.row(oid) + " .rail > div", "els => els.map(e => e.textContent)")
+        """The row's time, then its second line up to the marks."""
+        return s.page.eval_on_selector_all(
+            s.row(oid) + " .time, " + s.row(oid) + " .meta > .st, " + s.row(oid) + " .meta > .num",
+            "els => els.map(e => e.textContent)")
 
     # NEXT is the first row not yet done; rows before it that are done are dimmed.
     s.eq([r for r in s.rows() if "next" in cls(r)], [o["landed_banner"]], "NEXT row")
@@ -997,7 +1031,7 @@ def day_rows(s: Session) -> None:
     # The NOW line sits before the first row later than the clock.
     s.eq(s.text(".orders .now .now-t"), "14:00", "NOW time")
     after_now = s.page.evaluate(
-        "() => document.querySelector('.orders .now').closest('.gap').nextElementSibling.dataset.oid")
+        "() => document.querySelector('.orders .now').nextElementSibling.dataset.oid")
     later = [x["order_id"] for x in s.orders() if x["row_time"] > s.day() + " 14:00:00"]
     s.eq(after_now, later[0], "the row under the NOW line")
     box = s.on(s.row(o["landed_banner"])).first.bounding_box()
@@ -1010,21 +1044,48 @@ def day_rows(s: Session) -> None:
     s.eq(rail(o["landed_banner"]), ["13:42", "已降落", "出發 " + depart, "用車 14:27"], "rail of a landed pickup")
     s.eq(rail(o["upcoming_hotel"])[:2], ["16:55", "預計"], "rail of a pickup still in the air")
     s.eq(rail(o["dropoff"]), ["11:00"], "rail of a 送机")
-    s.eq(s.text(s.row(o["landed_banner"]) + " .flt"), "UO623", "flight box")
-    s.eq(s.text(s.row(o["landed_banner"]) + " .route .big"), "灣仔例子酒店", "shortened destination")
-    s.eq(s.text(s.row(o["dropoff"]) + " .route .small"), "機場", "the airport end of a 送机")
-    s.eq(s.page.eval_on_selector_all(s.row(o["landed_banner"]) + " .tag", "els => els.map(e => e.className + '|' + e.textContent)"),
-         ["tag banner|舉牌", "tag neutral|出場 45"], "tags")
-    s.eq(s.text(s.row(o["upcoming_hotel"]) + " .tag"), "出場 20", "exit tag")
-    s.expect("urgent" in s.on(s.row(o["upcoming_hotel"]) + " .tag").first.get_attribute("class"), "a 20 minute exit is not urgent")
+    s.eq(s.page.eval_on_selector_all(".orders .row .st", "els => els.map(e => e.className)"),
+         ["st gate", "st landed", "st est"], "status blocks, by state")
+    s.eq(s.text(s.row(o["landed_banner"]) + " .code"), "UO623", "flight number")
+    s.eq(s.text(s.row(o["landed_banner"]) + " .place"), "灣仔例子酒店", "shortened destination")
+    # A 送机 says so where a flight number would stand, and its place is
+    # where the passenger is collected.
+    s.eq((s.text(s.row(o["dropoff"]) + " .code"), s.text(s.row(o["dropoff"]) + " .place")),
+         ("送機", "旺角樣本賓館"), "code and place of a 送机")
+    s.eq((s.text(s.row(o["unpriced"]) + " .code"), s.text(s.row(o["unpriced"]) + " .place")),
+         ("單程", "尖沙咀示範酒店 →旺角樣本賓館"), "code and place of a 單程")
+    s.eq(s.page.eval_on_selector_all(s.row(o["landed_banner"]) + " .mk", "els => els.map(e => e.className + '|' + e.textContent)"),
+         ["mk sign|舉牌", "mk neutral|出場 45"], "marks")
+    s.eq(s.text(s.row(o["upcoming_hotel"]) + " .mk"), "出場 20", "exit mark")
+    s.expect("urgent" in s.on(s.row(o["upcoming_hotel"]) + " .mk").first.get_attribute("class"), "a 20 minute exit is not urgent")
     s.eq(s.text(s.row(o["landed_banner"]) + " .price"), "$560", "gross price with the banner fee")
     s.eq(s.text(s.row(o["unpriced"]) + " .price.unset"), "未入價", "unpriced row")
     quick = [r for r in s.rows() if "quick" in cls(r)]
     s.eq(len(quick), 3, "quick rows")
-    s.eq(s.text(s.row(quick[0]) + " .qplat"), "滴滴", "platform name on a quick row")
-    s.eq(s.text(s.row(quick[2]) + " .qprice"), "$55.50", "cents on a quick row")
-    s.eq(s.page.eval_on_selector_all(".orders .gap-label", "els => els.map(e => e.textContent)")[:2],
-         ["1h 48m", "1h 10m"], "gap labels")
+    s.eq((s.text(s.row(quick[0]) + " .code"), s.text(s.row(quick[0]) + " .place")), ("DIDI", "滴滴"),
+         "platform on a quick row")
+    s.eq(s.text(s.row(quick[2]) + " .price"), "$55.50", "cents on a quick row")
+    s.eq(s.count(s.row(quick[0]) + " .meta"), 0, "a second line on a quick row")
+    # The wait since the row before, under the time of the row it leads to;
+    # under half an hour it says nothing.
+    gaps = dict(s.page.eval_on_selector_all(
+        ".orders .row", "els => els.map(e => [e.dataset.oid, (e.querySelector('.gap') || {}).textContent || ''])"))
+    listed = s.rows()
+    s.eq([gaps[r] for r in listed[:3]], ["", "+1h48", "+1h10"], "gap figures")
+    times = [x["row_time"][11:16] for x in s.orders()]
+    for prev, this, oid in zip(times, times[1:], listed[1:]):
+        mins = (int(this[:2]) - int(prev[:2])) * 60 + int(this[3:]) - int(prev[3:])
+        if mins < 30:
+            want = ""
+        elif mins < 60:
+            want = f"+{mins}m"
+        else:
+            want = f"+{mins // 60}h" + (f"{mins % 60:02d}" if mins % 60 else "")
+        s.eq(gaps[oid], want, f"gap figure before {this}")
+    s.eq(s.page.evaluate("() => { const g = document.querySelector('.orders .row .gap'), t = g.parentElement.querySelector('.time');"
+                         " const a = g.getBoundingClientRect(), b = t.getBoundingClientRect();"
+                         " return [Math.round(a.left) === Math.round(b.left), a.top >= b.bottom - 1]; }"),
+         [True, True], "the gap figure sits under its row's time")
     # Another day has neither mark.
     s.go_days(1)
     s.eq(s.count(".orders .row.next") + s.count(".orders .now"), 0, "NEXT or NOW on another day")
@@ -1041,6 +1102,246 @@ def day_minute_tick(s: Session) -> None:
     s.eq(s.on(".orders .row.next").first.get_attribute("data-oid"), o["upcoming_hotel"], "NEXT after 100 minutes")
     s.expect("done" in s.on(s.row(o["landed_banner"])).first.get_attribute("class"), "a row that finished is not dimmed")
     s.eq(len(s.requests), asked, "requests made by the minute tick")
+
+
+def repaint(s: Session, n: int) -> None:
+    """Make the day view ask again and paint, as a change on the server does:
+    a price nothing else looks at is changed, and the row shows it."""
+    oid = s.t["order"]["dropoff"]
+    s.api("PATCH", "/api/orders/" + oid, {"price": 400 + n})
+    s.wait(lambda: s.text(s.row(oid) + " .price") == f"${400 + n}", "the repaint")
+    s.settle()
+
+
+def serve_orders(s: Session, change) -> None:
+    """From now on today's orders reach the page as `change` leaves them."""
+    def handler(route, request):
+        orders = s.orders()
+        change({o["order_id"]: o for o in orders})
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"orders": orders, "date": s.day()}))
+    s.page.unroute("**/api/orders?date=" + s.day())
+    s.page.route("**/api/orders?date=" + s.day(), handler)
+
+
+@check("day.row-cells-of-less-common-orders")
+def day_row_cells(s: Session) -> None:
+    """What the seeded day has none of: each must still be on the row."""
+    s.open_day()
+    o = s.t["order"]
+    long_name = "將軍澳示範國際會議展覽中心酒店式服務住宅南翼"
+
+    def change(by):
+        a = by[o["upcoming_hotel"]]         # a 接机 with no flight number, 舉牌, a tight exit
+        a.update(flight_number="", pickup="深圳灣示範口岸(示範)", banner_fee=40,
+                 passenger_exit_minutes=30, exit_urgency="tight")
+        b = by[o["dropoff"]]                # a 送机 to a named terminal, fined, with cents
+        b.update(dropoff="香港國際機場T2(示範)", price=1520.5, penalty_fee=97.38, pickup=long_name + "(示範道1號)")
+        c = by[o["unpriced"]]               # a 送机 that does not end at the airport
+        c.update(service_type="送机", dropoff="示範口岸(示範)")
+        d = by[o["done_pickup"]]            # another service
+        d.update(service_type="接站", pickup="香港西九龍站(示範)", flight_number="")
+
+    serve_orders(s, change)
+    s.api("PATCH", "/api/orders/" + o["landed_banner"], {"tunnel_fee": 1})    # any change: the view asks again
+    s.wait(lambda: s.count(".orders .code.org"), "the repaint")
+    s.settle()
+
+    def cell(oid, part):
+        return s.text(s.row(oid) + " " + part)
+
+    s.eq((cell(o["upcoming_hotel"], ".code.org"), cell(o["upcoming_hotel"], ".place")),
+         ("深圳灣示範口岸", "沙田範例廣場"), "a 接机 with no flight number: its origin, small, and the drop-off")
+    s.eq(s.page.eval_on_selector_all(s.row(o["upcoming_hotel"]) + " .mk", "els => els.map(e => e.className + '|' + e.textContent)"),
+         ["mk sign|舉牌", "mk tight|出場 30"], "marks of a tight exit with a 舉牌")
+    s.eq(cell(o["upcoming_hotel"], ".price"), "$490", "gross with the 舉牌")
+    s.eq((cell(o["dropoff"], ".code"), cell(o["dropoff"], ".place")), ("送機 T2", long_name), "a 送机 to a terminal")
+    s.eq((cell(o["dropoff"], ".price"), cell(o["dropoff"], ".price .pen")), ("$1520.50−$97.38", "−$97.38"),
+         "a fare with cents and the fine under it")
+    s.eq((cell(o["unpriced"], ".code"), cell(o["unpriced"], ".place"), cell(o["unpriced"], ".place .end.sub")),
+         ("送機", "尖沙咀示範酒店 →示範口岸", "→示範口岸"), "a 送机 that ends somewhere else")
+    s.eq((cell(o["done_pickup"], ".code"), cell(o["done_pickup"], ".place")),
+         ("接站", "香港西九龍站 →尖沙咀示範酒店"), "another service: its name and both ends")
+    s.eq(s.count(s.row(o["done_pickup"]) + " .st"), 0, "a status block on a row that is not a 接机")
+    # Nothing is cut and nothing pushes the page sideways, at the narrowest
+    # and the widest the app is laid out for.
+    for width in (320, 340, 390, 480):
+        s.page.set_viewport_size({"width": width, "height": 800})
+        s.settle()
+        bad = s.page.evaluate("""() => {
+          const out = [];
+          if (document.documentElement.scrollWidth > innerWidth) out.push('page wider than the screen');
+          const edge = innerWidth;
+          for (const row of document.querySelectorAll('.orders .row')) {
+            const r = row.getBoundingClientRect();
+            for (const el of row.querySelectorAll('.time, .code, .place, .price, .meta > *, .gap')) {
+              const b = el.getBoundingClientRect();
+              if (b.right > edge + 0.5 || b.left < -0.5) out.push('off screen: ' + el.textContent);
+              if (b.top < r.top - 0.5 || b.bottom > r.bottom + 0.5) out.push('outside its row: ' + el.textContent);
+              if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth) out.push('cut: ' + el.textContent);
+            }
+            const cells = ['.time', '.code', '.place', '.price'].map(q => row.querySelector(q).getBoundingClientRect());
+            for (let i = 1; i < cells.length; i++) {
+              if (cells[i].left < cells[i - 1].right - 0.5) out.push('columns overlap in ' + row.dataset.oid);
+            }
+          }
+          const lefts = q => new Set([...document.querySelectorAll('.orders .row ' + q)].map(e => Math.round(e.getBoundingClientRect().left)));
+          for (const q of ['.time', '.code', '.place']) if (lefts(q).size !== 1) out.push('ragged column ' + q);
+          const head = [...document.querySelectorAll('.cols span')].map(e => Math.round(e.getBoundingClientRect().left));
+          const first = ['.time', '.code', '.place'].map(q => Math.round(document.querySelector('.orders .row ' + q).getBoundingClientRect().left));
+          if (String(head.slice(0, 3)) !== String(first)) out.push('column head ' + head + ' against rows ' + first);
+          return out;
+        }""")
+        s.eq(bad, [], f"layout at {width} wide")
+
+
+def open_held(s: Session, path: str) -> None:
+    """Open the app with the first request for `path` kept waiting."""
+    s.page = s.ctx.new_page()
+    s.page.set_default_timeout(TIMEOUT_MS)
+    s._watch(s.page)
+    s.hold(path)
+    s.page.goto(s.base + "/")
+    s.wait(lambda: s.holding(path), "the first request for the day")
+
+
+@check("day.placeholder-rows-on-a-cold-first-paint-only")
+def day_placeholders(s: Session) -> None:
+    today = "/api/orders?date=" + s.day()
+    open_held(s, today)
+    s.eq((s.count(".orders .ph-row"), s.rows(), s.count(".empty")), (5, [], 0), "the list before the first answer")
+    s.expect(s.date_text().startswith(date_head(s.day())), "the date button before the first answer")
+    box = s.page.evaluate("() => { const r = document.querySelector('.orders .ph-row'), h = document.querySelector('.cols');"
+                          " return [...r.children].slice(0, 3).map((e, i) =>"
+                          " Math.round(e.getBoundingClientRect().left) === Math.round(h.children[i].getBoundingClientRect().left)); }")
+    s.eq(box, [True, True, True], "placeholder blocks stand on the rows' columns")
+    s.eq(s.page.evaluate("() => [...document.querySelectorAll('.ph-row, .ph-row *')].some(e => getComputedStyle(e).animationName !== 'none')"),
+         False, "a placeholder that moves")
+    s.release(today)
+    s.wait(lambda: s.rows() == s.ids(), "the rows")
+    s.eq(s.count(".ph-row"), 0, "placeholders once the rows are in")
+    s.release_all()
+    s.settle()
+    # A day never seen, reached later, keeps the rows on screen instead.
+    near, shown = to_a_day_never_seen(s)
+    s.wait(lambda: s.holding("/api/orders?date=" + s.day(2)), "the request for the day after tomorrow")
+    s.eq((s.count(".ph-row"), s.rows()), (0, shown), "the list while a later day is pending")
+    s.release_all()
+    s.settle()
+    s.eq(s.count(".ph-row"), 0, "placeholders on an empty day")
+    # Nor does a day the store holds, nor coming back from the other view.
+    s.go_days(-2)
+    s.go_settle()
+    s.hold(today)
+    s.press('[aria-label="返日程"]')
+    s.wait(lambda: s.holding(today), "the request on coming back")
+    s.eq((s.count(".ph-row"), s.rows()), (0, s.ids()), "the list on coming back, before the answer")
+    s.release_all()
+    s.settle()
+
+
+@check("day.placeholder-rows-give-way-when-the-first-load-fails")
+def day_placeholders_fail(s: Session) -> None:
+    s.allow("http 500", "status of 500")
+    today = "/api/orders?date=" + s.day()
+    open_held(s, today)
+    s.eq(s.count(".orders .ph-row"), 5, "placeholders before the first answer")
+    s.answer(today, status=500, content_type="text/html", body="<html>boom</html>")
+    s.wait_toast("載入失敗")
+    s.eq((s.count(".ph-row"), s.text(".empty"), s.foot()), (0, "冇訂單", ["程數0", "當日車費$0"]), "the list after the failure")
+    s.release_all()
+    # The next load that works draws the rows, with no placeholders before it.
+    s.hold(today)
+    s.press(".date-btn")
+    s.wait(lambda: s.holding(today), "the request on tapping the date")
+    s.eq(s.count(".ph-row"), 0, "placeholders once the list has been drawn")
+    s.release_all()
+    s.wait(lambda: s.rows() == s.ids(), "the rows")
+    s.settle()
+
+
+@check("day.status-block-turns-over-when-it-changes", still=False)
+def day_turn_over(s: Session) -> None:
+    s.open_day()
+    oid = s.t["order"]["upcoming_hotel"]
+    block = s.row(oid) + " .st"
+
+    def turning() -> list:
+        """Every status block that is turning: its row and the animation it runs."""
+        return s.page.eval_on_selector_all(
+            ".orders .row .st.turn", "els => els.map(e => [e.closest('.row').dataset.oid, getComputedStyle(e).animationName])")
+
+    s.eq((s.text(block), turning()), ("預計", []), "the first paint of the day")
+    repaint(s, 1)
+    s.eq(turning(), [], "a repaint with no status changed")
+    s.tap(".tab", has_text="接送")
+    s.tap(".tab", has_text="全部")
+    s.eq(turning(), [], "a filter put on and taken off")
+    # The feed moves the flight on: that block turns, once, and no other.
+    state = {"status": "landed", "gate": None}
+
+    def change(by):
+        by[oid].update(flight_status=state["status"], flight_gate=state["gate"])
+
+    serve_orders(s, change)
+    repaint(s, 2)
+    s.eq((s.text(block), turning()), ("已降落", [[oid, "st-turn"]]), "the block whose word changed")
+    s.eq(s.page.eval_on_selector(block, "e => [getComputedStyle(e).animationDuration, getComputedStyle(e).animationIterationCount]"),
+         ["0.5s", "1"], "the turn")
+    repaint(s, 3)
+    s.eq((s.text(block), turning()), ("已降落", []), "the paint after the turn")
+    # Leaving the day and coming back is not a change.
+    s.go_days(1)
+    s.go_days(-1)
+    s.eq((s.text(block), turning()), ("已降落", []), "after another day and back")
+    # With motion reduced the word changes and nothing moves.
+    s.page.emulate_media(reduced_motion="reduce")
+    state.update(status="gate", gate="16:58")
+    repaint(s, 4)
+    s.eq(s.text(block), "已到閘", "the word under reduced motion")
+    s.eq([name for _, name in turning()], ["none"], "the animation under reduced motion")
+    s.eq(s.page.evaluate("() => [...document.querySelectorAll('#view-day *')].filter(e => getComputedStyle(e).animationName !== 'none').length"),
+         0, "anything in the day view animating under reduced motion")
+    # The paste preview's rows are held still as well.
+    s.tap('[aria-label="入單"]')
+    s.on(".drop.show .paste-box").first.fill(paste_message())
+    s.press(".drop.show .primary-btn", has_text="解析")
+    s.on(".drop.show .paste-preview .sum-row").first.wait_for()
+    s.eq(s.page.eval_on_selector_all(".drop.show .paste-preview .sum-row", "els => [...new Set(els.map(e => getComputedStyle(e).animationName))]"),
+         ["none"], "the preview rows' animation under reduced motion")
+    s.page.emulate_media(reduced_motion="no-preference")
+    s.eq(s.page.eval_on_selector_all(".drop.show .paste-preview .sum-row", "els => [...new Set(els.map(e => getComputedStyle(e).animationName))]"),
+         ["row-in"], "the preview rows' animation with motion allowed")
+    s.settle()
+
+
+@check("day.date-button-formats")
+def day_date_formats(s: Session) -> None:
+    s.open_day()
+    parts = "() => { const b = document.querySelector('.date-btn'); return ['.d', '.w', '.w b', '.y'].map(q => (b.querySelector(q) || {}).textContent || ''); }"
+    wd = lambda d: "星期" + WEEKDAY[d.weekday()]
+    t = s.today
+    s.eq(s.page.evaluate(parts), [f"{t.month:02d}·{t.day:02d}", wd(t) + " · 今日", "今日", ""], "today")
+    s.eq(s.page.eval_on_selector(".date-btn .d", "e => getComputedStyle(e).fontFamily.split(',')[0].replace(/\"/g, '')"),
+         "B612 Mono", "the figure's face")
+    s.go_days(1)
+    n = t + timedelta(days=1)
+    if n.year == t.year:
+        s.eq(s.page.evaluate(parts), [f"{n.month:02d}·{n.day:02d}", wd(n), "", ""], "another day of this year")
+    # The last day of the year, then the first of the next: the year appears,
+    # small, once it is not this one.
+    last = date(t.year, 12, 31)
+    s.page.clock.set_fixed_time(datetime.combine(last, demo_now(t).timetz()))
+    s.tap(".date-btn")
+    s.eq(s.page.evaluate(parts), ["12·31", wd(last) + " · 今日", "今日", ""], "the last day of the year, as today")
+    s.go_days(1)
+    first = date(t.year + 1, 1, 1)
+    s.eq(s.page.evaluate(parts), ["01·01", wd(first) + str(first.year), "", str(first.year)], "a day in another year")
+    s.eq(s.date_text(), date_head(first.isoformat(), last.isoformat()), "the button's whole text")
+    small, big = s.page.evaluate("() => ['.y', '.d'].map(q => parseFloat(getComputedStyle(document.querySelector('.date-btn ' + q)).fontSize))")
+    s.expect(small < big / 2, f"the year is not small: {small} against {big}")
+    s.go_days(-1)
+    s.eq(s.page.evaluate(parts)[3], "", "the year, back in this one")
 
 
 # ---- order sheet (inventory D) ----
@@ -1286,8 +1587,8 @@ def day_add_didi(s: Session) -> None:
     s.expect(not s.panel_open() and not s.count(".scrim.show"), "the panel stays open after a save")
     new = [r for r in s.rows() if r not in before]
     s.eq(len(new), 1, "new rows")
-    s.eq(s.text(s.row(new[0]) + " .rail .t"), "15:30", "the new row's time")
-    s.eq(s.text(s.row(new[0]) + " .qprice"), "$128", "the new row's price")
+    s.eq(s.text(s.row(new[0]) + " .time"), "15:30", "the new row's time")
+    s.eq(s.text(s.row(new[0]) + " .price"), "$128", "the new row's price")
     s.page.wait_for_timeout(400)
     s.eq(s.page.eval_on_selector(".drop", "e => e.innerHTML"), "", "the closed panel's content")
     s.eq(len(s.writes), 1, "writes")
@@ -1296,7 +1597,7 @@ def day_add_didi(s: Session) -> None:
 @check("day.add-uber-clears-another-filter")
 def day_add_uber(s: Session) -> None:
     s.open_day()
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     s.tap('[aria-label="入單"]')
     quick_order(s, "uber", "0910", "96", "20")
     s.stage("Uber · 確認")
@@ -1307,7 +1608,7 @@ def day_add_uber(s: Session) -> None:
     s.eq(s.last_write(), ("POST", "/api/orders", {"type": "uber", "date": s.day(), "time": "09:10",
                                                   "price": 116, "tunnel_fee": 20}), "create write")
     s.settle()
-    s.eq(s.count(".chip.on"), 0, "the filter that would hide the new row")
+    s.expect(s.text(".tab.on").startswith("全部"), "the filter that would hide the new row")
     s.eq(s.rows(), s.ids(), "rows")
 
 
@@ -1457,7 +1758,7 @@ PASTE_DAY = "2026-06-27"
 def day_paste_new(s: Session) -> None:
     msg = paste_message()
     s.open_day()
-    s.tap(".chip", has_text="滴滴")
+    s.tap(".tab", has_text="滴滴")
     s.tap('[aria-label="入單"]')
     s.tap(".drop.show .primary-btn", has_text="解析")
     s.eq(s.writes, [], "解析 with an empty box sends nothing")
@@ -1492,9 +1793,9 @@ def day_paste_new(s: Session) -> None:
     s.eq(s.last_write(), ("POST", "/api/orders", {"type": "paste", "text": msg.strip(), "price": 460}), "create write")
     s.settle()
     # The view moves to the order's own date, and a filter that hides it goes.
-    s.expect(s.date_text().startswith(PASTE_DAY), "the view did not move to the order's date")
+    s.expect(s.date_text().startswith(date_head(PASTE_DAY)), "the view did not move to the order's date")
     s.eq(s.rows(), [PASTE_ID], "rows on the order's date")
-    s.eq(s.count(".chip.on"), 0, "the filter that would hide the new row")
+    s.expect(s.text(".tab.on").startswith("全部"), "the filter that would hide the new row")
     s.eq(s.text(s.row(PASTE_ID) + " .price"), "$460", "the new row's price")
     s.expect(not s.panel_open(), "the panel stays open after a save")
     s.eq(len(s.writes), 3, "writes")
@@ -1563,7 +1864,7 @@ def day_paste_resent(s: Session) -> None:
     s.wait_toast("已更新 #000002")
     s.eq(s.last_write(), ("POST", "/api/orders", {"type": "paste", "text": later.strip()}), "amendment write")
     s.settle()
-    s.expect(s.date_text().startswith(PASTE_DAY), "the view did not move to the order's date")
+    s.expect(s.date_text().startswith(date_head(PASTE_DAY)), "the view did not move to the order's date")
 
     # Another amendment, repriced on the way.
     flight = amended(**{"12:35:00": "13:05:00", "CX477": "CX479"})
@@ -1577,7 +1878,7 @@ def day_paste_resent(s: Session) -> None:
     s.eq(s.last_write(), ("POST", "/api/orders", {"type": "paste", "text": flight.strip(), "price": 510}), "repriced amendment write")
     s.settle()
     s.eq(s.text(s.row(PASTE_ID) + " .price"), "$510", "the row's price")
-    s.eq(s.text(s.row(PASTE_ID) + " .flt"), "CX479", "the row's flight")
+    s.eq(s.text(s.row(PASTE_ID) + " .code"), "CX479", "the row's flight")
 
     # Cancelled, then pasted again: the order comes back.
     s.api("PATCH", "/api/orders/" + PASTE_ID, {"status": "cancelled"})
@@ -1773,11 +2074,11 @@ def settle_widths(s: Session) -> None:
     resize(340)
     s.eq(measure(), [340, "20px", 34], "settle below 361px")
     s.open_day()
-    s.eq(measure(), [390, "0px", 42], "day at phone width")
+    s.eq(measure(), [390, "0px", 40], "day at phone width")
     resize(1000)
-    s.eq(measure(), [480, "0px", 42], "day on a wide screen")
+    s.eq(measure(), [480, "0px", 40], "day on a wide screen")
     resize(340)
-    s.eq(measure(), [340, "0px", 42], "day below 361px")
+    s.eq(measure(), [340, "0px", 40], "day below 361px")
     s.eq(s.scheme(), "normal", "color-scheme of the document on the day view")
 
 
@@ -2973,7 +3274,7 @@ def views_late_day(s: Session) -> None:
     s.eq(s.changes("view-day"), [], "changes to the hidden day view when its day landed")
     s.go_day()
     s.eq((s.rows(), s.count(".orders .empty")), ([], 1), "the day, once the view is shown")
-    s.expect(s.date_text().startswith(s.day(2)), "the date the view was left on")
+    s.expect(s.date_text().startswith(date_head(s.day(2))), "the date the view was left on")
     s.eq(len(s.writes), 1, "writes")
 
 
@@ -3263,7 +3564,7 @@ def worker_offline_shell(s: Session) -> None:
     tried = len(s.requests)
     s.page.reload()
     s.wait_toast("載入失敗")
-    s.expect(s.date_text().startswith(s.day()), "the date button without a server")
+    s.expect(s.date_text().startswith(date_head(s.day())), "the date button without a server")
     s.eq(s.count('[aria-label="入單"]'), 1, "the header's controls without a server")
     s.eq(s.rows(), [], "rows shown with no server to give them")
     s.expect(("GET", "/api/orders?date=" + s.day(), "fetch") in s.requests[tried:], "today's orders were not asked for")
@@ -3748,9 +4049,9 @@ def inventory_day_scroll(s: Session) -> None:
     s.eq(round(s.on(".header").first.bounding_box()["y"]), 0, "header top with the list scrolled")
     # A filter tap and a saved edit do not move the list.
     s.page.evaluate("() => window.scrollTo(0, 0)")
-    s.tap(".chip", has_text="接送")
+    s.tap(".tab", has_text="接送")
     s.eq(s.scroll_y(), 0, "scroll after a filter tap")
-    s.tap(".chip", has_text="接送")
+    s.tap(".tab", has_text="接送")
     s.eq(s.scroll_y(), 0, "scroll after clearing the filter")
     s.open_order(s.t["order"]["done_pickup"])
     s.edit("價錢", "481")
@@ -3778,8 +4079,8 @@ def inventory_now_last(s: Session) -> None:
     s.page.clock.fast_forward(9 * 60 * 60 * 1000 + 30 * 60 * 1000)
     s.wait(lambda: s.text(".orders .now .now-t").startswith("23:3"), "the NOW line to follow the clock")
     last = s.page.evaluate("() => { const g = document.querySelector('.orders').lastElementChild;"
-                           " return [g.className, !!g.querySelector('.now')]; }")
-    s.eq(last, ["gap", True], "what closes the list")
+                           " return [g.className, !!g.querySelector('.now-t')]; }")
+    s.eq(last, ["now", True], "what closes the list")
     s.eq(s.count(".orders .now"), 1, "NOW lines")
     s.eq(s.count(".orders .row.next"), 0, "NEXT rows with every order done")
     s.eq(s.scroll_y(), 0, "scroll after the minute re-render")
@@ -3791,11 +4092,11 @@ def inventory_day_rows(s: Session) -> None:
     s.open_day()
     o = s.t["order"]
     # The filter outlives a change made elsewhere.
-    s.tap(".chip", has_text="接送")
+    s.tap(".tab", has_text="接送")
     s.api("PATCH", "/api/orders/" + o["dropoff"], {"price": 455})
     s.wait(lambda: s.text(s.row(o["dropoff"]) + " .price") == "$455", "the change made elsewhere")
-    s.expect(s.text(".chip.on").startswith("接送"), "the filter after a live update")
-    s.tap(".chip", has_text="接送")
+    s.expect(s.text(".tab.on").startswith("接送"), "the filter after a live update")
+    s.tap(".tab", has_text="接送")
     # Quick orders have their own fields; an unpriced order says so in amber.
     fields = "els => els.map(e => e.textContent)"
     s.open_order([r for r in s.rows() if r.startswith("didi_")][0])
@@ -3827,16 +4128,16 @@ def inventory_day_rows(s: Session) -> None:
     s.eq(hit, "scrim show", "what a tap on a row behind the sheet lands on")
     s.page.touchscreen.tap(x, y)
     s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "the scrim to close the sheet")
-    # A zero chip is dimmed and still takes a tap.
+    # A zero tab is dimmed and still takes a tap.
     s.go_days(1)
-    s.tap(".chip.zero", has_text="滴滴")
-    s.eq((s.text(".chip.on"), s.text(".empty")), ("滴滴 0", "冇滴滴訂單"), "a tapped zero chip")
+    s.tap(".tab.zero", has_text="滴滴")
+    s.eq((s.text(".tab.on"), s.text(".empty")), ("滴滴0", "冇滴滴訂單"), "a tapped zero tab")
     # A reload forgets the filter.
     s.allow("request failed: GET /api/events")     # the reload cuts the event stream
     s.page.reload()
     s.on(".orders .row").first.wait_for()
     s.settle()
-    s.eq(s.count(".chip.on"), 0, "the filter after a reload")
+    s.expect(s.text(".tab.on").startswith("全部"), "the filter after a reload")
     # A fined, collected order: the fine on the row and on the sheet.
     s.go_days(-34)
     fined = seed_demo_db._oid(111)
@@ -4042,8 +4343,8 @@ def inventory_styles(s: Session) -> None:
              ("body", ".header", ".sheet", ".toast"), (".sheet", ".scrim", ".np-pad"))
     s.open_day()
     promised((".row:active", ".field-row:active", ".key:active", ".nav-btn:active"),
-             ("body", ".header", ".sheet", ".toast", ".drop"),
-             (".sheet", ".scrim", ".drop", ".paste-preview .sum-row", ".np-pad"))
+             ("body", ".header", ".sheet", ".toast", ".drop", ".foot"),
+             (".sheet", ".scrim", ".drop", ".paste-preview .sum-row", ".np-pad", ".st.turn"))
     # With motion on, the sheet and panel slide; with it reduced they do not.
     def moving() -> list:
         return s.page.evaluate("() => ['.sheet', '.scrim', '.drop'].map(q => {"
