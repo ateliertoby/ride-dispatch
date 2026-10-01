@@ -1,0 +1,466 @@
+/* The settle view's own rules, linked by the shell after base.css,
+   order-sheet.css and day.css. Everything is scoped to the view's root so that
+   the two views, which stay in one document, cannot style each other. The
+   scope is written :where(.view-settle) because :where() adds no specificity:
+   a rule here weighs against the shared stylesheets exactly as it would
+   unscoped, so which of two rules wins is decided by the selectors as written
+   and by source order, as in a single stylesheet. Rules on the document or the
+   body are keyed on the view the router says is showing, and @media blocks
+   sit at top level with their contents scoped. */
+
+/* This page has native date inputs, whose built-in widgets follow
+   color-scheme rather than the tokens. */
+:root:has(> body[data-view="settle"]) { color-scheme: dark; }
+@media (prefers-color-scheme: light) {
+  :root:has(> body[data-view="settle"]) { color-scheme: light; }
+}
+body[data-view="settle"] { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+:where(.view-settle) {
+  .empty { padding: 28px 0 8px; }
+  .sum-rows { padding: 8px 0 0; }
+  /* Sheets here stack (day -> batch -> undo), so the head carries a back
+     button and the title has to yield width to it. */
+  .sheet-head { gap: 10px; }
+  .sheet-title { flex: 1; min-width: 0; }
+  .sheet-x, .sheet-back { flex-shrink: 0; }
+  .sheet-back {
+    background: var(--key-bg); border: none; border-radius: 50%;
+    width: 32px; height: 32px; color: var(--text-2); cursor: pointer;
+    font-size: 21px; line-height: 30px; padding: 0 2px 2px 0;
+  }
+  .ghost-btn:active { background: var(--key-press); }
+
+  /* ---- week strip ----
+     One continuous run of weeks rather than a month at a time: a week row can
+     hold the end of one month and the start of the next, and money settled on
+     the last day of a month is paid in the one after it. */
+  .cal { padding: 8px 14px 4px; }
+  /* minmax(0, 1fr): WebKit lets a grid track grow past its share when an item
+     is wider than the column, which would push the seventh day off screen. */
+  .wk, .grid, .lane { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+  .wk span { text-align: center; font-size: 11px; color: var(--text-3); }
+  /* Everything that labels the strip rides in the sticky header, because the
+     strip grows at both ends: scrolling up prepends months, so anything left
+     above the first week row can never be scrolled back to. */
+  .header .chips { padding: 10px 0 2px; }
+  .header .wk { padding: 8px 0 0; }
+  /* The strip's own ends, watched to know when to load the month past them.
+     Zero height is skipped by some observers, so they keep a pixel. */
+  .sent { height: 1px; }
+  /* Where one month gives way to the next. The strip carries no month heading
+     -- that is the point: a batch straddling the boundary stays one bar -- so
+     the break is a hairline, and the 1st names its month in its own corner
+     label. */
+  .wkblock.mstart { border-top: 1px solid var(--line); padding-top: 4px; }
+  .cell {
+    position: relative; min-height: 56px; border: none; border-radius: 10px;
+    background: var(--surface); cursor: pointer;
+    /* The day number is a corner label pinned top-left, not part of the
+       centred content, so the amount is centred in the band below it. Without
+       that offset it centres against the whole cell and reads as sitting high
+       with dead space underneath. */
+    padding: 13px 3px 5px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: inherit; color: inherit; min-width: 0; overflow: hidden;
+  }
+  /* A day with no orders carries no money and no decision, so it recedes to
+     little more than a calendar coordinate. A day in a month the strip has not
+     loaded yet reads the same way and fills in when that month arrives.
+     Transparent to the pointer as well as inert: a disabled button swallows a
+     click rather than letting it through, and these days are the largest part
+     of what reads as blank calendar -- which is where a tap lands to put a
+     focus down. */
+  .cell.none { --o-state: .35; cursor: default; pointer-events: none; }
+  .cell .d {
+    position: absolute; top: 4px; left: 6px;
+    font-size: 11px; line-height: 13px; font-weight: 600; color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .cell .amt {
+    font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
+    letter-spacing: -.2px;
+  }
+  /* One rule: amber is money no statement has claimed yet. Money already on a
+     statement is a record, so it recedes and the bar under the cell carries
+     its state instead. A future day has nothing to claim yet, so it is faint. */
+  .cell .amt.unsettled { color: var(--amber); }
+  .cell .amt.done { color: var(--text-3); }
+  .cell .amt.future { color: var(--text-3); opacity: .5; }
+  .cell.today .d { color: var(--text); }
+  .cell.today { box-shadow: inset 0 0 0 1px var(--text-3); }
+  .cell:not(.none):active { background: var(--surface-press); }
+
+  /* ---- event lanes ----
+     Under each week's cells, one grid holding every batch segment and credit
+     chip of that week, each placed on the lane row the packer gave it. */
+  .wkblock { padding-bottom: 4px; }
+  .lane { padding-top: 3px; grid-auto-rows: 18px; row-gap: 3px; }
+  /* An event reserves however many columns its label needs, but the coloured
+     fill belongs to the days the batch actually covers, so the two are
+     separate boxes: the slot is the reservation and repeats the lane's own
+     column track, and the bar is placed on the days inside it. */
+  .slot { display: grid; gap: 4px; min-width: 0; }
+  .bar {
+    height: 18px; border-radius: 5px; border: none; padding: 0 5px; min-width: 0;
+    font-family: inherit; font-size: 11px; font-weight: 650;
+    font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+    display: flex; align-items: center; cursor: pointer;
+    overflow: visible; white-space: nowrap;
+  }
+  .bar.awaiting { background: var(--key-bg); color: var(--text); }
+  /* The label of a part-paid bar prints over both halves of its gradient, so
+     it takes the neutral text colour rather than the state's own. */
+  .bar.partial { background: var(--banner-bg); color: var(--text); }
+  /* A collected batch is a record, not a task, so it holds its fill but stops
+     shouting as loudly as the amber ones. */
+  .bar.paid { background: var(--paid-bg); color: var(--green); font-weight: 600; --o-state: .8; }
+  /* A batch cut by the week boundary squares off the cut end, so the two
+     segments read as one bar wrapping. */
+  .bar.cut-r { border-top-right-radius: 1px; border-bottom-right-radius: 1px; }
+  .bar.cut-l { border-top-left-radius: 1px; border-bottom-left-radius: 1px; }
+  /* A held-back day keeps the state colour but drops the fill, so it reads as
+     a pointer at the run carrying the amount rather than a batch of its own. */
+  .bar.makeup { background: none; border: 1px dashed currentColor; padding: 0 3px; }
+  /* A dashed pointer has no fill to print over, so it keeps the state colour
+     its border is drawn from. */
+  .bar.partial.makeup { color: var(--banner-fg); }
+  /* An event sitting on the last column reserves its room to the left, so its
+     label has to leave the fill leftwards as well. */
+  .bar.spill-l { justify-content: flex-end; }
+  .bar:active { filter: brightness(1.15); }
+  /* A credit is an outline, not a fill: money arriving from outside the batch
+     never reads as one of the bars. A matched one is a record and dims away;
+     only a credit still waiting for a statement carries its colour at full. */
+  .cchip {
+    height: 18px; border-radius: 5px; background: none;
+    border: 1px solid var(--green); color: var(--green); --o-state: .55;
+    font-family: inherit; font-size: 10.5px; font-weight: 650;
+    font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+    padding: 0 2px; min-width: 0; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden; white-space: nowrap;
+    /* The pill is exactly its figure wide and sits at the start of its
+       reservation, so its edge stays under the day it arrived on. */
+    width: max-content; max-width: 100%; justify-self: start;
+  }
+  .cchip.spill-l { justify-self: end; }
+  .cchip.open { border-color: var(--blue); color: var(--blue); --o-state: 1; }
+  .cchip.gone { border-color: var(--text-3); color: var(--text-3); --o-state: .5; }
+  /* Money that has been put against a batch which is still short: the credit
+     is done with but the account it paid into is not, so the chip wears the
+     colour of what is owed instead of dimming away as a record. */
+  .cchip.short { border-color: var(--amber); color: var(--amber); --o-state: 1; }
+
+  /* ---- focus ----
+     One money relation at a time: a bank credit and the batches it paid, or a
+     batch and the credits that paid it. The two ends can be weeks apart on the
+     strip and are rarely on screen together, so the link is drawn by opening a
+     gap around the relation rather than by a connector that would have nothing
+     to run along. The gap is opened from both sides and gently from each:
+     everything unrelated recedes, the relation itself lifts, and a receded
+     figure stays money the operator can still read at a glance.
+
+     Receding works on the strength each state already chose rather than
+     replacing it -- dim is a ceiling, lit is a floor -- so a record stays
+     quieter than an open one at both ends and nothing is made louder by being
+     pushed away. Every rule above wanting a strength of its own therefore sets
+     --o-state rather than opacity. */
+  .cell, .bar, .cchip {
+    opacity: clamp(var(--o-lit, 0), var(--o-state, 1), var(--o-dim, 1));
+    transition: opacity .12s ease, box-shadow .12s ease, background-color .12s ease;
+  }
+  .cell.dim, .bar.dim, .cchip.dim { --o-dim: .58; }
+  .cell.lit, .bar.lit, .cchip.lit { --o-lit: .85; }
+}
+/* A lit surface has to read against the ground it sits on: on dark it can
+   brighten, on light it is already white and rises by casting instead. */
+body[data-view="settle"] {
+  --lit-surface: var(--surface-press);
+  --lit-cast: 0 0 0 1px color-mix(in srgb, var(--text) 10%, transparent);
+}
+@media (prefers-color-scheme: light) {
+  body[data-view="settle"] { --lit-surface: var(--surface); --lit-cast: 0 1px 3px rgba(16,24,40,.15); }
+}
+:where(.view-settle) {
+  .cell.lit { background: var(--lit-surface); box-shadow: var(--lit-cast); }
+  /* Today keeps its ring: the lift is on top of what the cell already says. */
+  .cell.today.lit { box-shadow: inset 0 0 0 1px var(--text-3), var(--lit-cast); }
+  /* A bar or chip is an object on the lane rather than a surface, so it lifts
+     by haloing in the colour it already wears -- state, never a hue of its
+     own. */
+  .bar.lit, .cchip.lit { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 20%, transparent); }
+  .legend { padding: 0 2px 8px; font-size: 11px; line-height: 1.7; color: var(--text-3); }
+
+  /* ---- sheet contents ---- */
+  /* The batch sheet is read for its money on every open and for its order
+     numbers only when tracing a problem, so the figure leads at hero size and
+     the list sits behind a count. */
+  .hero { padding: 12px 2px 10px; border-bottom: 1px solid var(--line); }
+  .hero-k { font-size: 12px; color: var(--text-2); }
+  .hero-v { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; line-height: 1.2; }
+  .hero-s { font-size: 14px; font-weight: 650; color: var(--text-2); padding-top: 2px; }
+  .hero-s.paid { color: var(--green); }
+  .hero-s.warn { color: var(--amber); }
+  .hero-s.blue { color: var(--blue); }
+  .fold {
+    display: flex; justify-content: space-between; align-items: center; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 12px 2px; font-family: inherit; font-size: 15px; color: var(--text-2); cursor: pointer;
+  }
+  .fold .c { color: var(--text-3); font-size: 13px; }
+  .fold:active { background: var(--surface-press); }
+  .oday {
+    font-size: 12px; font-weight: 650; color: var(--text-3);
+    padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
+  }
+  /* A leg row. In a batch it is a read -- a batch is created from a statement
+     image in the bot, so there is nothing there to tick -- and the order
+     number inside it is the tap that copies. */
+  .orow {
+    display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line); padding: 11px 2px;
+  }
+  /* In a short-paid batch the same row is the operator's answer to which leg
+     was not paid, so the whole row is the target, not just the box. */
+  .orow.tick { cursor: pointer; }
+  .orow.tick:active { background: var(--surface-press); }
+  /* In the day sheet the row is the way into the order it stands for, so the
+     row is the target and the number inside it is not a second one. */
+  .orow.tap { cursor: pointer; }
+  .orow.tap:active { background: var(--surface-press); }
+  .orow.tap .oid { cursor: inherit; }
+  .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .ol { flex: 1; min-width: 0; }
+  /* Reconciling is done number by number against the platform's statement, so
+     the order number is the line the row is read by; the label under it only
+     jogs the memory of which leg that was.
+     Negative margins keep the digits flush with the label while the padding
+     gives the tap something to land on, and wrapping anywhere keeps a
+     19-digit number inside the row instead of widening the sheet. Tapping the
+     number copies it wherever it carries the copy target. */
+  .oid {
+    display: inline-block; margin: 0 -6px; padding: 2px 6px 1px;
+    font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums;
+    letter-spacing: .2px; overflow-wrap: anywhere; cursor: pointer;
+  }
+  .oid:active { color: var(--text-2); }
+  .oll { display: block; font-size: 11px; color: var(--text-3); }
+  .oa { flex-shrink: 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .omark {
+    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    background: var(--banner-bg); color: var(--banner-fg);
+  }
+  .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
+  /* A fine already netted into the figure beside it, so it explains a number
+     rather than warning about one — same shape as .oplat, the colour of money
+     going out. */
+  .ofine { color: var(--red); font-size: 0.85em; margin-left: 4px; }
+  /* A 舉牌 paid ahead is money that has arrived, on another batch. */
+  .oahead { color: var(--green); font-size: 0.85em; margin-left: 4px; }
+  /* A leg the platform held back and paid later is a record, not a warning:
+     same shape as the 未過數 mark, the colour of money that has arrived. */
+  .omark.paid { background: var(--paid-bg); color: var(--green); }
+  .sum-row a { color: var(--amber); text-decoration: none; }
+  /* An allocation row hands the operator to the credit that paid it, so it is
+     a button wearing the same shape as the rows around it. */
+  .sum-row.link {
+    width: 100%; background: none; border: none; font: inherit; color: inherit;
+    cursor: pointer; text-align: left;
+  }
+  .sum-row.link:active { background: var(--surface-press); }
+  /* Taking money back off a batch cannot live inside the row that opens the
+     credit -- a control inside a control -- so the two sit side by side. */
+  .alloc { display: flex; align-items: center; gap: 6px; }
+  .alloc .sum-row.link { flex: 1; min-width: 0; }
+  .xbtn {
+    flex-shrink: 0; background: none; border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 9px; font-family: inherit; font-size: 12px;
+    color: var(--text-3); cursor: pointer;
+  }
+  .xbtn:active { background: var(--surface-press); }
+  .sum-row .c { color: var(--text-3); margin-left: 6px; }
+  /* In the day sheet the amount is never the answer on its own -- $500 already
+     collected and $500 still owed are the same number -- so every leg carries
+     its state under the amount, in the same colours the calendar uses. */
+  .oend { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+  .otag { font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .otag.unsettled { color: var(--amber); }
+  .otag.awaiting { color: var(--text); }
+  .otag.paid { color: var(--green); }
+  .otag.mute { color: var(--text-3); }
+
+  /* A batch the day's legs belong to is a pointer out of the day, not a row of
+     the day: it states what the whole batch is worth and hands the operator to
+     it. The text is single-line so a long span cannot widen the sheet. */
+  .blinks { padding-top: 6px; }
+  .blink {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 12px 2px; text-align: left; cursor: pointer;
+    font-family: inherit; color: var(--text-2);
+  }
+  .blink:active { background: var(--surface-press); }
+  .blink-t {
+    flex: 1; min-width: 0; font-size: 13px; font-variant-numeric: tabular-nums;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
+
+  /* ---- order sheet ----
+     The leg read as itself, so most values are the platform's own free text
+     rather than a figure: the label keeps its width and the value takes the
+     wrapping, or one long address widens the whole sheet. */
+  .order-rows .k { flex-shrink: 0; padding-right: 12px; }
+  .order-rows .v { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  /* A fine is money going out of what the leg earns. */
+  .order-rows .v.fine { color: var(--red); }
+  .oarrow { color: var(--text-3); }
+  /* The order is fetched per open, so a fetch that did not land leaves the
+     sheet with the reason rather than an empty body. */
+  .order-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
+
+  /* ---- credit and queue sheets ---- */
+  /* A note qualifies the summary row above it rather than stating a figure of
+     its own, so it hangs off that row instead of starting a new one. */
+  .sub-note { font-size: 12px; padding: 0 2px 8px; margin-top: -4px; }
+  .sub-note.warn { color: var(--amber); }
+  .sub-note.mute { color: var(--text-3); }
+  /* The queue is a work list rather than a record: every row is a credit still
+     to be accounted for and the way into it, so the whole row is the control. */
+  .qrow {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 46px;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    padding: 11px 2px; text-align: left; cursor: pointer; font-family: inherit;
+    color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums;
+  }
+  .qrow:active { background: var(--surface-press); }
+  .qrow .t { flex: 1; min-width: 0; }
+  .qrow .s { color: var(--blue); font-weight: 650; font-size: 13px; }
+  .qrow .c { color: var(--text-3); font-size: 17px; }
+  /* The count of unmatched credits in the header is the way into the queue, so
+     it has to look like one without turning the summary line into a row of
+     controls. */
+  .sum-link {
+    background: none; border: none; padding: 0; font: inherit; color: var(--blue);
+    cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+
+  /* ---- proposals ----
+     What the matcher believes could pay what is owed, in either direction. A
+     row states the other side and carries the one tap that would take it; the
+     belief leads without acting on itself, the way the chat card's buttons do. */
+  .prop-sec { padding: 12px 2px 0; }
+  .prop-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
+  .prow {
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--line); padding: 10px 2px;
+    font-size: 14px; font-variant-numeric: tabular-nums;
+  }
+  .prow .t { flex: 1; min-width: 0; }
+  .ptag {
+    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
+    background: var(--paid-bg); color: var(--green);
+  }
+  .pbtn {
+    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; font-family: inherit; font-size: 13px;
+    font-weight: 650; color: var(--text); cursor: pointer;
+  }
+  .pbtn:active { background: var(--key-press); }
+  /* A queue row whose match is unambiguous answers itself, so the answer and
+     the tap that takes it hang under the row rather than inside its control. */
+  .qitem { border-bottom: 1px solid var(--line); }
+  .qitem .qrow { border-bottom: none; }
+  .qprop {
+    display: flex; align-items: center; gap: 8px; padding: 0 2px 10px;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .qprop .t { flex: 1; min-width: 0; color: var(--text-2); }
+
+  /* ---- unpaid tick section ---- */
+  .up-sec { padding: 12px 2px 0; }
+  .up-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
+  .up-note { font-size: 12px; color: var(--text-3); padding: 0 2px 6px; }
+  .up-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-bottom: 8px; }
+  .up-chips .up-note { padding-bottom: 0; }
+  .up-chip {
+    background: var(--key-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
+    cursor: pointer;
+  }
+  .up-chip:active { background: var(--key-press); }
+  .up-chk { flex-shrink: 0; font-size: 16px; line-height: 1; width: 18px; color: var(--text-2); }
+  .up-chk.on { color: var(--text); }
+  .up-foot {
+    display: flex; align-items: center; gap: 10px; padding: 10px 2px 0;
+    font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .up-foot .up-sum { flex: 1; color: var(--text-2); }
+  .up-foot .up-sum.warn { color: var(--amber); }
+  .up-btn {
+    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; font-family: inherit; font-size: 13px;
+    font-weight: 650; color: var(--text); cursor: pointer;
+  }
+  .up-btn:disabled { opacity: .35; cursor: default; }
+  .up-btn:not(:disabled):active { background: var(--key-press); }
+
+  .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
+
+  /* ---- statement sheet ----
+     The report is the text the bot's card carries, printed as it came rather
+     than rebuilt as rows: one text source means the chat and the page cannot
+     drift apart about what a statement says. */
+  .stmt-report {
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: inherit; font-size: 13px; line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface); border-radius: 10px;
+    padding: 12px; margin-top: 8px;
+  }
+  .stmt-credit { font-size: 14px; color: var(--text-2); padding: 10px 2px 0; }
+  .stmt-note { font-size: 13px; color: var(--text-3); padding: 6px 2px 0; }
+  .stmt-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
+  /* Reading is ~2 s of OCR on top of the upload, so the control says it is
+     working rather than looking like a tap that missed. */
+  .icon-btn:disabled { opacity: .5; cursor: default; }
+
+  /* The drop target is the whole page: on a desktop the file is dragged out of
+     the platform's own download, which is the original the reader wants. */
+  .drop {
+    position: fixed; inset: 0; z-index: 40; display: none;
+    background: var(--scrim); color: var(--text);
+    align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 650;
+  }
+  .drop.show { display: flex; }
+  .drop span {
+    border: 2px dashed var(--text-2); border-radius: 14px;
+    padding: 24px 28px; background: var(--sheet-bg);
+  }
+}
+
+/* Five controls share the header row here. Below iPhone SE width the month
+   label wraps onto a second line and collides with the summary under it, so
+   the round buttons give up the width instead. */
+@media (max-width: 360px) {
+  :where(.view-settle) {
+      .nav-btn, .icon-btn { width: 34px; }
+  }
+}
+
+/* ---- desktop ----
+   The dashboard is phone-only. A wide screen has nothing else to show --
+   every batch is read from the day it sits on -- so the width buys bigger
+   cells rather than a second column. Sheets are unchanged: they stay
+   phone-width bottom sheets. */
+@media (min-width: 900px) {
+  body[data-view="settle"] { max-width: 640px; }
+  :where(.view-settle) {
+      .cell { min-height: 76px; padding: 18px 5px 8px; }
+      .cell .d { font-size: 12px; line-height: 14px; }
+      .cell .amt { font-size: 15px; }
+      .bar, .cchip { height: 22px; font-size: 13px; }
+      .lane { grid-auto-rows: 22px; }
+  }
+}
