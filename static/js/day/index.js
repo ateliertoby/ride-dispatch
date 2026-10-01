@@ -499,7 +499,7 @@ function renderSheet() {
   el.classList.remove('np-sheet');  // the pay-layout view re-adds this itself; it must not leak into other views
   const view = sheetStack[sheetStack.length - 1];
   if (stackHost === 'sheet') {
-    el.innerHTML = '<div class="grab"></div>';
+    el.innerHTML = '';
     view(el);
     return;
   }

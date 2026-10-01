@@ -15,20 +15,6 @@
   :root:has(> body[data-view="settle"]) { color-scheme: light; }
 }
 :where(.view-settle) {
-  .empty { padding: 28px 0 8px; }
-  .sum-rows { padding: 8px 0 0; }
-  /* Sheets here stack (day -> batch -> undo), so the head carries a back
-     button and the title has to yield width to it. */
-  .sheet-head { gap: 10px; }
-  .sheet-title { flex: 1; min-width: 0; }
-  .sheet-x, .sheet-back { flex-shrink: 0; }
-  .sheet-back {
-    background: var(--key-bg); border: none; border-radius: 50%;
-    width: 32px; height: 32px; color: var(--text-2); cursor: pointer;
-    font-size: 21px; line-height: 30px; padding: 0 2px 2px 0;
-  }
-  .ghost-btn:active { background: var(--key-press); }
-
   /* ---- masthead ---- */
   /* Whole pixels, here and in the strip: the strip is scrolled to and held
      at positions worked out from the header's bottom edge and the rows'
@@ -196,6 +182,7 @@
   /* An event sitting on the last column reserves its room to the left, so its
      label has to leave the fill leftwards as well. */
   .bar.spill-l { justify-content: flex-end; }
+
   .bar:active { filter: brightness(1.15); }
   /* A credit is an outline, not a fill: money arriving from outside the batch
      never reads as one of the bars. A matched one is a record and recedes to
@@ -293,220 +280,289 @@
   .foot .queue .v { color: var(--blue); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
   .foot .queue:active .v { color: var(--text); }
 
-  /* ---- sheet contents ---- */
+  /* ---- sheets ----
+     A sheet here is a page of a ledger, drawn as the order's own sheet is: a
+     heading, the figure the sheet is opened for, then lines ruled by
+     hairlines with the label at the left and the figure at the right.
+     Figures are in the figure face (the script wraps each one); the words
+     around them are not. Colour says one of four things and nothing else:
+     amber is owed, blue is bank money not yet matched, green is finished,
+     red is what cannot be taken back or what could not be done. */
+
+  /* Sheets here stack (day -> batch -> undo), so the heading carries a key
+     that goes back one level before the title, and the one that closes the
+     whole stack after it. */
+  .sheet-back {
+    flex-shrink: 0; width: 36px; height: 36px; margin-left: -10px; padding: 0;
+    background: none; border: none; border-radius: 3px; cursor: pointer;
+    font-family: var(--mono); font-size: 20px; line-height: 1; color: var(--text-2);
+  }
+  .sheet-back:active { background: var(--surface-press); color: var(--text); }
+  .empty { padding: 28px 0 8px; font-size: 14px; }
+  /* A list that opens a sheet is ruled above as well as below. */
+  .sheet-sub + :is(.orow, .qrow, .qitem) { border-top: 1px solid var(--line); }
+  /* What closes a sheet, set off from the lines above it. */
+  .sheet-acts { padding-top: 8px; }
+
   /* The batch sheet is read for its money on every open and for its order
-     numbers only when tracing a problem, so the figure leads at hero size and
-     the list sits behind a count. */
-  .hero { padding: 12px 2px 10px; border-bottom: 1px solid var(--line); }
-  .hero-k { font-size: 12px; color: var(--text-2); }
-  .hero-v { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; line-height: 1.2; }
-  .hero-s { font-size: 14px; font-weight: 650; color: var(--text-2); padding-top: 2px; }
+     numbers only when tracing a problem, so the figure leads and the list
+     sits behind a count. Under the figure, where its money has got to, in
+     the colour of that state. */
+  .hero { padding: 4px 0 13px; border-bottom: 1px solid var(--line); }
+  .hero-k { font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); }
+  .hero-v {
+    font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1.25; letter-spacing: -.03em;
+    overflow-wrap: anywhere;
+  }
+  .hero-v .num { letter-spacing: inherit; }
+  .hero-s { font-size: 13px; line-height: 1.35; font-weight: 600; color: var(--text-2); padding-top: 2px; }
   .hero-s.paid { color: var(--green); }
   .hero-s.warn { color: var(--amber); }
   .hero-s.blue { color: var(--blue); }
+
+  /* The ledger. A value wraps where it has to: a bank reference or a memo
+     is as long as the payer made it. */
+  .sum-rows { padding: 0; }
+  .sum-row {
+    align-items: baseline; gap: 12px; padding: 11px 0 10px;
+    border-bottom: 1px solid var(--line); font-size: 15px; line-height: 1.35;
+  }
+  .sum-row .k { font-size: 13px; flex-shrink: 0; }
+  .sum-row .v { font-weight: 400; min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .sum-row.total .k { color: var(--text); font-weight: 600; }
+  .sum-row.total .v { font-weight: 700; }
+  /* A link is ink with a rule under it: colour is kept for state. */
+  .sum-row a {
+    color: var(--text); text-decoration: underline;
+    text-decoration-color: var(--text-3); text-underline-offset: 3px;
+  }
+  /* A line that leads somewhere (an allocation to its credit, a credit to
+     the batch it paid) is a button wearing the line's shape. */
+  .sum-row.link {
+    width: 100%; background: none; border: none; border-bottom: 1px solid var(--line);
+    color: inherit; cursor: pointer; text-align: left;
+  }
+  .sum-row.link:active { background: var(--surface-press); }
+  .sum-row .c, .qrow .c, .blink-c { font-family: var(--mono); font-size: 14px; color: var(--text-3); }
+  .sum-row .c { margin-left: 8px; }
+  /* Taking money back off a batch cannot live inside the line that opens the
+     credit -- a control inside a control -- so the two sit side by side
+     over one hairline. The key is small, and takes a tap well outside its
+     outline. */
+  .alloc { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+  .alloc .sum-row.link { flex: 1; min-width: 0; border-bottom: none; }
+  .xbtn {
+    position: relative; flex-shrink: 0; background: none; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 3px; padding: 5px 9px 4px;
+    font-size: 12px; line-height: 1.35; color: var(--text-2);
+  }
+  .xbtn::after { content: ""; position: absolute; inset: -10px -6px; }
+  .xbtn:active { background: var(--surface-press); }
+  /* A note qualifies the line above it instead of stating a figure of its
+     own, so it hangs off that line: the hairline moves under the note. */
+  .sum-row:has(+ .sub-note), .alloc:has(+ .sub-note) { border-bottom: none; }
+  .sub-note {
+    font-size: 12px; line-height: 1.35; padding: 0 0 10px; margin-top: -5px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sub-note.warn { color: var(--amber); }
+  .sub-note.mute { color: var(--text-3); }
+  .prop-sec + .sum-rows, .sub-note + .sum-rows { padding-top: 6px; }
+
+  /* A section of the sheet: its heading over a hairline, as a column head
+     stands over its rows. */
+  .prop-head, .up-head {
+    padding: 18px 0 7px; border-bottom: 1px solid var(--line);
+    font-size: 12px; line-height: 1.35; font-weight: 600; color: var(--text-2);
+  }
   .fold {
-    display: flex; justify-content: space-between; align-items: center; width: 100%;
+    display: flex; justify-content: space-between; align-items: baseline; width: 100%; min-height: 44px;
     background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 12px 2px; font-family: inherit; font-size: 15px; color: var(--text-2); cursor: pointer;
+    padding: 12px 0 11px; font-size: 14px; line-height: 1.35; color: var(--text-2); cursor: pointer;
   }
   .fold .c { color: var(--text-3); font-size: 13px; }
   .fold:active { background: var(--surface-press); }
-  .oday {
-    font-size: 12px; font-weight: 650; color: var(--text-3);
-    padding: 14px 2px 4px; font-variant-numeric: tabular-nums;
-  }
-  /* A leg row. In a batch it is a read -- a batch is created from a statement
-     image in the bot, so there is nothing there to tick -- and the order
-     number inside it is the tap that copies. */
+
+  /* ---- order rows ----
+     One grid for every list of legs: the time, the order number with what
+     jogs the memory of the leg under it, and the figure with its state under
+     it. The time column is as wide as a time, so numbers start on one x down
+     the list; a list that takes ticks has the box before the time and is
+     otherwise the same. */
+  .orow, .oday { --o-time: 40px; }
   .orow {
-    display: flex; align-items: center; gap: 10px;
-    border-bottom: 1px solid var(--line); padding: 11px 2px;
+    display: grid; grid-template-columns: var(--o-time) minmax(0, 1fr) auto; column-gap: 10px;
+    align-items: baseline; padding: 11px 0 10px; border-bottom: 1px solid var(--line);
   }
-  /* In a short-paid batch the same row is the operator's answer to which leg
-     was not paid, so the whole row is the target, not just the box. */
-  .orow.tick { cursor: pointer; }
-  .orow.tick:active { background: var(--surface-press); }
+  /* Days of a batch, each a page of the statement it was read from. */
+  .oday {
+    padding: 14px 0 6px; border-bottom: 1px solid var(--line);
+    font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3);
+  }
+  .oday .num { letter-spacing: .04em; }
   /* In the day sheet the row is the way into the order it stands for, so the
      row is the target and the number inside it is not a second one. */
   .orow.tap { cursor: pointer; }
   .orow.tap:active { background: var(--surface-press); }
   .orow.tap .oid { cursor: inherit; }
-  .ot { width: 44px; flex-shrink: 0; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  .ol { flex: 1; min-width: 0; }
+  /* In a short-paid batch the same row is the operator's answer to which leg
+     was not paid, so the whole row is the target, not just the box. */
+  .orow.tick { grid-template-columns: 18px var(--o-time) minmax(0, 1fr) auto; cursor: pointer; }
+  .orow.tick:active { background: var(--surface-press); }
+  .up-chk {
+    position: relative; align-self: start; width: 18px; height: 18px; margin-top: 1px;
+    border: 1px solid var(--text-2); border-radius: 2px;
+  }
+  .up-chk.on { background: var(--text); border-color: var(--text); }
+  .up-chk.on::after {
+    content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 10px;
+    border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  .ot { font-size: 13px; line-height: 1.35; color: var(--text-2); }
+  .ol { min-width: 0; }
   /* Reconciling is done number by number against the platform's statement, so
-     the order number is the line the row is read by; the label under it only
-     jogs the memory of which leg that was.
-     Negative margins keep the digits flush with the label while the padding
-     gives the tap something to land on, and wrapping anywhere keeps a
-     19-digit number inside the row instead of widening the sheet. Tapping the
-     number copies it wherever it carries the copy target. */
+     the order number is the line the row is read by, whole: it wraps inside
+     its column where it must and is never cut. Inline, because the row
+     aligns its cells on their first baselines and WebKit takes the last
+     line's from an inline box that wraps. The padding gives the tap that
+     copies it something to land on. */
   .oid {
-    display: inline-block; margin: 0 -6px; padding: 2px 6px 1px;
-    font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums;
-    letter-spacing: .2px; overflow-wrap: anywhere; cursor: pointer;
+    margin: 0 -6px; padding: 4px 6px; cursor: pointer;
+    font-size: 15px; line-height: 1.35; color: var(--text); overflow-wrap: anywhere;
   }
   .oid:active { color: var(--text-2); }
-  .oll { display: block; font-size: 11px; color: var(--text-3); }
-  .oa { flex-shrink: 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .omark {
-    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
-    background: var(--banner-bg); color: var(--banner-fg);
-  }
-  .oplat { color: var(--amber); font-size: 0.85em; margin-left: 4px; }
-  /* A fine already netted into the figure beside it, so it explains a number
-     rather than warning about one — same shape as .oplat, the colour of money
-     going out. */
-  .ofine { color: var(--red); font-size: 0.85em; margin-left: 4px; }
-  /* A 舉牌 paid ahead is money that has arrived, on another batch. */
-  .oahead { color: var(--green); font-size: 0.85em; margin-left: 4px; }
-  /* A leg the platform held back and paid later is a record, not a warning:
-     same shape as the 未過數 mark, the colour of money that has arrived. */
-  .omark.paid { background: var(--paid-bg); color: var(--green); }
-  .sum-row a { color: var(--amber); text-decoration: none; }
-  /* An allocation row hands the operator to the credit that paid it, so it is
-     a button wearing the same shape as the rows around it. */
-  .sum-row.link {
-    width: 100%; background: none; border: none; font: inherit; color: inherit;
-    cursor: pointer; text-align: left;
-  }
-  .sum-row.link:active { background: var(--surface-press); }
-  /* Taking money back off a batch cannot live inside the row that opens the
-     credit -- a control inside a control -- so the two sit side by side. */
-  .alloc { display: flex; align-items: center; gap: 6px; }
-  .alloc .sum-row.link { flex: 1; min-width: 0; }
-  .xbtn {
-    flex-shrink: 0; background: none; border: 1px solid var(--line);
-    border-radius: 8px; padding: 5px 9px; font-family: inherit; font-size: 12px;
-    color: var(--text-3); cursor: pointer;
-  }
-  .xbtn:active { background: var(--surface-press); }
-  .sum-row .c { color: var(--text-3); margin-left: 6px; }
-  /* In the day sheet the amount is never the answer on its own -- $500 already
-     collected and $500 still owed are the same number -- so every leg carries
-     its state under the amount, in the same colours the calendar uses. */
-  .oend { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
-  .otag { font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
-  .otag.unsettled { color: var(--amber); }
+  .gs { font-family: var(--han); margin-right: .1em; }
+  .oll { display: block; margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--text-2); overflow-wrap: anywhere; }
+  /* The amount is never the answer on its own -- $500 already collected and
+     $500 still owed are the same number -- so what is to be said about it
+     stands under it, a line each, in the colours the calendar uses. */
+  .oend { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; text-align: right; }
+  .oa { font-size: 15px; line-height: 1.35; font-weight: 700; }
+  .otag { font-size: 11.5px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
+  .otag.unsettled, .otag.warn, .otag.plat { color: var(--amber); }
   .otag.awaiting { color: var(--text); }
   .otag.paid { color: var(--green); }
   .otag.mute { color: var(--text-3); }
+  /* A fine already netted into the figure above it: it explains the number,
+     in the colour of money going out. */
+  .otag.fine { color: var(--red); }
 
-  /* A batch the day's legs belong to is a pointer out of the day, not a row of
-     the day: it states what the whole batch is worth and hands the operator to
-     it. The text is single-line so a long span cannot widen the sheet. */
-  .blinks { padding-top: 6px; }
+  /* A batch the day's legs belong to is a pointer out of the day, not a row
+     of the day: it states what the whole batch is worth and where its money
+     has got to, and hands the operator to it. */
   .blink {
-    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px;
+    display: flex; align-items: baseline; gap: 10px; width: 100%; min-height: 48px;
     background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 12px 2px; text-align: left; cursor: pointer;
-    font-family: inherit; color: var(--text-2);
+    padding: 14px 0 13px; text-align: left; cursor: pointer;
+    font-size: 13px; line-height: 1.5; color: var(--text);
   }
   .blink:active { background: var(--surface-press); }
-  .blink-t {
-    flex: 1; min-width: 0; font-size: 13px; font-variant-numeric: tabular-nums;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .blink-c { flex-shrink: 0; font-size: 17px; color: var(--text-3); }
+  .blink-t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .bs.paid { color: var(--green); }
+  .bs.partial { color: var(--amber); }
 
-  /* ---- order sheet ---- */
   /* The order is fetched per open, so a fetch that did not land leaves the
-     sheet with the reason rather than an empty body. */
-  .order-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
+     sheet with the reason, as does a statement the server would not
+     confirm: said the way the day view says why a message cannot be saved. */
+  .order-err, .stmt-err {
+    box-shadow: inset 0 0 0 1px var(--red); color: var(--red);
+    border-radius: 3px; padding: 10px 12px; font-size: 14px; line-height: 1.35;
+    font-weight: 600; margin-bottom: 10px;
+  }
 
-  /* ---- credit and queue sheets ---- */
-  /* A note qualifies the summary row above it rather than stating a figure of
-     its own, so it hangs off that row instead of starting a new one. */
-  .sub-note { font-size: 12px; padding: 0 2px 8px; margin-top: -4px; }
-  .sub-note.warn { color: var(--amber); }
-  .sub-note.mute { color: var(--text-3); }
-  /* The queue is a work list rather than a record: every row is a credit still
-     to be accounted for and the way into it, so the whole row is the control. */
+  /* ---- the queue ----
+     A work list, not a record: every row is a credit still to be accounted
+     for and the way into it, so the whole row is the control. */
   .qrow {
-    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 46px;
+    display: flex; align-items: baseline; gap: 10px; width: 100%; min-height: 48px;
     background: none; border: none; border-bottom: 1px solid var(--line);
-    padding: 11px 2px; text-align: left; cursor: pointer; font-family: inherit;
-    color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums;
+    padding: 13px 0 12px; text-align: left; cursor: pointer;
+    color: var(--text); font-size: 15px; line-height: 1.35;
   }
   .qrow:active { background: var(--surface-press); }
   .qrow .t { flex: 1; min-width: 0; }
-  .qrow .s { color: var(--blue); font-weight: 650; font-size: 13px; }
-  .qrow .c { color: var(--text-3); font-size: 17px; }
+  .qrow .s { color: var(--blue); font-weight: 600; font-size: 13px; }
+  /* A queue row whose match is unambiguous answers itself, so the answer and
+     the tap that takes it hang under the row, not inside its control. */
+  .qitem { border-bottom: 1px solid var(--line); }
+  .qitem .qrow { border-bottom: none; padding-bottom: 6px; min-height: 44px; }
+  .qprop {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 0 0 8px;
+    font-size: 13px; line-height: 1.35;
+  }
+  .qprop .t { flex: 1 1 0; min-width: 8em; color: var(--text-2); overflow-wrap: anywhere; }
+
   /* ---- proposals ----
      What the matcher believes could pay what is owed, in either direction. A
      row states the other side and carries the one tap that would take it; the
-     belief leads without acting on itself, the way the chat card's buttons do. */
-  .prop-sec { padding: 12px 2px 0; }
-  .prop-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
+     belief leads without acting on itself, the way the chat card's buttons
+     do. The text gives way and wraps; the key says in full what a tap would
+     do and keeps its line where the row has room for both. */
   .prow {
-    display: flex; align-items: center; gap: 8px;
-    border-bottom: 1px solid var(--line); padding: 10px 2px;
-    font-size: 14px; font-variant-numeric: tabular-nums;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+    border-bottom: 1px solid var(--line); padding: 6px 0;
+    font-size: 14px; line-height: 1.35;
   }
-  .prow .t { flex: 1; min-width: 0; }
+  .prow .t { flex: 1 1 0; min-width: 8em; overflow-wrap: anywhere; }
+  .pt { display: inline-block; }
+  /* Agreement to the cent is a finished fact: a solid block, as a landed
+     flight is on the board. */
   .ptag {
-    flex-shrink: 0; font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
-    background: var(--paid-bg); color: var(--green);
+    flex-shrink: 0; padding: 2px 6px 1px; border-radius: 2px;
+    background: var(--green); color: var(--on-solid);
+    font-size: 11.5px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
   }
+  /* The tap that moves money: an outlined key, tall enough for a thumb. */
   .pbtn {
-    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
-    border-radius: 8px; padding: 7px 12px; font-family: inherit; font-size: 13px;
-    font-weight: 650; color: var(--text); cursor: pointer;
+    flex-shrink: 0; margin-left: auto; min-width: 56px; min-height: 44px; padding: 0 14px;
+    background: none; border: 1px solid var(--text-3); border-radius: 3px; cursor: pointer;
+    font-size: 14px; line-height: 1.35; font-weight: 600; color: var(--text);
   }
-  .pbtn:active { background: var(--key-press); }
-  /* A queue row whose match is unambiguous answers itself, so the answer and
-     the tap that takes it hang under the row rather than inside its control. */
-  .qitem { border-bottom: 1px solid var(--line); }
-  .qitem .qrow { border-bottom: none; }
-  .qprop {
-    display: flex; align-items: center; gap: 8px; padding: 0 2px 10px;
-    font-size: 13px; font-variant-numeric: tabular-nums;
-  }
-  .qprop .t { flex: 1; min-width: 0; color: var(--text-2); }
+  .pbtn:active { background: var(--surface-press); }
 
-  /* ---- unpaid tick section ---- */
-  .up-sec { padding: 12px 2px 0; }
-  .up-head { font-size: 13px; font-weight: 650; color: var(--text-2); padding-bottom: 6px; }
-  .up-note { font-size: 12px; color: var(--text-3); padding: 0 2px 6px; }
-  .up-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-bottom: 8px; }
-  .up-chips .up-note { padding-bottom: 0; }
+  /* ---- unpaid ticks ---- */
+  .up-note { font-size: 12px; line-height: 1.35; color: var(--text-3); padding: 8px 0; }
+  .up-sec .up-note, .up-chips { border-bottom: 1px solid var(--line); }
+  .up-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 0; }
+  .up-chips .up-note { padding: 0; border-bottom: none; }
   .up-chip {
-    background: var(--key-bg); border: 1px solid var(--line); border-radius: 8px;
-    padding: 5px 10px; font-family: inherit; font-size: 12px; color: var(--text-2);
-    cursor: pointer;
+    background: none; border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
+    padding: 7px 10px 6px; font-size: 12px; line-height: 1.35; color: var(--text-2);
   }
-  .up-chip:active { background: var(--key-press); }
-  .up-chk { flex-shrink: 0; font-size: 16px; line-height: 1; width: 18px; color: var(--text-2); }
-  .up-chk.on { color: var(--text); }
-  .up-foot {
-    display: flex; align-items: center; gap: 10px; padding: 10px 2px 0;
-    font-size: 13px; font-variant-numeric: tabular-nums;
-  }
-  .up-foot .up-sum { flex: 1; color: var(--text-2); }
+  .up-chip:active { background: var(--surface-press); }
+  /* Whether the ticks account for the shortfall: green only when they do,
+     to the cent, which is also when they can be recorded. */
+  .up-foot { display: flex; align-items: center; gap: 10px; padding: 10px 0 0; font-size: 13px; line-height: 1.35; }
+  .up-foot .up-sum { flex: 1; min-width: 0; font-weight: 600; color: var(--green); }
   .up-foot .up-sum.warn { color: var(--amber); }
   .up-btn {
-    flex-shrink: 0; background: var(--key-bg); border: 1px solid var(--line);
-    border-radius: 8px; padding: 8px 14px; font-family: inherit; font-size: 13px;
-    font-weight: 650; color: var(--text); cursor: pointer;
+    flex-shrink: 0; min-height: 44px; padding: 0 18px; border: none; border-radius: 3px; cursor: pointer;
+    background: var(--text); color: var(--bg); font-size: 15px; font-weight: 700;
   }
-  .up-btn:disabled { opacity: .35; cursor: default; }
-  .up-btn:not(:disabled):active { background: var(--key-press); }
+  .up-btn:disabled { background: none; box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); cursor: default; }
+  .up-btn:not(:disabled):active { background: var(--text-2); }
 
-  .undo-info { padding: 12px 2px 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
+  /* ---- confirms ----
+     Destructive: a red outline where it is offered, solid only on the step
+     that confirms it. */
+  .ghost-btn.danger { border-color: var(--red); color: var(--red); }
+  .undo-info { padding: 4px 0 6px; font-size: 14px; line-height: 1.7; color: var(--text-2); }
 
   /* ---- statement sheet ----
      The report is the text the bot's card carries, printed as it came rather
      than rebuilt as rows: one text source means the chat and the page cannot
-     drift apart about what a statement says. */
+     drift apart about what a statement says. Its lines keep their breaks,
+     between two hairlines, with the figures in the figure face. */
   .stmt-report {
     white-space: pre-wrap; overflow-wrap: anywhere;
-    font-family: inherit; font-size: 13px; line-height: 1.55;
-    font-variant-numeric: tabular-nums;
-    background: var(--surface); border-radius: 10px;
-    padding: 12px; margin-top: 8px;
+    font-family: inherit; font-size: 13px; line-height: 1.6;
+    padding: 9px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
   }
-  .stmt-credit { font-size: 14px; color: var(--text-2); padding: 10px 2px 0; }
-  .stmt-note { font-size: 13px; color: var(--text-3); padding: 6px 2px 0; }
-  .stmt-err { font-size: 14px; color: var(--amber); padding: 8px 2px 2px; }
+  /* The confirm names every part of what it will write, and can take two
+     lines to; a figure in it stays whole. */
+  .primary-btn .num { white-space: nowrap; }
+  .stmt-credit { font-size: 14px; line-height: 1.5; padding: 10px 0 0; }
+  .stmt-note { font-size: 13px; line-height: 1.5; color: var(--text-2); padding: 6px 0 0; }
 
   /* The drop target is the whole page: on a desktop the file is dragged out of
      the platform's own download, which is the original the reader wants. */
@@ -514,12 +570,12 @@
     position: fixed; inset: 0; z-index: 40; display: none;
     background: var(--scrim); color: var(--text);
     align-items: center; justify-content: center;
-    font-size: 17px; font-weight: 650;
   }
   .drop.show { display: flex; }
   .drop span {
-    border: 2px dashed var(--text-2); border-radius: 14px;
-    padding: 24px 28px; background: var(--sheet-bg);
+    border: 1px dashed var(--text-2); border-radius: 3px;
+    padding: 22px 26px; background: var(--sheet-bg);
+    font-size: 15px; font-weight: 600;
   }
 }
 

@@ -31,10 +31,6 @@ let host = null;
 // that view sets it when it is shown and before it opens an order.
 export function useOrderHost(h) { host = h; }
 
-// Leads every view this file draws. The stylesheet keys on it to give the
-// heading and the buttons a hosting view supplies the same manner as the rest
-// of the sheet, whichever view's element the sheet is drawn in.
-const MARK = '<span class="os" hidden></span>';
 // A figure in the mono face. Takes text, not markup.
 const num = text => '<span class="num">' + tight(esc(text)) + '</span>';
 
@@ -139,7 +135,7 @@ export function detailView(sheet) {
   // The heading leads with what the board's code column shows for the order:
   // a flight pickup's flight number, any other order's service.
   const code = isPickup && o.flight_number ? num(o.flight_number) : esc(label);
-  sheet.insertAdjacentHTML('beforeend', MARK +
+  sheet.insertAdjacentHTML('beforeend',
     host.head('<span class="hd-code">' + code + '</span> ' + num(orderTime(o)),
       host.subtitle ? host.subtitle(o) : num('#' + shortId(o.order_id))) +
     info + fields +
@@ -197,7 +193,7 @@ function cancelConfirmView(sheet) {
     num(orderTime(o)) + (o.passenger_name ? ' · ' + esc(o.passenger_name) : ''),
     o.pickup ? esc(o.pickup + ' → ' + o.dropoff) : '',
   ].filter(Boolean).join('<br>');
-  sheet.insertAdjacentHTML('beforeend', MARK +
+  sheet.insertAdjacentHTML('beforeend',
     host.head('取消訂單', num('#' + shortId(o.order_id))) +
     '<div class="cancel-info">' + lines + '</div>' +
     '<button class="primary-btn danger" id="cancelGo">確認取消</button>' +
@@ -244,7 +240,7 @@ export function numpadView({ title, sub, hint, mode, onConfirm, quick, above, la
     const padHtml =
       '<div class="np-pad' + (suggested ? '' : ' open') + '" id="npPad"><div>' +
       '<div class="numpad" id="npKeys"></div></div></div>';
-    sheet.insertAdjacentHTML('beforeend', MARK +
+    sheet.insertAdjacentHTML('beforeend',
       host.head(esc(title), sub || '') +
       (above || '') +
       (pay
