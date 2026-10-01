@@ -1229,6 +1229,10 @@ async function fetchOrder(v) {
     if (res.ok) { v.order = body; v.err = ''; }
     else { v.order = null; v.err = body.error || ('HTTP ' + res.status); }
   } catch (e) {
+    // The order held from before is dropped with the error: this fetch is
+    // made again whenever the page reloads, and an order left standing would
+    // be the one from before whatever changed.
+    v.order = null;
     v.err = '讀唔到';
   }
 }
