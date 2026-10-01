@@ -194,9 +194,9 @@ function cancelConfirmView(sheet) {
   const o = host.order();
   if (!o) { host.gone(); return; }
   const lines = [
-    orderTime(o) + (o.passenger_name ? ' · ' + o.passenger_name : ''),
-    o.pickup ? o.pickup + ' → ' + o.dropoff : '',
-  ].filter(Boolean).map(esc).join('<br>');
+    num(orderTime(o)) + (o.passenger_name ? ' · ' + esc(o.passenger_name) : ''),
+    o.pickup ? esc(o.pickup + ' → ' + o.dropoff) : '',
+  ].filter(Boolean).join('<br>');
   sheet.insertAdjacentHTML('beforeend', MARK +
     host.head('取消訂單', num('#' + shortId(o.order_id))) +
     '<div class="cancel-info">' + lines + '</div>' +

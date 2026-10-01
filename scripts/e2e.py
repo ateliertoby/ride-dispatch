@@ -1562,6 +1562,7 @@ def day_cancel(s: Session) -> None:
     s.eq(s.text(".sheet.show .sheet-title"), "取消訂單", "confirm title")
     s.eq(s.text(".sheet.show .sheet-sub"), "#" + oid[-6:], "confirm subtitle")
     s.expect("11:00 · DEMO/DELTA" in s.text(".sheet.show .cancel-info"), "who is being cancelled")
+    s.eq(s.text(".sheet.show .cancel-info .num"), "11:00", "the time is set as a figure")
     s.tap(".sheet.show .ghost-btn", has_text="返回")
     s.eq(s.text(".sheet.show .sheet-title"), "送機 11:00", "返回 goes back to the detail")
     s.tap(".sheet.show .cancel-link")
