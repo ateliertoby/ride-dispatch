@@ -1,0 +1,4 @@
+# Development-only tools: the screenshot and end-to-end scripts under scripts/.
+# After installing, fetch the browser: playwright install webkit
+playwright==1.63.0
+pillow==12.3.0
