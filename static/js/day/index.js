@@ -25,7 +25,7 @@ let orders = [];
 let sheetStack = [];          // stack of view render fns
 let stackHost = 'sheet';      // element the stack renders into: 'sheet' | 'drop'
 let sheetOrderId = null;      // order shown in detail view, if any
-let revealId = null;          // order_id to scroll into view after next render
+let revealId = null;          // order_id the next load is to scroll into view
 let scrollToNext = false;     // scroll only on user navigation; SSE/timer re-renders must not fight manual scrolling
 
 const TYPE_META = {
@@ -153,6 +153,11 @@ function goToday() {
 async function load() {
   // A hidden view neither asks nor draws: showing it loads.
   if (!showing) return;
+  // The row a save asked to be brought into view. When the store holds the
+  // day, the first paint is of rows from before the save, so the id is kept
+  // until a paint has the row.
+  let reveal = revealId;
+  revealId = null;
   byId('dateBtn').innerHTML =
     esc(cur) + '<small>星期' + weekday(cur) + (cur === fmtDate(new Date()) ? ' · 今日' : '') + '</small>';
   const date = cur;
@@ -164,7 +169,7 @@ async function load() {
       // Or to the other view, which hides this one.
       if (!showing) return;
       orders = data.orders;
-      render();
+      if (render(reveal)) reveal = null;
       reportPerf();
       if (sheetOrderId) {
         const o = orders.find(x => x.order_id === sheetOrderId);
@@ -205,7 +210,9 @@ function stats(list) {
   return { total, priced };
 }
 
-function render() {
+// reveal is the id of a row to bring into view, if the caller has one; the
+// answer is whether that row was there to bring.
+function render(reveal) {
   const visible = filter ? orders.filter(o => platform(o) === filter) : orders;
   const s = stats(visible);
   const unpriced = visible.length - s.priced;
@@ -222,7 +229,7 @@ function render() {
   const box = byId('orders');
   if (!visible.length) {
     box.innerHTML = '<div class="empty">冇' + (filter ? PLATFORMS.find(p => p.key === filter).label : '') + '訂單</div>';
-    return;
+    return false;
   }
   const isToday = cur === fmtDate(new Date());
   // Two independent marks: NEXT is "the order to do next" and follows the
@@ -240,15 +247,16 @@ function render() {
   // Every row's time has passed: the line belongs after the last of them.
   if (nowStr && nowIdx < 0) html.push(gapHtml(null, null, true));
   box.innerHTML = html.join('');
-  if (revealId) {
-    const el = box.querySelector('[data-oid="' + CSS.escape(revealId) + '"]');
-    if (el) el.scrollIntoView({ block: 'nearest' });
-    revealId = null;
+  let found = false;
+  if (reveal) {
+    const el = box.querySelector('[data-oid="' + CSS.escape(reveal) + '"]');
+    if (el) { el.scrollIntoView({ block: 'nearest' }); found = true; }
   } else if (scrollToNext && nextId) {
     const el = box.querySelector('[data-oid="' + CSS.escape(nextId) + '"]');
     if (el) el.scrollIntoView({ block: 'center' });
   }
   scrollToNext = false;
+  return found;
 }
 
 function toggleFilter(key) {
