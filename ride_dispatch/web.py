@@ -155,6 +155,33 @@ def versioned_asset(version, filename):
     return resp
 
 
+_PRECACHE_DIRS = ("js", "css")
+
+
+def _precache_urls() -> list[str]:
+    """The versioned address of every script and stylesheet the shell can ask for."""
+    v = asset_version()
+    urls = []
+    for sub in _PRECACHE_DIRS:
+        base = os.path.join(app.static_folder, sub)
+        for root, _dirs, files in os.walk(base):
+            for name in files:
+                rel = os.path.relpath(os.path.join(root, name), app.static_folder)
+                urls.append(f"/assets/{v}/{rel.replace(os.sep, '/')}")
+    return sorted(urls)
+
+
+@app.get("/sw.js")
+def service_worker():
+    # Served from the root so its scope is the whole app, and revalidated on
+    # every check so a deploy is noticed.
+    body = render_template("sw.js", version=asset_version(), assets=_precache_urls())
+    resp = app.make_response(body)
+    resp.mimetype = "text/javascript"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.get("/api/ping")
 def api_ping():
     return jsonify({"ok": True, "version": asset_version()})

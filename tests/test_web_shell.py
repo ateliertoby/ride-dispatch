@@ -1,3 +1,4 @@
+import json
 import os
 import posixpath
 import re
@@ -160,6 +161,63 @@ def test_the_version_is_computed_once_outside_tests(client, static_copy, monkeyp
     first = web.asset_version()
     (static_copy / "probe.txt").write_text("x")
     assert web.asset_version() == first
+
+
+def test_the_worker_is_served_from_the_root_and_never_cached(client):
+    r = client.get("/sw.js")
+    assert r.status_code == 200
+    assert r.mimetype == "text/javascript"
+    assert r.headers["Cache-Control"] == "no-cache"
+    body = r.get_data(as_text=True)
+    v = web.asset_version()
+    assert f'"{v}"' in body
+    assert f"/assets/{v}/js/main.js" in body
+    assert f"/assets/{v}/css/base.css" in body
+
+
+def test_the_worker_lists_every_script_and_stylesheet(client):
+    body = client.get("/sw.js").get_data(as_text=True)
+    v = web.asset_version()
+    listed = 0
+    for sub in ("js", "css"):
+        base = os.path.join(web.app.static_folder, sub)
+        for root, _d, files in os.walk(base):
+            for name in files:
+                rel = os.path.relpath(os.path.join(root, name), web.app.static_folder)
+                assert f'"/assets/{v}/{rel}"' in body, rel
+                listed += 1
+    # Everything the document links and every module those import is among them.
+    for url in _asset_urls(client.get("/").get_data(as_text=True)):
+        assert f'"{url}"' in body, url
+    assert listed
+
+
+def test_the_worker_never_names_the_api(client):
+    """No code path in the worker can match or store a data request."""
+    body = client.get("/sw.js").get_data(as_text=True)
+    v = web.asset_version()
+    listed = [line for line in body.splitlines() if line.startswith("const ASSETS = ")]
+    assert len(listed) == 1
+    # What it stores by name is asset addresses only (one of them a script
+    # called api.js), and nothing else in it mentions the API at all.
+    urls = json.loads(listed[0][len("const ASSETS = "):].rstrip(";"))
+    assert urls and all(u.startswith(f"/assets/{v}/") for u in urls)
+    assert "api" not in body.replace(listed[0], "").lower()
+    # It answers two kinds of request and no other: an asset address, and a
+    # navigation to one of the shell's own paths.
+    assert body.count("respondWith(") == 2
+    assert "url.pathname.startsWith('/assets/')" in body
+    assert "const SHELL_PATHS = ['/', '/settle'];" in body
+    assert "req.mode === 'navigate' && SHELL_PATHS.includes(url.pathname)" in body
+
+
+def test_the_worker_changes_with_the_assets(client, static_copy):
+    """The browser looks for a new version by comparing the worker's bytes."""
+    before = client.get("/sw.js").get_data()
+    (static_copy / "js" / "probe.js").write_text("// x\n")
+    after = client.get("/sw.js").get_data(as_text=True)
+    assert after.encode() != before
+    assert f"/assets/{web.asset_version()}/js/probe.js" in after
 
 
 def test_api_answers_are_never_cacheable(client):
