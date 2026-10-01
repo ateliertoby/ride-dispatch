@@ -33,9 +33,11 @@ let tapAt = () => 0;
 // would draw as real dates carrying no data -- indistinguishable from days
 // with no work on them.
 let months = new Map();
-// Months with a fetch in flight. A sentinel can enter the viewport twice
-// before its month lands, and the second entry must not fetch again.
-let loading = new Set();
+// Months with a fetch in flight: 'YYYY-MM' -> the promise of its payload. A
+// sentinel can enter the viewport twice before its month lands, and the
+// second entry must not fetch again; a caller that needs a month another
+// caller is already fetching waits on the same promise.
+let loading = new Map();
 // Bumped whenever the strip is thrown away and refounded (platform switch, a
 // jump far outside it). A fetch that started before the bump is answering a
 // question nobody is asking any more.
@@ -234,29 +236,25 @@ function remerge(book) {
   reindex();
 }
 
-// One month into the map, nothing drawn: a caller loading several fills them
-// all in and paints once.
-async function fetchMonth(key) {
-  if (months.has(key) || loading.has(key)) return;
-  // Refounding swaps the set rather than emptying it, so the entry has to come
-  // out of the one it went into and not out of whatever is current by then.
+// One month's payload, stored nowhere: whoever asked decides what to keep. A
+// month already being fetched is not fetched again.
+function fetchMonth(key) {
+  // Refounding swaps the map rather than emptying it, so the entry has to
+  // come out of the one it went into and not out of whatever is current by
+  // then.
   const inflight = loading;
-  const g = gen;
-  inflight.add(key);
-  let payload;
-  try {
-    const res = await apiFetch('/api/settle?month=' + key + '&platform=' + curPlat);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    payload = await res.json();
-  } catch (e) {
-    // An expired login is announced by the shell, not by a toast.
-    if (!(e instanceof AuthExpired)) toast('載入失敗');
-    return;
-  } finally {
-    inflight.delete(key);
-  }
-  if (g !== gen) return;
-  months.set(key, payload);
+  if (inflight.has(key)) return inflight.get(key);
+  const p = (async () => {
+    try {
+      const res = await apiFetch('/api/settle?month=' + key + '&platform=' + curPlat);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, p);
+  return p;
 }
 
 // The strip fills in every month between what it holds and the one asked for,
@@ -269,9 +267,23 @@ async function ensureMonth(key) {
   const keys = loadedMonths();
   const lo = keys.length && keys[0] < key ? keys[0] : key;
   const hi = keys.length && keys[keys.length - 1] > key ? keys[keys.length - 1] : key;
-  const want = monthsBetween(lo, hi).filter(k => !months.has(k) && !loading.has(k));
-  if (want.length > FILL_MAX) return refound(key);
-  await Promise.all(want.map(fetchMonth));
+  const want = monthsBetween(lo, hi).filter(k => !months.has(k));
+  if (want.filter(k => !loading.has(k)).length > FILL_MAX) return refound(key);
+  const g = gen;
+  // The run is stored whole or not at all. Kept one by one, a month that
+  // failed between two that answered would leave a gap in the keys, and the
+  // strip draws a gap as real days with no work on them. A month another
+  // caller is fetching is part of this run too: both wait on the one request
+  // and each stores only a run that is complete.
+  let payloads;
+  try {
+    payloads = await Promise.all(want.map(fetchMonth));
+  } catch (e) {
+    // An expired login is announced by the shell, not by a toast.
+    if (!(e instanceof AuthExpired)) toast('載入失敗');
+    return false;
+  }
+  if (g === gen) want.forEach((k, i) => months.set(k, payloads[i]));
   // Hidden by the time the months arrived: they stay held and are drawn by
   // the load that showing the view makes, and the caller, who would go on to
   // scroll or to open a sheet, is told the month is not there.
@@ -290,7 +302,7 @@ async function ensureMonth(key) {
 async function refound(key) {
   gen++;
   months = new Map();
-  loading = new Set();
+  loading = new Map();
   anchorDebt = 0;
   pinId = '';
   byId('grid').innerHTML = '';
