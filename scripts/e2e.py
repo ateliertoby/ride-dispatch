@@ -1436,7 +1436,7 @@ def day_order_sheet(s: Session) -> None:
     s.open_day()
     oid = s.t["order"]["landed_banner"]
     s.open_order(oid)
-    s.eq(s.text(".sheet.show .sheet-title"), "接機 14:20", "title")
+    s.eq(s.text(".sheet.show .sheet-title"), "UO623 14:20", "title")
     s.eq(s.text(".sheet.show .sheet-sub"), "#" + oid[-6:], "subtitle")
     info = s.info()
     s.eq(list(info), ["乘客", "電話", "境外", "航班", "車型", "路線", "備註", "結算"], "info rows")
@@ -1446,8 +1446,12 @@ def day_order_sheet(s: Session) -> None:
          ["tel:+8613800000102", "tel:+886900000102"], "phone links")
     s.eq(s.page.eval_on_selector_all(".sheet.show .field-row .fk", "els => els.map(e => e.textContent)"),
          ["價錢", "隧道費", "停車費", "舉牌費", "時間"], "editable fields of a ride")
-    s.eq(s.page.eval_on_selector_all(".sheet.show .pp-opt", "els => els.map(e => e.textContent + (e.classList.contains('on') ? '*' : ''))"),
+    s.eq(s.page.eval_on_selector_all(".sheet.show .pp-opt", "els => els.map(e => e.querySelector('.pp-n').textContent + (e.classList.contains('on') ? '*' : ''))"),
          ["P1", "P4*", "富豪"], "pickup points")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .pp-opt small", "els => els.map(e => e.textContent)"),
+         ["$35", "$32", "$0"], "each point's first-hour charge")
+    widths = s.page.eval_on_selector_all(".sheet.show .pp-opt", "els => els.map(e => Math.round(e.getBoundingClientRect().width))")
+    s.eq(len(set(widths)), 1, f"the points are equal segments: {widths}")
     s.eq(s.on(".sheet.show .tg-link").first.get_attribute("href"),
          "https://t.me/agent_ride_bot?start=order_" + oid, "Telegram link")
 
@@ -1464,7 +1468,7 @@ def day_order_sheet(s: Session) -> None:
     s.expect(s.on(".sheet.show #npOk").first.is_enabled(), "confirm is disabled for a valid number")
     # ✕ on a stacked view goes back one level; on the detail it closes.
     s.tap(".sheet.show .sheet-x")
-    s.eq(s.text(".sheet.show .sheet-title"), "接機 14:20", "back on the detail")
+    s.eq(s.text(".sheet.show .sheet-title"), "UO623 14:20", "back on the detail")
     # Time numpad.
     s.tap(".sheet.show .field-row", has_text="時間")
     s.eq(s.text(".sheet.show .sheet-title"), "改時間", "time numpad title")
@@ -1512,7 +1516,7 @@ def day_edit_fields(s: Session) -> None:
     s.eq(s.text(s.row(oid) + " .price"), "$650", "gross on the row behind")
     s.edit("時間", "1545")
     s.eq(s.last_write(), ("PATCH", path, {"time": "15:45"}), "time write")
-    s.eq(s.text(".sheet.show .sheet-title"), "接機 15:45", "title after the time change")
+    s.eq(s.text(".sheet.show .sheet-title"), "UO623 15:45", "title after the time change")
     s.eq(len(s.writes), 5, "writes")
     saved = [x for x in s.orders() if x["order_id"] == oid][0]
     s.eq((saved["price"], saved["tunnel_fee"], saved["parking_fee"], saved["banner_fee"], saved["scheduled_time"]),
@@ -1530,7 +1534,7 @@ def day_pickup_point(s: Session) -> None:
     s.tap(".sheet.show .pp-opt", has_text="P1")
     s.eq(s.last_write(), ("PATCH", path, {"pickup_point": "P1"}), "pickup point write")
     s.wait(lambda: s.field("停車費") == "$35", "P1's parking charge")
-    s.eq(s.text(".sheet.show .pp-opt.on"), "P1", "highlighted point")
+    s.eq(s.text(".sheet.show .pp-opt.on .pp-n"), "P1", "highlighted point")
     s.tap(".sheet.show .fr-waive")
     s.eq(s.last_write(), ("PATCH", path, {"parking_fee": 0}), "waive write")
     s.wait(lambda: s.field("停車費") == "$0", "the parking fee to clear")
@@ -1605,6 +1609,14 @@ def day_batch_locked(s: Session) -> None:
     locked = s.page.eval_on_selector_all(".sheet.show .field-row.locked",
                                          "els => els.map(e => e.querySelector('.fk').textContent + '|' + e.querySelector('.chev').textContent)")
     s.eq(locked, ["價錢|已結算", "隧道費|已結算", "舉牌費|已結算"], "locked fields")
+    # A locked field is text with its figure and the reason, not a control
+    # made to look disabled; the ones that can still be edited are buttons.
+    shape = s.page.eval_on_selector_all(
+        ".sheet.show .field-row",
+        "els => els.map(e => [e.querySelector('.fk').textContent, e.tagName, e.querySelector('.fv').textContent, getComputedStyle(e).opacity])")
+    s.eq(shape, [["價錢", "DIV", "$475", "1"], ["隧道費", "DIV", "$0", "1"], ["停車費", "BUTTON", "$32", "1"],
+                 ["舉牌費", "DIV", "$0", "1"], ["時間", "BUTTON", "12:20", "1"]], "fields of a batched order")
+    s.eq(s.count(".sheet.show button.field-row.locked, .sheet.show .field-row.locked:disabled"), 0, "locked fields that are controls")
     s.press(".sheet.show .field-row", has_text="價錢")
     s.wait_toast("已結算嘅單要先撤銷結算")
     s.eq(s.count(".sheet.show .numpad"), 0, "a numpad for a locked field")
@@ -1774,6 +1786,40 @@ def day_add_back(s: Session) -> None:
     s.stage("入單")
     s.tap(".drop.show .sheet-x")
     s.wait(lambda: not s.panel_open() and not s.count(".scrim.show"), "✕ on the first stage to close the panel")
+    s.eq(s.writes, [], "writes")
+
+
+@check("day.add-back-keeps-the-pasted-text")
+def day_add_back_text(s: Session) -> None:
+    """E14: a quick order begun over a half-pasted message does not lose it."""
+    s.open_day()
+    s.tap('[aria-label="入單"]')
+    text = "half a message\n  second line "
+    s.on(".drop.show .paste-box").first.fill(text)
+    s.tap(".drop.show .quick-type-btn.didi")
+    s.stage("滴滴 · 時間")
+    s.tap(".drop.show .sheet-x")
+    s.stage("入單")
+    s.eq(s.on(".drop.show .paste-box").first.input_value(), text, "the box after backing out of the first quick stage")
+    # From deeper in, one stage at a time.
+    s.tap(".drop.show .quick-type-btn.uber")
+    s.keys(".drop.show", "0910")
+    s.confirm_stage()
+    s.stage("Uber · 行程收入")
+    s.tap(".drop.show .sheet-x")
+    s.tap(".drop.show .sheet-x")
+    s.stage("入單")
+    s.eq(s.on(".drop.show .paste-box").first.input_value(), text, "the box after backing out of the second")
+    # An empty box stays empty, and closing the panel forgets the text.
+    s.tap(".drop.show .sheet-x")
+    s.wait(lambda: not s.panel_open(), "the panel to close")
+    s.page.wait_for_timeout(450)
+    s.tap('[aria-label="入單"]')
+    s.eq(s.on(".drop.show .paste-box").first.input_value(), "", "the box of a panel opened afresh")
+    s.tap(".drop.show .quick-type-btn.foodpanda")
+    s.tap(".drop.show .sheet-x")
+    s.stage("入單")
+    s.eq(s.on(".drop.show .paste-box").first.input_value(), "", "an empty box after backing out")
     s.eq(s.writes, [], "writes")
 
 
@@ -2810,7 +2856,7 @@ def settle_order_sheet(s: Session) -> None:
     s.on(".sheet.show .field-row").first.wait_for()
     s.settle()
     day = s.back(26)
-    s.eq((s.title(), s.sub()), ("接機 11:30", f"#000203 · {md_label(day)} 星期{WEEKDAY[day.weekday()]}"), "order sheet")
+    s.eq((s.title(), s.sub()), ("CX488 11:30", f"#000203 · {md_label(day)} 星期{WEEKDAY[day.weekday()]}"), "order sheet")
     info = s.info()
     s.eq(list(info), ["單號", "乘客", "航班", "車型", "路線", "結算"], "info rows")
     s.eq(info["單號"], "8800 0000 0000 0203", "the whole number, grouped")
@@ -2829,15 +2875,15 @@ def settle_order_sheet(s: Session) -> None:
     s.tap(".sheet.show .field-row", has_text="停車費")
     s.eq((s.title(), s.count(".sheet.show .sheet-back")), ("改停車費", 1), "numpad on the stack")
     s.tap(".sheet.show .sheet-back")
-    s.eq(s.title(), "接機 11:30", "‹ on the numpad")
+    s.eq(s.title(), "CX488 11:30", "‹ on the numpad")
     s.edit("停車費", "20")
     s.eq(s.last_write(), ("PATCH", path, {"parking_fee": 20}), "parking fee write")
-    s.eq((s.title(), s.field("停車費")), ("接機 11:30", "$20"), "the order after the save")
+    s.eq((s.title(), s.field("停車費")), ("CX488 11:30", "$20"), "the order after the save")
     # Its batch opens on top of it.
     s.tap(".sheet.show .info-link")
     s.eq(s.title(), "結算 " + span_label(s.back(27), s.back(25)), "the batch opened from the order")
     s.tap(".sheet.show .sheet-back")
-    s.eq(s.title(), "接機 11:30", "back on the order")
+    s.eq(s.title(), "CX488 11:30", "back on the order")
     # ✕ closes the whole stack here.
     s.tap(".sheet.show .field-row", has_text="時間")
     s.tap(".sheet.show .sheet-x")
@@ -3379,12 +3425,12 @@ def views_order_host(s: Session) -> None:
     # The settle view's order: its own rows, its own head, its own order.
     s.open_cell(1)
     s.open_leg(theirs)
-    s.eq(s.title(), "接機 10:15", "the settle view's order")
+    s.eq(s.title(), "CX488 10:15", "the settle view's order")
     s.eq(list(s.info())[0], "單號", "the settle view's own rows")
     s.tap(".sheet.show .field-row", has_text="停車費")
     s.eq(s.count(".sheet.show .sheet-back"), 1, "the settle view's back button on the numpad")
     s.tap(".sheet.show .sheet-back")
-    s.eq(s.title(), "接機 10:15", "‹ went back one level")
+    s.eq(s.title(), "CX488 10:15", "‹ went back one level")
     s.edit("停車費", "20")
     s.eq(s.last_write(), ("PATCH", "/api/orders/" + theirs, {"parking_fee": 20}), "the settle view's save")
     s.tap(".sheet.show .field-row", has_text="時間")
@@ -3436,7 +3482,7 @@ def views_late_order(s: Session) -> None:
     s.wait(lambda: ("GET", path) in s.finished[done:], "the order to arrive")
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when its order arrived")
-    s.eq((s.title(), s.count(".sheet.show .field-row")), ("接機 14:20", 5), "the day view's own sheet")
+    s.eq((s.title(), s.count(".sheet.show .field-row")), ("UO623 14:20", 5), "the day view's own sheet")
     s.to_settle()
     s.on(".sheet.show .field-row").first.wait_for()
     s.eq((s.title(), s.info()["單號"]), ("送機 16:30", "8800 0000 0000 0012"), "the order, once the view is shown")
@@ -3452,7 +3498,7 @@ def views_late_order(s: Session) -> None:
     s.release_all()
     s.wait_toast("已取消 #000012")
     s.settle()
-    s.eq((s.title(), s.count(".sheet.show .field-row")), ("接機 14:20", 5), "the day view's own sheet after the cancel landed")
+    s.eq((s.title(), s.count(".sheet.show .field-row")), ("UO623 14:20", 5), "the day view's own sheet after the cancel landed")
     # The settle view would reload after its write, and does not while hidden.
     s.eq(s.asked(asked) + s.asked(asked, "/api/credits"), [], "requests made for the hidden settle view")
     s.to_settle()
@@ -4242,7 +4288,7 @@ def inventory_day_rows(s: Session) -> None:
     s.go_days(1)
     s.open_order(fined)
     s.eq(s.page.eval_on_selector_all(
-        ".sheet.show .pp-opt", "els => els.map(e => e.tagName + ' ' + e.textContent + (e.classList.contains('on') ? '*' : ''))"),
+        ".sheet.show .pp-opt", "els => els.map(e => e.tagName + ' ' + e.querySelector('.pp-n').textContent + (e.classList.contains('on') ? '*' : ''))"),
         ["BUTTON P1", "BUTTON P4", "BUTTON 富豪", "SPAN 示範停車場*"], "pickup points")
     s.eq(s.writes, [], "writes")
 
@@ -4447,7 +4493,11 @@ def inventory_styles(s: Session) -> None:
     s.eq(s.page.evaluate("() => { const e = [...document.querySelectorAll('.sheet.show')].find(x => x.getClientRects().length);"
                          " return [Math.round(parseFloat(getComputedStyle(e).maxHeight)), getComputedStyle(e).overflowY]; }"),
          [round(height * 0.88), "auto"], "the sheet's height limit")
-    s.eq(s.count(".sheet.show .grab"), 1, "grab bars")
+    # The day view's sheet is a flat panel under a hairline: no corner, no grab bar.
+    s.eq(s.count(".sheet.show .grab"), 0, "grab bars on the day view's sheet")
+    s.eq(s.page.evaluate("() => { const e = [...document.querySelectorAll('.sheet.show')].find(x => x.getClientRects().length);"
+                         " const c = getComputedStyle(e); return [c.borderTopLeftRadius, c.borderTopWidth]; }"),
+         ["0px", "1px"], "the sheet's corner and top edge")
     s.tap(".sheet.show .sheet-x")
     # One text input in the whole app, at 16px.
     s.tap('[aria-label="入單"]')
@@ -4455,6 +4505,10 @@ def inventory_styles(s: Session) -> None:
     s.eq(s.page.evaluate("() => [...document.querySelectorAll('textarea, input:not([type=file])')].map(e => e.className)"),
          ["paste-box"], "text inputs")
     s.eq(s.page.eval_on_selector(".paste-box", "e => getComputedStyle(e).fontSize"), "16px", "the paste box's text size")
+    # iOS zooms the page when a field under 16px takes the focus: none may be.
+    small = s.page.evaluate("() => [...document.querySelectorAll('textarea, select, input:not([type=file])')]"
+                            ".filter(e => parseFloat(getComputedStyle(e).fontSize) < 16).map(e => e.className || e.id || e.tagName)")
+    s.eq(small, [], "fields set smaller than 16px")
     s.on(".drop.show .paste-box").first.fill(paste_message())
     s.press(".drop.show .primary-btn", has_text="解析")
     s.on(".drop.show .paste-preview").wait_for()

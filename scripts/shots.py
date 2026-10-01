@@ -46,6 +46,11 @@ STRESS_WIDTHS = (320, 340, 390, 480)
 LONG_PLACE = "將軍澳示範國際會議展覽中心酒店式服務住宅南翼(示範道1號)"
 LONG_PLACE_2 = "港珠澳大橋香港口岸旅檢大樓示範出口(示範)"
 
+# The order number in the synthetic message, and a leg a batch has claimed,
+# five days back.
+PASTE_ID = "1128000000000002"
+BATCHED = (seed_demo_db._oid(503), 5)
+
 
 def stress(orders: dict) -> None:
     """Make the seeded day carry what strains a row: names that wrap to
@@ -112,6 +117,26 @@ class Shooter(Driver):
         self.tap('[aria-label="入單"]')
         self.on(".drop.show .paste-box").wait_for()
 
+    def day_quick(self, *stages: str) -> None:
+        """Into the 滴滴 stages of the add panel, confirming each of `stages`."""
+        self.day_add()
+        self.tap(".drop.show .quick-type-btn.didi")
+        for digits in stages:
+            self.keys(".drop.show", digits)
+            self.tap(".drop.show .primary-btn", has_text="確認")
+
+    def day_paste(self, order_id: str, ready: str) -> None:
+        """Paste the synthetic message as if it were about `order_id`. Nothing
+        is saved, so the state is the same on every run."""
+        text = paste_message()
+        if PASTE_ID not in text:
+            raise RuntimeError("the synthetic message no longer carries " + PASTE_ID)
+        self.day_add()
+        self.on(".drop.show .paste-box").fill(text.replace(PASTE_ID, order_id))
+        self.tap(".drop.show .primary-btn", has_text="解析")
+        self.on(ready).first.wait_for()
+        self.settle()
+
     # -- the settle view --
 
     def settle_page(self) -> None:
@@ -158,6 +183,21 @@ def states() -> dict:
         s.keys(".sheet.show", "45")
         s.save("day-numpad")
 
+    def day_numpad_time(s):
+        s.day_order()
+        s.tap(".sheet.show .field-row", has_text="時間")
+        s.keys(".sheet.show", "15")
+        s.save("day-numpad-time")
+
+    def day_order_locked(s):
+        oid, back = BATCHED
+        s.day()
+        for _ in range(back):
+            s.tap('[aria-label="前一日"]')
+        s.tap(f'.row[data-oid="{oid}"]')
+        s.on(".sheet.show .field-row.locked").first.wait_for()
+        s.save("day-order-locked")
+
     def day_cancel_confirm(s):
         s.day_order()
         s.tap(".sheet.show .cancel-link")
@@ -176,6 +216,31 @@ def states() -> dict:
         s.on(".drop.show .sheet-title", has_text="車費").wait_for()
         s.keys(".drop.show", "128")
         s.save("day-add-price")
+
+    def day_add_time(s):
+        s.day_quick()
+        s.keys(".drop.show", "15")
+        s.save("day-add-time")
+
+    def day_add_toll(s):
+        s.day_quick("1530", "128")
+        s.on(".drop.show #npQuick").wait_for()
+        s.save("day-add-toll")
+
+    def day_add_confirm(s):
+        s.day_quick("1530", "128", "25")
+        s.on(".drop.show #addSave").wait_for()
+        s.save("day-add-confirm")
+
+    def day_paste_amend(s):
+        # The message names an order the day already holds: an amendment,
+        # previewed as the fields it would change.
+        s.day_paste(s.t["order"]["upcoming_hotel"], ".drop.show .paste-preview.changes")
+        s.save("day-paste-amend")
+
+    def day_paste_locked(s):
+        s.day_paste(BATCHED[0], ".drop.show .dup-warn")
+        s.save("day-paste-locked")
 
     def day_paste_preview(s):
         s.day_add()
@@ -207,6 +272,27 @@ def states() -> dict:
         s.on(".sheet.show .field-row").first.wait_for()
         s.settle()
         s.save("settle-order-sheet")
+
+    def settle_order_numpad(s):
+        s.day_sheet()
+        s.tap(".sheet.show .orow.tap")
+        s.on(".sheet.show .field-row").first.wait_for()
+        s.tap(".sheet.show .field-row", has_text="停車費")
+        s.keys(".sheet.show", "20")
+        s.save("settle-order-numpad")
+
+    def settle_order_cancel(s):
+        s.settle_page()
+        cell = f'.cell[data-d="{s.t["loose_day"]}"]'
+        s.reach(cell)
+        s.tap(cell)
+        s.tap(".sheet.show .orow.tap")
+        s.on(".sheet.show .cancel-link").wait_for()
+        s.settle()
+        s.save("settle-order-loose")
+        s.tap(".sheet.show .cancel-link")
+        s.on(".sheet.show .primary-btn.danger").wait_for()
+        s.save("settle-order-cancel")
 
     def settle_batch_sheet(s):
         s.batch_sheet("paid")
@@ -267,11 +353,15 @@ def states() -> dict:
 
     wide = {
         "day": day, "day-filter": day_filter, "day-order-sheet": day_order_sheet,
-        "day-numpad": day_numpad, "day-cancel-confirm": day_cancel_confirm,
-        "day-add": day_add, "day-add-price": day_add_price,
-        "day-paste-preview": day_paste_preview,
+        "day-numpad": day_numpad, "day-numpad-time": day_numpad_time,
+        "day-order-locked": day_order_locked, "day-cancel-confirm": day_cancel_confirm,
+        "day-add": day_add, "day-add-time": day_add_time, "day-add-price": day_add_price,
+        "day-add-toll": day_add_toll, "day-add-confirm": day_add_confirm,
+        "day-paste-preview": day_paste_preview, "day-paste-amend": day_paste_amend,
+        "day-paste-locked": day_paste_locked,
         "settle": settle, "settle-focus-bar": settle_focus_bar,
         "settle-day-sheet": settle_day_sheet, "settle-order-sheet": settle_order_sheet,
+        "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
         "settle-batch-list": settle_batch_list, "settle-batch-ahead": settle_batch_ahead,
         "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
