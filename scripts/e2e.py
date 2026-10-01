@@ -1163,36 +1163,121 @@ def day_row_cells(s: Session) -> None:
     s.eq((cell(o["done_pickup"], ".code"), cell(o["done_pickup"], ".place")),
          ("接站", "香港西九龍站 →尖沙咀示範酒店"), "another service: its name and both ends")
     s.eq(s.count(s.row(o["done_pickup"]) + " .st"), 0, "a status block on a row that is not a 接机")
-    # Nothing is cut and nothing pushes the page sideways, at the narrowest
-    # and the widest the app is laid out for.
-    for width in (320, 340, 390, 480):
+    for width in LAYOUT_WIDTHS:
         s.page.set_viewport_size({"width": width, "height": 800})
         s.settle()
-        bad = s.page.evaluate("""() => {
-          const out = [];
-          if (document.documentElement.scrollWidth > innerWidth) out.push('page wider than the screen');
-          const edge = innerWidth;
-          for (const row of document.querySelectorAll('.orders .row')) {
-            const r = row.getBoundingClientRect();
-            for (const el of row.querySelectorAll('.time, .code, .place, .price, .meta > *, .gap')) {
-              const b = el.getBoundingClientRect();
-              if (b.right > edge + 0.5 || b.left < -0.5) out.push('off screen: ' + el.textContent);
-              if (b.top < r.top - 0.5 || b.bottom > r.bottom + 0.5) out.push('outside its row: ' + el.textContent);
-              if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth) out.push('cut: ' + el.textContent);
-            }
-            const cells = ['.time', '.code', '.place', '.price'].map(q => row.querySelector(q).getBoundingClientRect());
-            for (let i = 1; i < cells.length; i++) {
-              if (cells[i].left < cells[i - 1].right - 0.5) out.push('columns overlap in ' + row.dataset.oid);
-            }
-          }
-          const lefts = q => new Set([...document.querySelectorAll('.orders .row ' + q)].map(e => Math.round(e.getBoundingClientRect().left)));
-          for (const q of ['.time', '.code', '.place']) if (lefts(q).size !== 1) out.push('ragged column ' + q);
-          const head = [...document.querySelectorAll('.cols span')].map(e => Math.round(e.getBoundingClientRect().left));
-          const first = ['.time', '.code', '.place'].map(q => Math.round(document.querySelector('.orders .row ' + q).getBoundingClientRect().left));
-          if (String(head.slice(0, 3)) !== String(first)) out.push('column head ' + head + ' against rows ' + first);
-          return out;
-        }""")
-        s.eq(bad, [], f"layout at {width} wide")
+        s.eq(s.page.evaluate(ROWS_JS), [], f"layout at {width} wide")
+
+
+# The widths the day view is laid out for: the narrowest, the two phone widths
+# its columns change between, and the widest.
+LAYOUT_WIDTHS = (320, 340, 390, 480)
+
+# What is wrong with the rows as drawn, if anything. A row is a box that holds
+# all of its cells and touches no other row; a cell is on the screen and its
+# text is not cut; the first three columns start on the same x in every row
+# and under the column head; the lines of a place stay clear of the code
+# before them and of the fare.
+ROWS_JS = """
+() => {
+  const out = [];
+  if (document.documentElement.scrollWidth > innerWidth) out.push('page wider than the screen');
+  const rows = [...document.querySelectorAll('.orders .row')];
+  const name = row => row.querySelector('.time').textContent + ' ' + row.dataset.oid;
+  const hit = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+  const boxes = rows.map(row => row.getBoundingClientRect());
+  for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
+    if (hit(boxes[i], boxes[j])) out.push('rows overlap: ' + name(rows[i]) + ' / ' + name(rows[j]));
+  }
+  rows.forEach((row, i) => {
+    const r = boxes[i];
+    for (const el of row.querySelectorAll('.time, .code, .place, .place .end, .price, .price .pen, .meta, .meta > *, .gap')) {
+      const b = el.getBoundingClientRect();
+      if (b.right > innerWidth + 0.5 || b.left < -0.5) out.push('off screen: ' + el.textContent);
+      if (b.top < r.top - 0.5 || b.bottom > r.bottom + 0.5 || b.left < r.left - 0.5 || b.right > r.right + 0.5) {
+        out.push('outside its row (' + name(row) + '): ' + el.className + ' ' + el.textContent);
+      }
+      if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth) out.push('cut: ' + el.textContent);
+    }
+    const [time, code, place, price] = ['.time', '.code', '.place', '.price'].map(q => row.querySelector(q));
+    const range = document.createRange();
+    range.selectNodeContents(place);
+    const lines = [...range.getClientRects()];
+    const others = [time, code, price, ...row.querySelectorAll('.gap, .meta')].map(e => [e.className, e.getBoundingClientRect()]);
+    // A line's box is as tall as the face's ascent and descent, which is more
+    // than the line it sits on: its middle is what must stay clear.
+    for (const line of lines) for (const [cls, box] of others) {
+      const mid = { left: line.left, right: line.right, top: line.top + line.height / 4, bottom: line.bottom - line.height / 4 };
+      if (hit(mid, box)) out.push('the place runs into ' + cls + ' in ' + name(row));
+    }
+    if (Math.abs(time.getBoundingClientRect().top - r.top - parseFloat(getComputedStyle(row).paddingTop)) > 0.5) {
+      out.push('empty space above the first line of ' + name(row));
+    }
+    const t = time.getBoundingClientRect(), c = code.getBoundingClientRect(), f = price.getBoundingClientRect();
+    if (c.left < t.right - 0.5) out.push('time and code overlap in ' + name(row));
+    if (f.left < c.right - 0.5) out.push('code and fare overlap in ' + name(row));
+    if (Math.abs(f.right - (r.right - parseFloat(getComputedStyle(row).paddingRight))) > 0.5) out.push('fare off the right edge in ' + name(row));
+  });
+  const lefts = q => new Set(rows.map(row => Math.round(row.querySelector(q).getBoundingClientRect().left)));
+  for (const q of ['.time', '.code', '.place']) if (lefts(q).size !== 1) out.push('ragged column ' + q);
+  const head = [...document.querySelectorAll('.cols span')].map(e => Math.round(e.getBoundingClientRect().left));
+  const first = ['.time', '.code', '.place'].map(q => Math.round(rows[0].querySelector(q).getBoundingClientRect().left));
+  if (String(head.slice(0, 3)) !== String(first)) out.push('column head ' + head + ' against rows ' + first);
+  return out;
+}
+"""
+
+LONG_PLACE = "將軍澳示範國際會議展覽中心酒店式服務住宅南翼"
+LONG_PLACE_2 = "港珠澳大橋香港口岸旅檢大樓示範出口"
+
+
+@check("day.rows-hold-long-places")
+def day_long_places(s: Session) -> None:
+    """A place that wraps to several lines, in every kind of row that shows
+    one, with and without the wait before it and with and without a 判罰 under
+    the fare: each row grows to hold it and none is drawn over another."""
+    s.open_day()
+    o = s.t["order"]
+    base = {x["order_id"]: x for x in s.orders()}
+    kinds = {
+        "送机": dict(base[o["dropoff"]], pickup=LONG_PLACE + "(示範道1號)"),
+        "单程接送": dict(base[o["unpriced"]], pickup=LONG_PLACE + "(示範道1號)", dropoff=LONG_PLACE_2 + "(示範)", price=400),
+        "接机": dict(base[o["done_pickup"]], dropoff=LONG_PLACE + "(示範道1號)"),
+    }
+    made, minute = [], 15 * 60
+    for kind, template in kinds.items():
+        for gap in (False, True):
+            for fined in (False, True):
+                minute += 45 if gap else 10
+                hhmm = f"{minute // 60:02d}:{minute % 60:02d}"
+                row = dict(template, order_id=f"99{len(made):014d}", penalty_fee=97.38 if fined else None,
+                           scheduled_time=f"{s.day()} {hhmm}:00", row_time=f"{s.day()} {hhmm}:00")
+                if kind == "接机":
+                    row.update(flight_status="est", flight_eta=hhmm, flight_gate=None, flight_scheduled=hhmm)
+                made.append((row, gap, fined))
+    # A five-figure fare with cents, where the fare column is at its widest.
+    made[-1][0].update(price=12480.5)
+
+    def handler(route, request):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"orders": [m[0] for m in made], "date": s.day()}))
+    s.page.route("**/api/orders?date=" + s.day(), handler)
+    s.api("PATCH", "/api/orders/" + o["landed_banner"], {"tunnel_fee": 1})    # any change: the view asks again
+    s.wait(lambda: s.rows() == [m[0]["order_id"] for m in made], "the repaint")
+    s.settle()
+    for row, gap, fined in made:
+        q = s.row(row["order_id"])
+        s.eq((s.count(q + " .gap"), s.count(q + " .price .pen")), (int(gap), int(fined)),
+             f"wait and fine on {row['service_type']} {row['scheduled_time'][11:16]}")
+        s.expect(LONG_PLACE in s.text(q + " .place"), f"the whole name on {row['service_type']}: {s.text(q + ' .place')}")
+    for width in LAYOUT_WIDTHS:
+        s.page.set_viewport_size({"width": width, "height": 800})
+        s.settle()
+        s.eq(s.page.evaluate(ROWS_JS), [], f"layout at {width} wide")
+        lines = s.page.evaluate("""() => [...document.querySelectorAll('.orders .row .place')].map(e => {
+          const r = document.createRange(); r.selectNodeContents(e);
+          return new Set([...r.getClientRects()].map(b => Math.round(b.top))).size; })""")
+        s.expect(min(lines) >= 2, f"no place wrapped at {width} wide: {lines}")
 
 
 def open_held(s: Session, path: str) -> None:

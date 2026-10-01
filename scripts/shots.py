@@ -6,7 +6,9 @@
 
 Each state is saved as `<state>-dark.png` and `<state>-light.png`, taken in
 Playwright WebKit as an iPhone 14. The day view's states are taken a second
-time in a window 340 wide (`<state>-340-…`), where its columns are tightest. A comparison prints the number of differing
+time in a window 340 wide (`<state>-340-…`), where its columns are tightest,
+and `stress-<width>-…` is the day view with long names, every mark and wide
+fares at each width it is laid out for. A comparison prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -23,6 +25,7 @@ attributes, aria labels, text), never through its own functions, so the same
 run can be pointed at a build whose scripts are laid out differently.
 """
 import argparse
+import json
 import os
 import sys
 from datetime import date
@@ -36,6 +39,29 @@ from harness import ROOT, SCHEMES, Driver, Server, new_context, paste_message  #
 
 # The narrow window the day view's states are shot at a second time.
 NARROW = 340
+
+# The widths the day view is shot at with the rows under stress: the narrowest
+# and the widest it is laid out for, and the two phone widths between.
+STRESS_WIDTHS = (320, 340, 390, 480)
+LONG_PLACE = "將軍澳示範國際會議展覽中心酒店式服務住宅南翼(示範道1號)"
+LONG_PLACE_2 = "港珠澳大橋香港口岸旅檢大樓示範出口(示範)"
+
+
+def stress(orders: dict) -> None:
+    """Make the seeded day carry what strains a row: names that wrap to
+    several lines in every kind of row, a five-figure fare with cents, a 判罰
+    under it, an origin standing in for a flight number, every mark at once."""
+    a = orders[seed_demo_db.ORDER["done_pickup"]]
+    a.update(dropoff=LONG_PLACE, price=12480.5, penalty_fee=63.45)
+    b = orders[seed_demo_db.ORDER["dropoff"]]
+    b.update(pickup=LONG_PLACE)
+    c = orders[seed_demo_db.ORDER["landed_banner"]]
+    c.update(dropoff=LONG_PLACE, price=1520.5, penalty_fee=97.38,
+             passenger_exit_minutes=30, exit_urgency="tight")
+    d = orders[seed_demo_db.ORDER["upcoming_hotel"]]
+    d.update(flight_number="", pickup="深圳灣口岸旅檢大樓示範出口(示範)", banner_fee=40)
+    e = orders[seed_demo_db.ORDER["unpriced"]]
+    e.update(pickup=LONG_PLACE, dropoff=LONG_PLACE_2)
 
 
 class Shooter(Driver):
@@ -63,6 +89,18 @@ class Shooter(Driver):
 
     def day(self) -> None:
         self.open("/", ".row")
+
+    def day_stressed(self) -> None:
+        """The day view with today's orders rewritten on their way to it."""
+        def handler(route):
+            body = route.fetch().json()
+            stress({o["order_id"]: o for o in body["orders"]})
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+        self.ctx.route("**/api/orders?date=" + self.t["today"], handler)
+        try:
+            self.day()
+        finally:
+            self.ctx.unroute("**/api/orders?date=" + self.t["today"])
 
     def day_order(self) -> None:
         self.day()
@@ -218,6 +256,15 @@ def states() -> dict:
             fn(s)
         return run
 
+    def stressed(width):
+        def run(s):
+            # Tall enough to hold every row: a full-page capture would draw
+            # the fixed foot across the middle of the list.
+            s.viewport = {"width": width, "height": 1500}
+            s.day_stressed()
+            s.save(f"stress-{width}")
+        return run
+
     wide = {
         "day": day, "day-filter": day_filter, "day-order-sheet": day_order_sheet,
         "day-numpad": day_numpad, "day-cancel-confirm": day_cancel_confirm,
@@ -230,8 +277,9 @@ def states() -> dict:
         "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
         "settle-undo": settle_undo, "settle-unlink": settle_unlink,
     }
-    return wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()
-                   if name.startswith("day")}
+    return (wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()
+                    if name.startswith("day")}
+            | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS})
 
 
 def shoot(base_url: str, out: str, today: date, only: str) -> None:
