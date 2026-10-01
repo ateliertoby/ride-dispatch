@@ -8,10 +8,21 @@ import { createRouter } from './router.js';
 import { dayView } from './day/index.js';
 import { settleView } from './settle/index.js';
 
-// Back from a login: the marker that sent the navigation past the worker has
-// done its job, and the router must not see it.
-if (new URLSearchParams(location.search).has('login')) {
-  history.replaceState(history.state, '', location.pathname);
+// Two markers in the address have done their job by the time this runs, and
+// are taken off it. ?login sent the navigation past the worker, to the login.
+// ?perf=1 / ?perf=0 switches the timing readout the views report with, for a
+// browser where typing an address is easier than the hold on the date button.
+const here = new URL(location.href);
+const perf = here.searchParams.get('perf');
+if (perf !== null) {
+  try {
+    if (perf !== '0') localStorage.setItem('perf', '1'); else localStorage.removeItem('perf');
+  } catch (e) { /* no storage */ }
+}
+if (perf !== null || here.searchParams.has('login')) {
+  here.searchParams.delete('perf');
+  here.searchParams.delete('login');
+  history.replaceState(history.state, '', here.pathname + here.search + here.hash);
 }
 
 const store = createStore(getJson);

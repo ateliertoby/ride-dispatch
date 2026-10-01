@@ -85,22 +85,13 @@ function reportPerf() {
   try { if (localStorage.getItem('perf')) toast(Math.round(ms) + ' ms'); } catch (e) { /* no storage */ }
 }
 // Diagnostic switch for the readout above: holding the date button toggles
-// the key, and ?perf=1 / ?perf=0 on load sets or clears it. An installed
-// home-screen app has no address bar or inspector and keeps its own storage,
-// so the page is the only place the key can be set there.
+// the key. An installed home-screen app has no address bar or inspector and
+// keeps its own storage, so the page is the only place the key can be set
+// there. (The shell also takes ?perf=1 / ?perf=0 from the address at boot.)
 function initPerfSwitch() {
   const setPerf = on => {
     try { on ? localStorage.setItem('perf', '1') : localStorage.removeItem('perf'); } catch (e) { /* no storage */ }
   };
-  try {
-    const url = new URL(location.href);
-    const q = url.searchParams.get('perf');
-    if (q !== null) {
-      setPerf(q !== '0');
-      url.searchParams.delete('perf');
-      history.replaceState(null, '', url);
-    }
-  } catch (e) { /* leave the URL as it is */ }
 
   const btn = byId('dateBtn');
   let timer = null, held = false, x = 0, y = 0;

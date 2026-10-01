@@ -2649,15 +2649,22 @@ def settle_live_order(s: Session) -> None:
 @check("settle.timing-readout")
 def settle_timing(s: Session) -> None:
     ms = re.compile(r"\d+ ms")
-    s.open("/?perf=1", ".orders .row")
-    s.wait_toast(ms)
-    s.open_settle()
+    # The switch is taken on this address as on the day view's.
+    s.open("/settle?perf=1", ".cell[data-d]")
+    s.eq(s.page.url, s.base + "/settle", "the address once ?perf= is taken")
     s.wait_toast(ms)
     s.page.wait_for_timeout(2600)
     # Only the first paint after the document loaded says so.
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
     s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "the change made elsewhere")
     s.never(s.toast, "a timing toast for a live update", ms=500)
+    s.allow("request failed: GET /api/events")     # the navigation cuts the event stream
+    s.page.goto(s.base + "/settle?perf=0")
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.eq((s.page.url, s.page.evaluate("() => localStorage.getItem('perf')")), (s.base + "/settle", None),
+         "the address and the key after ?perf=0")
+    s.never(s.toast, "a timing toast with the readout off", ms=300)
 
 
 @check("settle.expired-login-does-not-toast")
