@@ -36,26 +36,28 @@
 /* Dark is the base palette; light is a media-query override, so the page
    follows the OS with no toggle and no stored preference. */
 :root {
-  --bg: #0c0f14;
-  --surface: #171c24;
-  --surface-press: #1e242f;
-  --sheet-bg: #1a202a;
-  --key-bg: #232a36;
-  --key-press: #2c3442;
-  --text: #e8ebf0;
-  --text-2: #9aa3b2;
-  --text-3: #626c7c;
-  --line: #242b37;
-  --amber: #ffb02e;
-  --red: #ff6161;
-  --green: #3ddc84;
-  --scrim: rgba(0,0,0,.55);
+  --bg: #0b0c0e;
+  --surface: #131519;
+  --surface-press: #1a1d22;
+  --sheet-bg: #131519;
+  --key-bg: #1c1f25;
+  --key-press: #262a31;
+  --text: #f3f1ea;
+  --text-2: #9a9da4;
+  --text-3: #5d6068;
+  --line: #24272d;
+  --amber: #ffb224;
+  --red: #ff5a4f;
+  --green: #35d07f;
+  --scrim: rgba(0,0,0,.6);
+  /* Text on a solid status block. */
+  --on-solid: #0b0c0e;
   /* Figures (times, flight numbers, money) are set in the mono face; the
      second family is the metric-matched stand-in declared below. */
   --mono: "B612 Mono", "B612 Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
   --han: -apple-system, BlinkMacSystemFont, "PingFang HK", "PingFang TC", "Noto Sans HK", "Microsoft JhengHei", "Segoe UI", sans-serif;
-  --banner-bg: rgba(255,176,46,.14);  --banner-fg: #ffb02e;
-  --paid-bg: rgba(61,220,132,.16);
+  --banner-bg: rgba(255,178,36,.14);  --banner-fg: #ffb224;
+  --paid-bg: rgba(53,208,127,.16);
   /* Colour ranks what is owed attention, loudest first: amber = the platform
      still owes money, blue = bank money in but not matched to a statement,
      neutral = waiting on someone else, dimmed green = finished business. */
@@ -70,22 +72,23 @@
 }
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f2f3f5;
-    --surface: #ffffff;
-    --surface-press: #f4f5f7;
-    --sheet-bg: #ffffff;
-    --key-bg: #eef0f3;
-    --key-press: #e2e5e9;
-    --text: #1a1d23;
-    --text-2: #6b7482;
-    --text-3: #9aa2af;
-    --line: #e6e8ec;
-    --amber: #c77800;
-    --red: #d63030;
-    --green: #1d9e57;
-    --scrim: rgba(0,0,0,.35);
-    --banner-bg: #fff8e1;  --banner-fg: #c77800;
-    --paid-bg: #e3f6ea;
+    --bg: #f1efe8;
+    --surface: #fbfaf6;
+    --surface-press: #eeece4;
+    --sheet-bg: #fbfaf6;
+    --key-bg: #e9e6dd;
+    --key-press: #dcd9cf;
+    --text: #121316;
+    --text-2: #5c5f66;
+    --text-3: #9a9b9d;
+    --line: #d6d3c9;
+    --amber: #a86400;
+    --red: #c8281e;
+    --green: #0f8a4b;
+    --scrim: rgba(18,19,22,.4);
+    --on-solid: #fbfaf6;
+    --banner-bg: #f6e4b9;  --banner-fg: #a86400;
+    --paid-bg: #d3ecdb;
     --blue: #1f6fd6;  --blue-bg: #e3eefb;
     --pickup-bg: #e8f4fd;  --pickup-fg: #0a84ff;
     --dropoff-bg: #fff3e0; --dropoff-fg: #f57c00;
