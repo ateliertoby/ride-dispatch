@@ -25,16 +25,19 @@
 <div id="view-day" class="view view-day" hidden>
 <div class="header">
   <div class="header-row">
-    <button class="nav-btn" onclick="rd.day.go(-1)" aria-label="前一日">&larr;</button>
     <button class="date-btn" id="dateBtn" onclick="rd.day.goToday()"></button>
-    <button class="nav-btn" onclick="rd.day.go(1)" aria-label="後一日">&rarr;</button>
-    <a class="icon-btn" href="/settle" data-nav aria-label="埋數">$</a>
-    <button class="icon-btn add-btn" onclick="rd.day.openAdd()" aria-label="入單">+</button>
+    <div class="keys">
+      <button class="nav-btn" onclick="rd.day.go(-1)" aria-label="前一日">&larr;</button>
+      <button class="nav-btn" onclick="rd.day.go(1)" aria-label="後一日">&rarr;</button>
+      <a class="icon-btn" href="/settle" data-nav aria-label="埋數">$</a>
+      <button class="icon-btn add-btn" onclick="rd.day.openAdd()" aria-label="入單">+</button>
+    </div>
   </div>
-  <div class="summary" id="day-summary"></div>
+  <div class="tabs" id="day-tabs" role="group" aria-label="平台"></div>
+  <div class="cols" aria-hidden="true"><span>時間</span><span>班次</span><span>地點</span><span>車費</span></div>
 </div>
-<div class="chips" id="day-chips"></div>
 <div class="orders" id="orders"></div>
+<div class="foot"><div class="foot-in" id="day-foot"></div></div>
 <div class="scrim" id="day-scrim" onclick="rd.day.closeOverlays()"></div>
 <div class="drop" id="day-drop"></div>
 <div class="sheet" id="day-sheet"></div>

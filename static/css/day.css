@@ -5,124 +5,221 @@
    weighs against the shared stylesheets exactly as it would unscoped, so
    which of two rules wins is decided by the selectors as written and by
    source order, as in a single stylesheet. Rules that cannot nest (@keyframes)
-   or whose contents are what nests (@media) sit at top level in source order. */
+   or whose contents are what nests (@media) sit at top level in source order.
 
-/* Tokens only this view uses: row-state colours. */
-body[data-view="day"] {
-  --urgent-bg: rgba(255,97,97,.14);
-  --tight-bg: rgba(255,176,46,.14);
-  --next-bg: rgba(61,220,132,.06);
-}
-@media (prefers-color-scheme: light) {
-  body[data-view="day"] {
-    --urgent-bg: #fdeaea;
-    --tight-bg: #fff8e1;
-    --next-bg: #edfaf2;
-  }
-}
+   The view is one arrivals board: every order is a row on a fixed column grid
+   (time | code | place | fare), separated by hairlines and alignment, not by
+   boxes. Colour is spent on status and on money owed attention, nowhere
+   else. */
+
 :where(.view-day) {
-  .add-btn { background: var(--surface); color: var(--text); font-size: 22px; font-weight: 400; }
+  /* The two fixed columns are shared by the column head, every row and the
+     NOW band, so times and codes start on the same x down the whole list. */
+  --gutter: 16px;
+  --c-time: 68px; --c-code: 74px;
+  --t-time: 22px; --t-place: 17px;
+}
+@media (max-width: 360px) {
+  :where(.view-day) { --c-time: 60px; --c-code: 66px; --t-time: 20px; --t-place: 16px; }
+}
+/* The toast is the shell's and sits at the foot of the screen, where this
+   view keeps its totals: it rises to clear them. */
+body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom)); }
 
-  .orders { padding: 8px 0 24px; }
+:where(.view-day) {
+  /* ---- masthead ---- */
+  /* The inset for the status bar stays on the header itself: the shell's
+     banner rule replaces this padding when a banner takes the top. */
+  .header { padding: calc(14px + env(safe-area-inset-top)) 0 0; }
+  .header-row { align-items: flex-end; gap: 10px; padding: 0 var(--gutter) 10px; }
+  /* The weekday drops under the figure when the keys leave it no room beside
+     it, rather than being cut. */
+  .date-btn {
+    flex: 1; min-width: 0; height: auto; min-height: 40px; text-align: left;
+    display: flex; flex-wrap: wrap; align-items: baseline; align-content: flex-end; gap: 2px 8px;
+    font-size: 13px; font-weight: 400;
+  }
+  .date-btn .d { font-family: var(--mono); font-weight: 700; font-size: 30px; line-height: 1; letter-spacing: -.03em; }
+  .date-btn .w { color: var(--text-2); white-space: nowrap; }
+  .date-btn .w b { color: var(--text); font-weight: 600; }
+  .date-btn .y { font-family: var(--mono); font-size: 11px; color: var(--text-3); margin-left: 6px; }
+  .keys { display: flex; gap: 6px; flex-shrink: 0; }
+  .nav-btn, .icon-btn {
+    width: 40px; height: 40px; background: none;
+    border: 1px solid var(--line); border-radius: 3px;
+    font-family: var(--mono); font-size: 16px; color: var(--text-2);
+  }
+  .nav-btn:active, .icon-btn:active { background: var(--surface); color: var(--text); }
+  .add-btn { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
+  .add-btn:active { background: var(--text-2); border-color: var(--text-2); color: var(--bg); }
+
+  /* As tall as its tabs before they are written, so the masthead does not
+     grow when the first answer lands. */
+  .tabs {
+    display: flex; gap: 18px; min-height: 37px; padding: 0 var(--gutter);
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  /* Taller than the text needs: a tab is tapped with a thumb while driving. */
+  .tab {
+    flex-shrink: 0; background: none; border: none; cursor: pointer;
+    padding: 8px 0 9px; font-size: 13px; line-height: 1.35; color: var(--text-3); white-space: nowrap;
+    border-bottom: 2px solid transparent;
+  }
+  .tab .n { font-family: var(--mono); font-size: 12px; margin-left: 4px; }
+  .tab.on { color: var(--text); border-bottom-color: var(--text); }
+  /* A platform with nothing today recedes, unless it is the one chosen. */
+  .tab.zero:not(.on) { opacity: .45; }
+
+  /* minmax(0, 1fr): the place column takes what the fare leaves and wraps
+     inside it; without the 0 a long name would widen the track and push the
+     fare off the row. */
+  .cols, .row, .ph-row {
+    display: grid; grid-template-columns: var(--c-time) var(--c-code) minmax(0, 1fr) auto;
+    column-gap: 10px; padding-inline: var(--gutter);
+  }
+  .cols {
+    padding-block: 7px; font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3);
+    border-top: 1px solid var(--line);
+  }
+  .cols span:last-child { text-align: right; }
+
+  /* ---- rows ---- */
+  /* The last row has to clear the fixed foot. */
+  .orders { padding-bottom: 72px; }
   .row {
-    display: flex; width: 100%; text-align: left; border: none; background: none;
-    cursor: pointer; padding: 9px 14px; min-height: 56px; gap: 10px;
-    border-left: 3px solid transparent;
+    width: 100%; text-align: left; align-items: baseline; row-gap: 5px;
+    padding-block: 13px 12px; position: relative; cursor: pointer;
+    background: none; border: none; border-bottom: 1px solid var(--line);
+    font-size: 14px; line-height: 1.35;
+    /* A row brought into view must clear the sticky masthead and the fixed
+       foot. The same on both sides, so that centring a row still centres it
+       on the screen. */
+    scroll-margin-block: calc(140px + env(safe-area-inset-top));
   }
-  .row:active { background: var(--surface-press); }
-  .row.done { opacity: .45; }
-  .row.next { background: var(--next-bg); border-left-color: var(--green); }
-
-  /* Fixed width so every big time starts on the same x. The width is set by the
-     widest sub-line ("出發 14:43"), which must stay on one line: broken across
-     two it reads as two separate facts. */
-  .rail { width: 84px; flex-shrink: 0; }
-  .rail .t {
-    font-size: 26px; font-weight: 750; letter-spacing: -.5px;
-    font-variant-numeric: tabular-nums; line-height: 1.1;
+  .row:active { background: var(--surface); }
+  .time { font-family: var(--mono); font-weight: 700; font-size: var(--t-time); line-height: 1; letter-spacing: -.04em; }
+  .code { font-family: var(--mono); font-weight: 700; font-size: 14px; letter-spacing: .02em; white-space: nowrap; }
+  /* A quick order's platform: lighter, it is filler between legs. */
+  .code.plat { font-weight: 400; color: var(--text-2); }
+  /* A service named in Chinese (送機 T1, 接站, 單程). */
+  .code.svc { font-family: var(--han); font-weight: 600; font-size: 13px; letter-spacing: 0; color: var(--text-2); }
+  /* Where a 接机 with no flight number starts from: a place name standing in
+     the code column, so it wraps inside the column instead of running into
+     the place. */
+  .code.org {
+    font-family: var(--han); font-weight: 400; font-size: 12px; line-height: 1.25; letter-spacing: 0;
+    color: var(--text-2); white-space: normal; overflow-wrap: anywhere;
   }
-  .rail .st { font-size: 11.5px; color: var(--text-2); line-height: 1.5; font-variant-numeric: tabular-nums; }
-  .rail .st b { font-weight: 650; }
-
-  .row-body { flex: 1; min-width: 0; padding-top: 2px; }
-  /* The endpoint is the one thing on the row that must never be cut, so nothing
-     here truncates. The route is two units, FROM and "→ TO", and the second one
-     wraps whole, which keeps the arrow leading the second line. Each unit still
-     wraps internally when a single endpoint outgrows the column. */
-  .route {
-    display: flex; flex-wrap: wrap; align-items: baseline; min-width: 0;
-    column-gap: 6px; font-size: 17px; line-height: 1.35;
-  }
-  .route > span {
-    display: inline-flex; align-items: baseline; gap: 6px;
-    min-width: 0; max-width: 100%;
-  }
-  /* Emphasis rule: the non-airport endpoint is the one the driver has to find,
-     so it carries the weight; the airport side stays compact because it is a
-     place he already knows. */
-  .route .big { font-weight: 650; color: var(--text); min-width: 0; }
-  .route .small { font-weight: 500; color: var(--text-2); min-width: 0; }
-  .route .reg { font-weight: 550; color: var(--text); min-width: 0; }
-  .route .arrow { color: var(--text-3); flex-shrink: 0; font-size: 15px; }
-  .flt {
-    display: inline-block; flex-shrink: 0;
-    font-size: 13px; font-weight: 600; letter-spacing: .09em; color: var(--text-2);
-    border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
-    font-variant-numeric: tabular-nums; vertical-align: 1px;
-  }
-
-  .tags { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
-  .tag {
-    font-size: 11px; font-weight: 650; padding: 2px 6px; border-radius: 5px;
-    font-variant-numeric: tabular-nums;
-  }
-  .tag.banner { background: var(--banner-bg); color: var(--banner-fg); }
-  .tag.urgent { background: var(--urgent-bg); color: var(--red); }
-  .tag.tight { background: var(--tight-bg); color: var(--amber); }
-  .tag.neutral { background: var(--key-bg); color: var(--text-3); }
-
-  /* Every row ends with money, so the amount lands in the same right-hand slot
-     as a quick order's. The slot never shrinks; the route wraps instead. */
-  .price {
-    flex-shrink: 0; padding-top: 4px; text-align: right;
-    font-size: 15px; font-weight: 600; color: var(--text-2);
-    font-variant-numeric: tabular-nums;
-  }
-  .price.unset { color: var(--amber); }
+  /* The endpoint is the one thing on the row that must never be cut, so
+     nothing here truncates: the name wraps inside its column. Emphasis rule:
+     the non-airport endpoint is the one the driver has to find, so it carries
+     the weight; when neither end is the airport both stay at regular weight. */
+  .place { font-size: var(--t-place); font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; }
+  .place.lite { font-weight: 400; color: var(--text-2); }
+  .place.reg { font-weight: 500; }
+  /* A route is two units, FROM and "→ TO"; the second wraps whole, which
+     keeps the arrow leading the second line. inline-flex rather than
+     inline-block: the row aligns its cells on their first baselines, and an
+     inline-block that wraps offers its last line's, which would lift the
+     name out of the top of the row. */
+  .place .end { display: inline-flex; align-items: baseline; gap: .3em; max-width: 100%; }
+  .place .end.sub { font-size: 14px; font-weight: 400; color: var(--text-2); }
+  .place .arrow { color: var(--text-3); font-weight: 400; }
+  /* Every row ends with money. The slot never shrinks; the place wraps
+     instead. */
+  .price { font-family: var(--mono); font-size: 14px; text-align: right; white-space: nowrap; }
+  .price.unset { font-family: var(--han); font-size: 12px; font-weight: 600; color: var(--amber); }
   /* A 判罰賠款 sits under the gross fare rather than replacing it: the day
      total is gross, and a row that quietly showed net would not add up to it.
-     Exact to the cent — the layout gives way to the number, never the other
+     Exact to the cent -- the layout gives way to the number, never the other
      way round. */
-  .price .pen {
-    display: block; margin-top: 2px;
-    font-size: 11px; font-weight: 650; padding: 1px 5px; border-radius: 5px;
-    background: var(--urgent-bg); color: var(--red);
+  .price .pen { display: block; margin-top: 3px; font-size: 11.5px; color: var(--red); }
+
+  .meta {
+    grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+    font-size: 12px; color: var(--text-2);
+  }
+  .meta .num b { color: var(--text); font-weight: 400; }
+  /* The wait since the previous row, under the time it is counted to. Its
+     line is as tall as the meta line's first, so the two sit level when the
+     meta wraps. */
+  .gap {
+    grid-column: 1; grid-row: 2; align-self: start;
+    font-family: var(--mono); font-size: 10.5px; line-height: 19px; color: var(--text-3);
   }
 
-  /* Quick orders are filler between legs, so they get a lighter one-line row. */
-  .row.quick { min-height: 44px; align-items: center; padding: 4px 14px; }
-  .row.quick .rail .t { font-size: 17px; font-weight: 650; color: var(--text-2); }
-  .row.quick .row-body { display: flex; align-items: center; padding-top: 0; }
-  .qplat { font-size: 14px; font-weight: 650; }
-  .qplat.didi { color: var(--didi-fg); }
-  .qplat.uber { color: var(--uber-fg); }
-  .qplat.foodpanda { color: var(--fp-fg); }
-  .qprice { margin-left: auto; font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-  .qprice.unset { color: var(--amber); }
+  /* Status: a solid block, one per row, the only place a row carries colour. */
+  .st {
+    display: inline-block; padding: 2px 6px 1px; border-radius: 2px;
+    font-size: 11.5px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
+  }
+  .st.landed { background: var(--green); color: var(--on-solid); }
+  .st.gate { background: var(--text); color: var(--bg); }
+  .st.est { box-shadow: inset 0 0 0 1px var(--amber); color: var(--amber); }
 
-  /* Waiting time and the NOW marker are marks on the timeline the big times run
-     down, so both are indented to the rail rather than to the row. */
-  .gap { padding: 1px 0; }
-  .gap-label {
-    padding-left: 17px; font-size: 11px; color: var(--text-3);
-    font-variant-numeric: tabular-nums; line-height: 1.6;
+  .mk {
+    font-size: 11.5px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
+    box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2);
   }
-  .now { display: flex; align-items: center; gap: 8px; padding: 3px 14px 3px 17px; }
-  .now .now-t {
-    font-size: 12px; font-weight: 750; color: var(--red);
-    font-variant-numeric: tabular-nums; flex-shrink: 0; width: 58px;
+  .mk.sign { color: var(--text); box-shadow: inset 0 0 0 1px var(--text-3); }
+  .mk.tight { color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+  .mk.urgent { background: var(--red); color: var(--on-solid); box-shadow: none; font-weight: 700; }
+
+  /* A finished row recedes by colour, not opacity: its status block keeps
+     its fill and stays legible. Its marks no longer ask for anything, so
+     they lose their colour with the rest. */
+  .row.done { color: var(--text-3); }
+  .row.done .code, .row.done .place, .row.done .place .end.sub, .row.done .price,
+  .row.done .meta, .row.done .meta .num b { color: var(--text-3); }
+  .row.done .time { font-weight: 400; }
+  .row.done .mk { background: none; color: var(--text-3); font-weight: 400; box-shadow: inset 0 0 0 1px var(--line); }
+  .row.next { background: var(--surface); }
+  .row.next::before {
+    content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 4px; background: var(--green);
   }
-  .now .now-line { flex: 1; height: 1px; background: var(--red); opacity: .55; }
+
+  /* The clock, as a band between two rows on the rows' own columns. */
+  .now {
+    display: grid; grid-template-columns: var(--c-time) minmax(0, 1fr); column-gap: 10px; align-items: center;
+    padding: 0 var(--gutter); height: 18px; border-bottom: 1px solid var(--line);
+  }
+  .now-t { font-family: var(--mono); font-size: 11px; line-height: 1; font-weight: 700; color: var(--red); }
+  .now-line { height: 1px; background: var(--red); }
+
+  .empty { padding: 28px var(--gutter); font-size: 14px; color: var(--text-3); }
+
+  /* What stands where the rows will be until the first answer: the rows'
+     grid and hairlines with blocks for the figures, and nothing moving. */
+  .ph-row { align-items: center; padding-block: 15px 14px; border-bottom: 1px solid var(--line); }
+  .ph-row span { height: 14px; border-radius: 2px; background: var(--line); }
+  .ph-row .t { width: 54px; height: 20px; }
+  .ph-row .c { width: 44px; }
+  .ph-row .p { width: 62%; }
+  .ph-row .f { width: 34px; }
+
+  /* ---- foot ---- */
+  /* Under the sheets and their scrim, level with the masthead. */
+  .foot {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--bg); border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .foot-in {
+    max-width: 480px; margin: 0 auto; padding: 10px var(--gutter) 12px; min-height: 61px;
+    display: flex; align-items: baseline; gap: 14px;
+  }
+  .foot .k { display: block; font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); margin-bottom: 2px; }
+  .foot .v { font-family: var(--mono); font-size: 17px; line-height: 1.35; font-weight: 700; }
+  .foot .tot { margin-left: auto; text-align: right; }
+  .foot .warn .v { color: var(--amber); }
+}
+/* The board's one moving part: a status block that changed since the last
+   paint turns in. The list is rebuilt on every paint, so the block that
+   leaves is already gone and only the arriving half of the turn is drawn. */
+@keyframes st-turn { from { transform: rotateX(90deg); } }
+:where(.view-day) {
+  .st.turn { animation: st-turn .5s cubic-bezier(.2,0,.2,1); backface-visibility: hidden; }
 
   /* ---- sheet ---- */
   /* Paste panel drops from the top: it opens right under the finger that
@@ -137,14 +234,6 @@ body[data-view="day"] {
     transition: transform .3s cubic-bezier(.32,.72,.35,1), height .3s cubic-bezier(.32,.72,.35,1);
   }
   .drop.show { transform: translateY(0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  :where(.view-day) {
-    .drop { transition: none; }
-    .paste-preview .sum-row { animation: none; }
-  }
-}
-:where(.view-day) {
   .paste-box {
     width: 100%; margin-top: 12px; padding: 12px;
     background: var(--key-bg); color: var(--text);
@@ -194,4 +283,13 @@ body[data-view="day"] {
   .sum-row .v.urgent { color: var(--red); }
   .sum-row .v.tight { color: var(--amber); }
   .sum-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px; }
+}
+/* Last, so that it is not undone by a rule further down: with motion reduced
+   nothing in this view moves. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.view-day) {
+    .st.turn { animation: none; }
+    .drop { transition: none; }
+    .paste-preview .sum-row { animation: none; }
+  }
 }

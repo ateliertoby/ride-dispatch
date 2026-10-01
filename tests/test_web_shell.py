@@ -150,7 +150,7 @@ def test_no_id_appears_twice_in_the_shell(client):
     ids = re.findall(r'\bid="([^"]+)"', html)
     assert len(ids) == len(set(ids)), sorted(i for i in set(ids) if ids.count(i) > 1)
     day, settle = html.split('<div id="view-settle"')
-    assert all(i in day for i in ('id="day-summary"', 'id="day-chips"', 'id="day-scrim"',
+    assert all(i in day for i in ('id="day-tabs"', 'id="day-foot"', 'id="day-scrim"',
                                   'id="day-sheet"', 'id="day-drop"'))
     assert all(i in settle for i in ('id="settle-summary"', 'id="settle-chips"',
                                      'id="settle-scrim"', 'id="settle-sheet"',

@@ -1,13 +1,14 @@
-// The day view: one day's orders as a list, the order sheet over it and the
-// add panel. The router mounts it once and keeps it; it reads orders through
-// the store, so a day already seen is painted before the server answers.
+// The day view: one day's orders as an arrivals board, the order sheet over it
+// and the add panel. The router mounts it once and keeps it; it reads orders
+// through the store, so a day already seen is painted before the server
+// answers.
 //
 // The markup this file writes carries inline handlers, which resolve names on
 // window and cannot reach module scope, so the functions they call are
 // published under window.rd.day.
 
 import { $, PLATFORMS, _QUICK_TYPES, apiWrite, collectContactLines, esc, fmtDate,
-         isFlightPickup, money, orderTime, platform, shortId, svcLabel, toast,
+         isFlightPickup, money, orderTime, platform, shortId, svcLabel, tight, toast,
          weekday } from '../shared.js';
 import { detailView, numpadView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired } from '../api.js';
@@ -15,7 +16,7 @@ import { AuthExpired } from '../api.js';
 let root = null;              // the view's element, set by mount
 let store = null;
 // The view's own elements are looked up inside its root: the other view stays
-// in the document and has a summary, chips, a scrim and a sheet of its own.
+// in the document and has a header, a scrim and a sheet of its own.
 const byId = id => root.querySelector('#' + id);
 
 // ---- state ----
@@ -27,6 +28,11 @@ let stackHost = 'sheet';      // element the stack renders into: 'sheet' | 'drop
 let sheetOrderId = null;      // order shown in detail view, if any
 let revealId = null;          // order_id the next load is to scroll into view
 let scrollToNext = false;     // scroll only on user navigation; SSE/timer re-renders must not fight manual scrolling
+let drawn = false;            // the list has been drawn at least once, rows or the empty line
+// The status word each row showed at the last paint, and the day that paint
+// was of: a block whose word differs at the next paint of the same day turns
+// over. Null until something has been painted.
+let shown = null;             // { day, words: Map(order_id -> word) }
 
 const TYPE_META = {
   didi:      { label: '滴滴',      priceLabel: '車費',    tunnelLabel: '隧道費', hasTunnel: true },
@@ -149,9 +155,15 @@ async function load() {
   // until a paint has the row.
   let reveal = revealId;
   revealId = null;
-  byId('dateBtn').innerHTML =
-    esc(cur) + '<small>星期' + weekday(cur) + (cur === fmtDate(new Date()) ? ' · 今日' : '') + '</small>';
+  byId('dateBtn').innerHTML = dateHtml(cur);
   const date = cur;
+  // Placeholder rows stand in only for a list that has never been drawn, and
+  // only while the store has nothing to draw it from. A day reached later
+  // keeps the previous day's rows until its own arrive, so the list is never
+  // blanked under the operator.
+  if (!drawn && store.peek('orders:' + date) === undefined) {
+    byId('orders').innerHTML = placeholderHtml();
+  }
   let landed;
   try {
     landed = await store.read('orders:' + date, '/api/orders?date=' + date, data => {
@@ -169,6 +181,9 @@ async function load() {
       }
     });
   } catch (e) {
+    // Nothing came, and nothing was ever drawn: the placeholders give way to
+    // the empty line rather than promise rows for ever.
+    if (!drawn && date === cur && showing) { orders = []; render(); }
     // An expired login is announced by the shell, not by a toast.
     if (!(e instanceof AuthExpired)) toast('載入失敗');
     return;
@@ -201,22 +216,48 @@ function stats(list) {
   return { total, priced };
 }
 
+// MM·DD in the figure face, the weekday beside it. The year is left out
+// while it is this year's, which is nearly always.
+function dateHtml(day) {
+  const today = fmtDate(new Date());
+  const year = day.slice(0, 4);
+  return '<span class="d">' + tight(day.slice(5, 7) + '·' + day.slice(8, 10)) + '</span>' +
+    '<span class="w">星期' + weekday(day) + (day === today ? ' · <b>今日</b>' : '') +
+    (year !== today.slice(0, 4) ? '<span class="y">' + year + '</span>' : '') + '</span>';
+}
+
+function placeholderHtml() {
+  const row = '<div class="ph-row"><span class="t"></span><span class="c"></span>' +
+    '<span class="p"></span><span class="f"></span></div>';
+  return '<div aria-hidden="true">' + row.repeat(5) + '</div>';
+}
+
 // reveal is the id of a row to bring into view, if the caller has one; the
 // answer is whether that row was there to bring.
 function render(reveal) {
   const visible = filter ? orders.filter(o => platform(o) === filter) : orders;
   const s = stats(visible);
   const unpriced = visible.length - s.priced;
-  byId('day-summary').innerHTML =
-    visible.length + ' 程 · $' + $(s.total) +
-    (unpriced > 0 ? ' · <span class="warn">' + unpriced + ' 未入價</span>' : '');
+  byId('day-foot').innerHTML =
+    '<div><span class="k">程數</span><span class="v">' + visible.length + '</span></div>' +
+    (unpriced > 0 ? '<div class="warn"><span class="k">未入價</span><span class="v">' + unpriced + '</span></div>' : '') +
+    '<div class="tot"><span class="k">當日車費</span><span class="v">' + tight(money(s.total)) + '</span></div>';
 
-  byId('day-chips').innerHTML = PLATFORMS.map(p => {
-    const n = orders.filter(o => platform(o) === p.key).length;
-    return '<button class="chip' + (filter === p.key ? ' on' : '') + (n ? '' : ' zero') + '"' +
-      ' onclick="rd.day.toggleFilter(\'' + p.key + '\')">' + p.label + ' ' + n + '</button>';
-  }).join('');
+  // 全部 leads and clears the filter: toggleFilter(null) leaves it null
+  // whatever it was.
+  byId('day-tabs').innerHTML =
+    '<button class="tab' + (filter ? '' : ' on') + '" onclick="rd.day.toggleFilter(null)">全部' +
+    '<span class="n">' + orders.length + '</span></button>' +
+    PLATFORMS.map(p => {
+      const n = orders.filter(o => platform(o) === p.key).length;
+      return '<button class="tab' + (filter === p.key ? ' on' : '') + (n ? '' : ' zero') + '"' +
+        ' onclick="rd.day.toggleFilter(\'' + p.key + '\')">' + p.label + '<span class="n">' + n + '</span></button>';
+    }).join('');
 
+  const before = shown && shown.day === cur ? shown.words : null;
+  const words = new Map();
+  shown = { day: cur, words };
+  drawn = true;
   const box = byId('orders');
   if (!visible.length) {
     box.innerHTML = '<div class="empty">冇' + (filter ? PLATFORMS.find(p => p.key === filter).label : '') + '訂單</div>';
@@ -232,11 +273,15 @@ function render(reveal) {
   // against it puts the line exactly where the list's own order puts it.
   const nowStr = isToday ? nowStamp() : null;
   const nowIdx = nowStr ? visible.findIndex(o => (o.row_time || '') > nowStr) : -1;
-  const html = visible.map((o, i) =>
-    gapHtml(i ? visible[i - 1] : null, o, i === nowIdx) + rowHtml(o, nextId)
-  );
+  const html = visible.map((o, i) => {
+    const word = rowWord(o);
+    words.set(o.order_id, word);
+    // Only a row that was on the last paint of this day can have changed.
+    const turn = !!before && before.has(o.order_id) && before.get(o.order_id) !== word;
+    return (i === nowIdx ? nowHtml() : '') + rowHtml(o, i ? visible[i - 1] : null, nextId, turn);
+  });
   // Every row's time has passed: the line belongs after the last of them.
-  if (nowStr && nowIdx < 0) html.push(gapHtml(null, null, true));
+  if (nowStr && nowIdx < 0) html.push(nowHtml());
   box.innerHTML = html.join('');
   let found = false;
   if (reveal) {
@@ -261,10 +306,11 @@ function toMin(hhmm) {
   if (p.length !== 2) return NaN;
   return (+p[0]) * 60 + (+p[1]);
 }
-function fmtGap(min) {
+// +48m, +2h, +1h32: short enough to sit under the time it is counted to.
+function gapText(min) {
   const h = Math.floor(min / 60), m = min % 60;
-  if (!h) return m + 'm';
-  return m ? h + 'h ' + m + 'm' : h + 'h';
+  if (!h) return '+' + m + 'm';
+  return '+' + h + 'h' + (m ? String(m).padStart(2, '0') : '');
 }
 // Display-only shortening; the full address stays in the detail sheet.
 function shortPlace(s) {
@@ -293,7 +339,7 @@ function rowTime(o) {
 function rowMin(o) { return toMin(rowTime(o)); }
 
 // Exit minutes run from touchdown, matching flight.py:svc_time — not from the
-// at-gate time the rail may be showing above.
+// at-gate time the row may be showing as its time.
 function meetTime(o) {
   const land = o.flight_eta || o.flight_scheduled;
   if (!land || !o.passenger_exit_minutes) return '';
@@ -302,7 +348,7 @@ function meetTime(o) {
   return String(Math.floor(total / 60) % 24).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
 }
 
-// Only the word: the big time above already IS the time this status refers to,
+// Only the word: the row's big time already IS the time this status refers to,
 // so printing the digits again would state the same fact twice. A flight with
 // nothing but a schedule has nothing to qualify, so it says nothing.
 function statusWord(o) {
@@ -312,97 +358,109 @@ function statusWord(o) {
   return '';
 }
 
-function railHtml(o) {
-  const lines = [];
-  if (isFlightPickup(o.service_type)) {
-    const st = statusWord(o);
-    if (st) lines.push(st);
-    if (o.depart_hhmm) lines.push('出發 <b>' + esc(o.depart_hhmm) + '</b>');
-    const meet = meetTime(o);
-    if (meet) lines.push('用車 <b>' + esc(meet) + '</b>');
-  }
-  return '<div class="rail"><div class="t">' + esc(rowTime(o)) + '</div>' +
-    lines.map(l => '<div class="st">' + l + '</div>').join('') + '</div>';
+// A status belongs to a 接机 only; any other row says nothing.
+function rowWord(o) {
+  return isFlightPickup(o.service_type) ? statusWord(o) : '';
 }
+const WORD_CLASS = { '已到閘': 'gate', '已降落': 'landed', '預計': 'est' };
+const QUICK_CODE = { didi: 'DIDI', uber: 'UBER', foodpanda: 'PANDA' };
 
-// The flight number stands in for a 接機 badge, and "機場" as a destination for
-// a 送機 one, so no row carries a service badge.
-function routeHtml(o) {
+// The code column and the place column of a ride. The flight number stands in
+// for a 接機 badge, so the place is where the passenger is going; a 送機 says
+// so in the code column, with the terminal when the destination names one,
+// and the place is where to collect them. Any other service names itself and
+// shows both ends.
+function codePlaceHtml(o) {
   const from = shortPlace(o.pickup), to = shortPlace(o.dropoff);
   const arrow = '<span class="arrow">&rarr;</span>';
-  let a = '', b = '';
+  const end = (text, lead, cls) =>
+    '<span class="end' + (cls || '') + '">' + (lead ? arrow : '') + '<span>' + esc(text) + '</span></span>';
   if (isFlightPickup(o.service_type)) {
-    if (o.flight_number) a = '<span><span class="flt">' + esc(o.flight_number) + '</span></span>';
-    else if (from) a = '<span><span class="small">' + esc(from) + '</span></span>';
-    if (to) b = '<span>' + (a ? arrow : '') + '<span class="big">' + esc(to) + '</span></span>';
-  } else if (o.service_type === '送机') {
-    if (from) a = '<span><span class="big">' + esc(from) + '</span></span>';
-    if (to) b = '<span>' + (a ? arrow : '') + '<span class="small">' + esc(to) + '</span></span>';
-  } else {
-    if (from) a = '<span><span class="reg">' + esc(from) + '</span></span>';
-    if (to) b = '<span>' + (a ? arrow : '') + '<span class="reg">' + esc(to) + '</span></span>';
+    return (o.flight_number
+      ? '<span class="code">' + esc(o.flight_number) + '</span>'
+      : '<span class="code org">' + esc(from) + '</span>') +
+      '<span class="place">' + esc(to) + '</span>';
   }
-  return a || b ? '<div class="route">' + a + b + '</div>' : '';
+  if (o.service_type === '送机') {
+    // shortPlace has already reduced anything naming the airport to 機場 and
+    // its terminal. A destination that is somewhere else is not dropped: it
+    // follows the pick-up, small.
+    const airport = /^機場/.test(to);
+    return '<span class="code svc">送機' + (airport ? esc(to.slice(2)) : '') + '</span>' +
+      '<span class="place">' + (from ? end(from) : '') +
+      (to && !airport ? ' ' + end(to, from, ' sub') : '') + '</span>';
+  }
+  return '<span class="code svc">' + esc(svcLabel(o.service_type)) + '</span>' +
+    '<span class="place reg">' + (from ? end(from) : '') + (to ? ' ' + end(to, from) : '') + '</span>';
 }
 
-function tagsHtml(o) {
-  const t = [];
-  if (o.banner_fee) t.push('<span class="tag banner">舉牌</span>');
+// The row's second line: the flight's status block, the two times worked out
+// from it, then the marks.
+function metaHtml(o, turn) {
+  const m = [];
+  if (isFlightPickup(o.service_type)) {
+    const st = statusWord(o);
+    if (st) m.push('<span class="st ' + WORD_CLASS[st] + (turn ? ' turn' : '') + '">' + st + '</span>');
+    if (o.depart_hhmm) m.push('<span class="num">出發 <b>' + tight(esc(o.depart_hhmm)) + '</b></span>');
+    const meet = meetTime(o);
+    if (meet) m.push('<span class="num">用車 <b>' + tight(esc(meet)) + '</b></span>');
+  }
+  if (o.banner_fee) m.push('<span class="mk sign">舉牌</span>');
   if (o.passenger_exit_minutes) {
     const cls = o.exit_urgency === 'urgent' ? 'urgent' : o.exit_urgency === 'tight' ? 'tight' : 'neutral';
-    t.push('<span class="tag ' + cls + '">出場 ' + esc(o.passenger_exit_minutes) + '</span>');
+    m.push('<span class="mk ' + cls + '">出場 <span class="num">' + esc(o.passenger_exit_minutes) + '</span></span>');
   }
-  return t.length ? '<div class="tags">' + t.join('') + '</div>' : '';
+  return m.length ? '<span class="meta">' + m.join('') + '</span>' : '';
 }
 
 // Gross, matching the day total: the banner fee is money in, and the deductions
 // that follow it are only visible in the detail sheet's breakdown. A 判罰賠款 is
 // the exception: the platform has already taken that money, so the row carries
-// it as a badge while the figure above it stays the gross the day sums.
+// it under the fare while the figure above it stays the gross the day sums.
 function priceHtml(o) {
-  if (!o.price) return '<div class="price unset">未入價</div>';
+  if (!o.price) return '<span class="price unset">未入價</span>';
   const pen = o.penalty_fee > 0
-    ? '<span class="pen">' + money(-o.penalty_fee) + '</span>' : '';
-  return '<div class="price">$' + $(o.price + (o.banner_fee || 0)) + pen + '</div>';
+    ? '<span class="pen">' + tight(money(-o.penalty_fee)) + '</span>' : '';
+  return '<span class="price">' + tight(money(o.price + (o.banner_fee || 0))) + pen + '</span>';
 }
 
-// One canonical row time drives the server's sort, the rail display and the NOW
+// One canonical row time drives the server's sort, the row's time and the NOW
 // line alike, so a later row can never show an earlier number. rowMin compares
 // HH:MM alone, so only a landing past midnight still yields a negative
 // difference — a real state with no waiting time to label, not an error.
-// A trailing NOW line is drawn with no neighbours, so both may be null.
-function gapHtml(prev, o, showNow) {
-  let inner = '';
-  if (prev) {
-    const gapMin = rowMin(o) - rowMin(prev);
-    if (gapMin >= 30) inner += '<div class="gap-label">' + fmtGap(gapMin) + '</div>';
-  }
-  if (showNow) {
-    inner += '<div class="now"><span class="now-t">' + hhmmOf(new Date()) +
-      '</span><span class="now-line"></span></div>';
-  }
-  return '<div class="gap">' + inner + '</div>';
+function gapHtml(prev, o) {
+  if (!prev) return '';
+  const gapMin = rowMin(o) - rowMin(prev);
+  return gapMin >= 30 ? '<span class="gap">' + gapText(gapMin) + '</span>' : '';
+}
+
+function nowHtml() {
+  return '<div class="now"><span class="now-t">' + tight(hhmmOf(new Date())) +
+    '</span><span class="now-line"></span></div>';
 }
 
 // data-oid and the .next class name are what render() queries to scroll a row
-// into view; both must survive any markup change here.
-function rowHtml(o, nextId) {
+// into view; both must survive any markup change here. Every cell of the
+// first line is always written, empty or not, so the grid's columns hold.
+function rowHtml(o, prev, nextId, turn) {
   const quick = _QUICK_TYPES.has(o.service_type);
   const open = '<button class="row' + (quick ? ' quick' : '') + (isDone(o) ? ' done' : '') +
     (o.order_id === nextId ? ' next' : '') + '" data-oid="' + esc(o.order_id) +
     '" onclick="rd.day.openDetail(this.dataset.oid)">';
+  // A quick order is filler between legs: its platform, its own fare (not
+  // gross-plus-toll) and no second line beyond the wait before it.
   if (quick) {
     return open +
-      '<div class="rail"><div class="t">' + esc(orderTime(o)) + '</div></div>' +
-      '<div class="row-body"><span class="qplat ' + platform(o) + '">' +
-      esc(svcLabel(o.service_type)) + '</span>' +
-      (o.price ? '<span class="qprice">$' + $(o.price) + '</span>'
-               : '<span class="qprice unset">未入價</span>') +
-      '</div></button>';
+      '<span class="time">' + tight(esc(orderTime(o))) + '</span>' +
+      '<span class="code plat">' + QUICK_CODE[platform(o)] + '</span>' +
+      '<span class="place lite">' + esc(svcLabel(o.service_type)) + '</span>' +
+      (o.price ? '<span class="price">' + tight(money(o.price)) + '</span>'
+               : '<span class="price unset">未入價</span>') +
+      gapHtml(prev, o) + '</button>';
   }
-  return open + railHtml(o) +
-    '<div class="row-body">' + routeHtml(o) + tagsHtml(o) + '</div>' +
-    priceHtml(o) + '</button>';
+  return open +
+    '<span class="time">' + tight(esc(rowTime(o))) + '</span>' +
+    codePlaceHtml(o) + priceHtml(o) + gapHtml(prev, o) + metaHtml(o, turn) + '</button>';
 }
 
 // ---- sheet infra ----
