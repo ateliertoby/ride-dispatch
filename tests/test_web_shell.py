@@ -62,7 +62,8 @@ def test_the_shell_links_its_styles_and_module_by_versioned_address(client):
     html = client.get("/").get_data(as_text=True)
     urls = _asset_urls(html)
     assert urls == [f"/assets/{v}/css/base.css", f"/assets/{v}/css/order-sheet.css",
-                    f"/assets/{v}/css/day.css", f"/assets/{v}/js/main.js"]
+                    f"/assets/{v}/css/day.css", f"/assets/{v}/css/settle.css",
+                    f"/assets/{v}/js/main.js"]
     assert f'<script type="module" src="/assets/{v}/js/main.js"></script>' in html
     for url in urls:
         res = client.get(url)
@@ -85,8 +86,9 @@ def test_every_module_the_shell_imports_is_served_as_javascript(client):
         assert res.mimetype == "text/javascript", path
         for spec in re.findall(r"""from\s+'(\.[^']+)'""", res.get_data(as_text=True)):
             queue.append(posixpath.normpath(posixpath.join(posixpath.dirname(path), spec)))
-    assert {"js/main.js", "js/router.js", "js/day/index.js", "js/order-sheet.js",
-            "js/shared.js", "js/api.js", "js/store.js", "js/stream.js"} <= seen
+    assert {"js/main.js", "js/router.js", "js/day/index.js", "js/settle/index.js",
+            "js/order-sheet.js", "js/shared.js", "js/api.js", "js/store.js", "js/stream.js",
+            "js/dates.js", "js/lanes.js"} <= seen
 
 
 def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
@@ -98,14 +100,32 @@ def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
     assert client.get(f"/assets/{v}/manifest.webmanifest").mimetype == "application/manifest+json"
 
 
-def test_the_shell_holds_the_day_view_and_one_toast(client):
+def test_the_shell_holds_both_views_and_one_toast(client):
     html = client.get("/").get_data(as_text=True)
     assert 'id="view-day" class="view view-day" hidden' in html
     assert 'id="view-settle" class="view view-settle" hidden' in html
     assert html.count('id="toast"') == 1
     # Inline handlers resolve on window; the modules publish theirs under rd.
+    # The settle view's markup has none: its controls are found by listeners.
     handlers = re.findall(r'onclick="([^"]+)"', html)
     assert handlers and all(h.startswith("rd.day.") for h in handlers)
+    # Each view switches to the other through the router, not the server.
+    assert '<a class="icon-btn" href="/settle" data-nav aria-label="埋數">' in html
+    assert '<a class="icon-btn" href="/" data-nav aria-label="返日程">' in html
+
+
+def test_no_id_appears_twice_in_the_shell(client):
+    """Both views are in one document: an id one of them shares with the
+    other would make each find the other's element."""
+    html = client.get("/").get_data(as_text=True)
+    ids = re.findall(r'\bid="([^"]+)"', html)
+    assert len(ids) == len(set(ids)), sorted(i for i in set(ids) if ids.count(i) > 1)
+    day, settle = html.split('<div id="view-settle"')
+    assert all(i in day for i in ('id="day-summary"', 'id="day-chips"', 'id="day-scrim"',
+                                  'id="day-sheet"', 'id="day-drop"'))
+    assert all(i in settle for i in ('id="settle-summary"', 'id="settle-chips"',
+                                     'id="settle-scrim"', 'id="settle-sheet"',
+                                     'id="settle-drop"'))
 
 
 def test_an_asset_path_cannot_leave_the_static_folder(client):

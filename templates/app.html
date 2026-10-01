@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="{{ asset('css/base.css') }}">
 <link rel="stylesheet" href="{{ asset('css/order-sheet.css') }}">
 <link rel="stylesheet" href="{{ asset('css/day.css') }}">
+<link rel="stylesheet" href="{{ asset('css/settle.css') }}">
 </head>
 <body>
 <div id="view-day" class="view view-day" hidden>
@@ -34,7 +35,32 @@
 <div class="drop" id="day-drop"></div>
 <div class="sheet" id="day-sheet"></div>
 </div>
-<div id="view-settle" class="view view-settle" hidden></div>
+<div id="view-settle" class="view view-settle" hidden>
+<div class="header">
+  <div class="header-row">
+    <button class="nav-btn" id="prevM" aria-label="前一個月">&larr;</button>
+    <button class="date-btn" id="monthBtn"></button>
+    <button class="nav-btn" id="nextM" aria-label="後一個月">&rarr;</button>
+    <button class="icon-btn" id="stmtBtn" aria-label="讀結算圖">圖</button>
+    <a class="icon-btn" href="/" data-nav aria-label="返日程">&#10005;</a>
+  </div>
+  <div class="summary" id="settle-summary"></div>
+  <div class="chips" id="settle-chips"></div>
+  <div class="wk"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
+</div>
+<div class="cal">
+  <!-- The colour key is read once and sits above the strip: the strip has no
+       end to put it after, since scrolling to either end loads another month. -->
+  <div class="legend">琥珀 = 平台欠緊（未結算 · 差數）· 藍 = 入數未對 · 琥珀框 = 入數已對但批次仍差 · 灰條 = 等過數 · 綠 = 已收 · 淡 = 已對／收埋 · 虛線 = 補結／舉牌先結</div>
+  <div class="sent" id="sentTop"></div>
+  <div class="weeks" id="grid"></div>
+  <div class="sent" id="sentBot"></div>
+</div>
+<div class="scrim" id="settle-scrim"></div>
+<div class="sheet" id="settle-sheet"></div>
+<div class="drop" id="settle-drop"><span>放低張結算圖</span></div>
+<input type="file" id="stmtFile" accept="image/*" hidden>
+</div>
 <div class="toast" id="toast"></div>
 <script type="module" src="{{ asset('js/main.js') }}"></script>
 </body>
