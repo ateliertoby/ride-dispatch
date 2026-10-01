@@ -283,6 +283,52 @@ function reportPerf() {
   if (ms === null) return;
   try { if (localStorage.getItem('perf')) toast(Math.round(ms) + ' ms'); } catch (e) { /* no storage */ }
 }
+// Diagnostic switch for the readout above: holding the date button toggles
+// the key, and ?perf=1 / ?perf=0 on load sets or clears it. An installed
+// home-screen app has no address bar or inspector and keeps its own storage,
+// so the page is the only place the key can be set there.
+(function () {
+  const setPerf = on => {
+    try { on ? localStorage.setItem('perf', '1') : localStorage.removeItem('perf'); } catch (e) { /* no storage */ }
+  };
+  try {
+    const url = new URL(location.href);
+    const q = url.searchParams.get('perf');
+    if (q !== null) {
+      setPerf(q !== '0');
+      url.searchParams.delete('perf');
+      history.replaceState(null, '', url);
+    }
+  } catch (e) { /* leave the URL as it is */ }
+
+  const btn = document.getElementById('dateBtn');
+  let timer = null, held = false, x = 0, y = 0;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  btn.addEventListener('pointerdown', e => {
+    held = false;
+    x = e.clientX; y = e.clientY;
+    cancel();
+    timer = setTimeout(() => {
+      timer = null;
+      held = true;
+      let on = false;
+      try { on = !localStorage.getItem('perf'); } catch (err) { /* no storage */ }
+      setPerf(on);
+      toast(on ? '計時 開' : '計時 關');
+    }, 1500);
+  });
+  btn.addEventListener('pointermove', e => {
+    if (timer && Math.hypot(e.clientX - x, e.clientY - y) > 8) cancel();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(t => btn.addEventListener(t, cancel));
+  // The release of a hold still produces a click; stop it before it reaches
+  // the button's own handler.
+  document.addEventListener('click', e => {
+    if (!held) return;
+    held = false;
+    if (btn.contains(e.target)) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
+})();
 function go(d) {
   const dt = new Date(cur + 'T00:00:00');
   dt.setDate(dt.getDate() + d);
