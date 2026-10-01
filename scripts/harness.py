@@ -7,12 +7,17 @@ that knows when a page has come to rest.
 Both clocks are pinned to 14:00 on the chosen day, the browser's and the
 server's, so a run gives the same result whenever it is made.
 """
+import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, time as dtime
 from zoneinfo import ZoneInfo
@@ -75,12 +80,81 @@ def serve(app_root: str, db_path: str, port: int, now: str) -> None:
     """
     sys.path.insert(0, app_root)
     os.chdir(app_root)
+    # Seeding has already loaded the package from this script's own checkout;
+    # the import below must find the one under app_root.
+    for name in [m for m in sys.modules if m.split(".")[0] == "ride_dispatch"]:
+        del sys.modules[name]
     from ride_dispatch import db, web
     fixed = datetime.fromisoformat(now)
     real_now_str = db._now_str
     db._now_str = lambda moment=None: real_now_str(moment or fixed)
     web.DB_PATH = db_path
+    _install_faults(web.app, os.path.join(os.path.dirname(db_path), FAULTS_FILE), port)
     web.app.run(host="127.0.0.1", port=port, threaded=True)
+
+
+FAULTS_FILE = "faults.json"
+SHELL_ROUTES = ("/", "/settle")
+LOGIN_PATH = "/__login"
+
+
+def _install_faults(app, path: str, port: int) -> None:
+    """Let a check make the served app misbehave the way its surroundings can.
+
+    The file at `path` is read on every request; Server.fault() writes it.
+
+    expired       every request is answered as the access proxy answers one
+                  that carries no session: a redirect to a login on another
+                  origin (the same server under its other name, `localhost`)
+    doc_version   the shell document claims this version instead of its own,
+                  as after a deploy the worker being installed predates
+    doc_redirect  the shell document is reached through a same-origin redirect
+    no_assets     every asset address is a 404, as after a deploy
+    no_shell      the document, the assets and the worker script are refused
+    """
+    import json
+    from flask import redirect, request
+
+    def faults() -> dict:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def login():
+        # Stands in for the proxy's login page; its link is the way back the
+        # proxy offers once the session is good again.
+        back = f"http://127.0.0.1:{port}" + request.args.get("next", "/")
+        return ('<!doctype html><meta name="viewport" content="width=device-width">'
+                f'<title>login</title><a id="back" href="{back}">log in</a>')
+
+    app.add_url_rule(LOGIN_PATH, "harness_login", login)
+
+    @app.before_request
+    def misbehave():
+        f = faults()
+        path_ = request.path
+        if path_ == LOGIN_PATH:
+            return None
+        if f.get("expired"):
+            nxt = request.full_path.rstrip("?")
+            return redirect(f"http://localhost:{port}{LOGIN_PATH}?next=" + urllib.parse.quote(nxt, safe=""))
+        static = path_.startswith("/assets/")
+        if f.get("no_assets") and static:
+            return "gone", 404
+        if f.get("no_shell") and (static or path_ in SHELL_ROUTES or path_ == "/sw.js"):
+            return "unavailable", 503
+        if f.get("doc_redirect") and path_ in SHELL_ROUTES and "redirected" not in request.args:
+            return redirect(path_ + "?redirected=1")
+        return None
+
+    @app.after_request
+    def misreport(resp):
+        version = faults().get("doc_version")
+        if version and "X-Asset-Version" in resp.headers:
+            resp.headers["X-Asset-Version"] = version
+        return resp
 
 
 def free_port() -> int:
@@ -89,46 +163,91 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def copy_app(dst: str, app_root: str = ROOT) -> str:
+    """A throwaway copy of what the app is served from, so a check can change
+    a file the way a deploy does without writing into the working tree."""
+    for part in ("ride_dispatch", "templates", "static"):
+        shutil.copytree(os.path.join(app_root, part), os.path.join(dst, part),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    return dst
+
+
 class Server:
     """A seeded database and the app serving it, for the length of a `with`.
 
     `shell` says which pages the app serves: True the single-document shell,
     False the two separate pages, None whatever RIDE_SHELL says in the
     caller's own environment.
+
+    stop() and start() replace the serving process and keep the address and
+    the database, which is what a deploy does.
     """
 
     def __init__(self, today: date, app_root: str = ROOT, shell: bool | None = None):
         self.today = today
         self.app_root = app_root
         self.shell = shell
+        self.proc = None
 
     def __enter__(self) -> str:
         self.dir = tempfile.TemporaryDirectory(prefix="ride-shots-")
         self.db_path = os.path.join(self.dir.name, "demo.db")
         seed_demo_db.seed(self.db_path, self.today)
-        port = free_port()
+        self.port = free_port()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.log = open(os.path.join(self.dir.name, "server.log"), "w")
+        self.start()
+        return self.url
+
+    def start(self) -> None:
         now = datetime.combine(self.today, dtime(seed_demo_db.DEMO_HOUR, 0)).isoformat()
         env = dict(os.environ)
         if self.shell is not None:
             env["RIDE_SHELL"] = "1" if self.shell else "0"
-        self.log = open(os.path.join(self.dir.name, "server.log"), "w")
         self.proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), self.app_root, self.db_path,
-             str(port), now],
+             str(self.port), now],
             stdout=self.log, stderr=subprocess.STDOUT, env=env)
-        url = f"http://127.0.0.1:{port}"
         deadline = time.monotonic() + 15
         while True:
             if self.proc.poll() is not None:
                 raise RuntimeError("server exited:\n" + self._log_text())
             try:
-                urllib.request.urlopen(url + "/api/orders?date=" + self.today.isoformat(), timeout=1)
-                return url
+                urllib.request.urlopen(self.url + "/api/orders?date=" + self.today.isoformat(), timeout=1)
+                return
+            except urllib.error.HTTPError:
+                return      # answering, if only to refuse: a fault is set
             except OSError:
                 if time.monotonic() > deadline:
                     self.__exit__(None, None, None)
                     raise RuntimeError("server did not start:\n" + self._log_text())
                 time.sleep(0.1)
+
+    def stop(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+
+    def fault(self, **faults) -> None:
+        """Set how the served app misbehaves from now on (see _install_faults);
+        with no argument, not at all."""
+        path = os.path.join(self.dir.name, FAULTS_FILE)
+        with open(path + ".new", "w") as f:
+            json.dump(faults, f)
+        os.replace(path + ".new", path)
+
+    def version(self) -> str:
+        """The asset version the serving process answers with."""
+        with urllib.request.urlopen(self.url + "/api/ping", timeout=5) as res:
+            return json.loads(res.read())["version"]
+
+    def asked(self) -> list:
+        """Every request the server has answered, oldest first, as (method,
+        path, status): the one record that does not depend on what the
+        browser chooses to report."""
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", self._log_text())     # the log colours by status
+        return [(m, p, int(st)) for m, p, st in
+                re.findall(r'"([A-Z]+) (\S+) HTTP/[\d.]+" (\d{3})', plain)]
 
     def _log_text(self) -> str:
         self.log.flush()
@@ -136,21 +255,26 @@ class Server:
             return f.read()
 
     def __exit__(self, *exc) -> None:
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
+        self.stop()
         self.log.close()
         self.dir.cleanup()
 
 
 # ---- the browser ----
 
-def new_context(playwright, browser, scheme: str, today: date, still: bool = True):
+def new_context(playwright, browser, scheme: str, today: date, still: bool = True,
+                workers: bool = False):
     """A context shaped like the operator's phone, its clock pinned to the
     demo hour. Date is frozen and timers keep running: the NOW line and the
-    done-dimming stay put, and the pages' own timeouts still fire."""
+    done-dimming stay put, and the pages' own timeouts still fire.
+
+    The shell's service worker is refused unless `workers` is set. A page a
+    worker controls is out of reach of request interception in WebKit, which
+    most checks depend on, and a worker installing in the background would
+    make the moment a page comes to rest depend on timing."""
     ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme=scheme,
-                              timezone_id=TIMEZONE, locale="zh-HK")
+                              timezone_id=TIMEZONE, locale="zh-HK",
+                              service_workers="allow" if workers else "block")
     if still:
         ctx.add_init_script(STILL_JS)
     ctx.clock.set_fixed_time(demo_now(today))
