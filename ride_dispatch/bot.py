@@ -1798,7 +1798,7 @@ def collect_contact_lines(order_data: dict) -> list[tuple[str, str]]:
     order: passenger_phone, overseas_phone, third_party_contact,
     more_contacts.
 
-    JS twin: collectContactLines() in templates/_shared.js — keep in sync.
+    JS twin: collectContactLines() in static/js/shared.js — keep in sync.
     """
     seen: set[str] = set()
     result: list[tuple[str, str]] = []

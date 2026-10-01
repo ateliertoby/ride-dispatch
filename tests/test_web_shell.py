@@ -17,7 +17,6 @@ def client(monkeypatch):
     os.close(fd)
     init_db(path)
     monkeypatch.setattr(web, "DB_PATH", path)
-    monkeypatch.setattr(web, "SHELL", True)
     web.app.config["TESTING"] = True
     with web.app.test_client() as c:
         yield c
@@ -134,12 +133,17 @@ def test_an_asset_path_cannot_leave_the_static_folder(client):
     # The first two name files that exist one level above static/. The last
     # decodes to an absolute path, which routing answers with a redirect to
     # the same path made relative, so the redirect is followed.
-    for escape in ("../templates/dashboard.html", "../ride_dispatch/web.py",
-                   "icons/../../templates/dashboard.html",
-                   "%2e%2e/templates/dashboard.html", "..%2ftemplates%2fdashboard.html",
+    for escape in ("../templates/app.html", "../ride_dispatch/web.py",
+                   "icons/../../templates/app.html",
+                   "%2e%2e/templates/app.html", "..%2ftemplates%2fapp.html",
                    "%2fetc%2fhosts"):
         res = client.get(f"/assets/{v}/{escape}", follow_redirects=True)
         assert res.status_code == 404, escape
+    # The files named are really there to be reached, or the refusals above
+    # would prove nothing.
+    above = os.path.dirname(web.app.static_folder.rstrip(os.sep))
+    assert os.path.isfile(os.path.join(above, "templates", "app.html"))
+    assert os.path.isfile(os.path.join(above, "ride_dispatch", "web.py"))
 
 
 def test_the_version_follows_the_assets(client, static_copy):
@@ -256,8 +260,7 @@ def test_the_event_stream_keeps_its_own_cache_header(client):
         res.close()
 
 
-def test_pages_and_assets_are_not_marked_no_store(client, monkeypatch):
-    monkeypatch.setattr(web, "SHELL", False)
+def test_pages_and_assets_are_not_marked_no_store(client):
     assert "no-store" not in client.get("/").headers.get("Cache-Control", "")
     assert "no-store" not in client.get("/manifest.webmanifest").headers.get("Cache-Control", "")
 
@@ -266,9 +269,14 @@ def test_ping_names_the_version(client):
     assert client.get("/api/ping").get_json() == {"ok": True, "version": web.asset_version()}
 
 
-def test_the_old_pages_still_answer_without_the_flag(client, monkeypatch):
-    monkeypatch.setattr(web, "SHELL", False)
-    day = client.get("/")
-    assert "function detailView(" in day.get_data(as_text=True)
-    assert "X-Asset-Version" not in day.headers
-    assert "埋數" in client.get("/settle").get_data(as_text=True)
+def test_the_document_carries_no_script_or_style_of_its_own(client):
+    """Everything the app runs is an asset under the versioned address, which
+    is what lets the worker hold one version whole. Script or style written
+    into the document would be outside it."""
+    for path in ("/", "/settle"):
+        html = client.get(path).get_data(as_text=True)
+        assert re.findall(r"<script\b[^>]*>", html) == [
+            f'<script type="module" src="/assets/{web.asset_version()}/js/main.js">'], path
+        assert "<style" not in html, path
+        assert "function " not in html, path
+

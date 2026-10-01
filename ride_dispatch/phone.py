@@ -58,7 +58,7 @@ def format_phone_e164(raw: str) -> str:
     original string unchanged when the input doesn't match a
     recognised pattern (wrong guess = wrong number dialled).
 
-    JS twin: formatPhoneE164() in templates/_shared.js — keep in sync,
+    JS twin: formatPhoneE164() in static/js/shared.js — keep in sync,
     E164_CC and TRUNK_ZERO_CC included.
     """
     s = raw.strip()

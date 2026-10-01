@@ -111,8 +111,8 @@ def row_time(order: dict) -> str:
     same landing time: 出場時長 is deliberately not added, or the row would
     sort at one number and display another.
 
-    JS twin: landingTime()/rowTime() in dashboard.html — the field precedence
-    below must stay identical in both.
+    JS twin: landingTime()/rowTime() in static/js/day/index.js — the field
+    precedence below must stay identical in both.
     """
     sched_str = order.get("scheduled_time") or ""
     if not is_flight_pickup(order.get("service_type") or ""):

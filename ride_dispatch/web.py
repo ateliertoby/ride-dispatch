@@ -67,10 +67,6 @@ app = Flask(
 )
 
 
-# Serve the single-document shell instead of the two pages. Removed with the
-# pages once the shell has replaced them.
-SHELL = os.environ.get("RIDE_SHELL", "") == "1"
-
 _MANIFEST_MIMETYPE = "application/manifest+json"
 # Named here rather than guessed: the guess comes from a table the operating
 # system can override, and a browser refuses a module script or a stylesheet
@@ -89,9 +85,7 @@ def _versioned_files():
         for name in files:
             yield os.path.join(root, name)
     for name in _VERSION_TEMPLATES:
-        path = os.path.join(app.template_folder, name)
-        if os.path.exists(path):
-            yield path
+        yield os.path.join(app.template_folder, name)
 
 
 def asset_version() -> str:
@@ -124,22 +118,16 @@ def _asset_helpers():
     return {"asset_version": v, "asset": lambda path: f"/assets/{v}/{path}"}
 
 
-def _shell():
+@app.route("/")
+@app.route("/settle")
+def shell():
+    """The one document, on the address of either view: the script reads the
+    path to decide which to show."""
     resp = app.make_response(render_template("app.html"))
     # Revalidated on every load: the document is what names the asset version.
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Asset-Version"] = asset_version()
     return resp
-
-
-@app.route("/")
-def dashboard():
-    return _shell() if SHELL else render_template("dashboard.html")
-
-
-@app.route("/settle")
-def settle():
-    return _shell() if SHELL else render_template("settle.html")
 
 
 @app.get("/assets/<version>/<path:filename>")

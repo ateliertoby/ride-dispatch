@@ -88,7 +88,7 @@ def expected_of(order: dict) -> float:
     is netted off for every platform.  Netting it here is also what makes a
     statement idempotent: once the fine is stored, re-reading the same image
     agrees with the platform's own figure.
-    JS twin: expectedOf() in templates/_shared.js — keep in sync.
+    JS twin: expectedOf() in static/js/shared.js — keep in sync.
     """
     platform = platform_of(order.get('service_type'))
     price = order.get('price') or 0
@@ -109,7 +109,7 @@ def owed_of(order: dict) -> float:
     other batches already carry for this order, so the one that finally takes
     the trip is owed the rest — the same figure the platform prints for the
     trip line.  An order dict without the key counts nothing as paid ahead.
-    JS twin: owedOf() in templates/_shared.js — keep in sync.
+    JS twin: owedOf() in static/js/shared.js — keep in sync.
     """
     return expected_of(order) - (order.get('paid_ahead') or 0)
 
