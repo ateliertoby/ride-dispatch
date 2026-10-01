@@ -74,7 +74,7 @@ def demo_now(today: date) -> datetime:
 def serve(app_root: str, db_path: str, port: int, now: str) -> None:
     """Run the app from `app_root` on `db_path`, its clock pinned to `now`.
 
-    Runs in a child process. The pages ask the server what time it is to decide
+    Runs in a child process. The app asks the server what time it is to decide
     which legs are finished, so a clock left running would change the figures
     between two runs made at different hours.
     """
@@ -179,18 +179,13 @@ def copy_app(dst: str, app_root: str = ROOT) -> str:
 class Server:
     """A seeded database and the app serving it, for the length of a `with`.
 
-    `shell` says which pages the app serves: True the single-document shell,
-    False the two separate pages, None whatever RIDE_SHELL says in the
-    caller's own environment.
-
     stop() and start() replace the serving process and keep the address and
     the database, which is what a deploy does.
     """
 
-    def __init__(self, today: date, app_root: str = ROOT, shell: bool | None = None):
+    def __init__(self, today: date, app_root: str = ROOT):
         self.today = today
         self.app_root = app_root
-        self.shell = shell
         self.proc = None
 
     def __enter__(self) -> str:
@@ -205,13 +200,10 @@ class Server:
 
     def start(self) -> None:
         now = datetime.combine(self.today, dtime(seed_demo_db.DEMO_HOUR, 0)).isoformat()
-        env = dict(os.environ)
-        if self.shell is not None:
-            env["RIDE_SHELL"] = "1" if self.shell else "0"
         self.proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), self.app_root, self.db_path,
              str(self.port), now],
-            stdout=self.log, stderr=subprocess.STDOUT, env=env)
+            stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 15
         while True:
             if self.proc.poll() is not None:
@@ -292,9 +284,9 @@ def new_context(playwright, browser, scheme: str, today: date, still: bool = Tru
 
 
 class Driver:
-    """Opens a page and drives it through what is on screen only (classes,
-    data attributes, aria labels, text), never through a page's own functions,
-    so the same steps can be pointed at a build whose scripts are laid out
+    """Opens the app and drives it through what is on screen only (classes,
+    data attributes, aria labels, text), never through its own functions, so
+    the same steps can be pointed at a build whose scripts are laid out
     differently."""
 
     def __init__(self, ctx, base_url: str):
@@ -377,9 +369,9 @@ class Driver:
         self._watch(self.page)
         self.page.goto(self.base + path)
         self.on(ready).first.wait_for()
-        # Each connection of the event stream begins with a greeting, and a page
-        # may reload its data on it. Waiting for the stream first puts that
-        # reload before the first tap instead of somewhere after it.
+        # Each connection of the event stream begins with a greeting, and a
+        # build may reload its data on it. Waiting for the stream first puts
+        # that reload before the first tap instead of somewhere after it.
         deadline = time.monotonic() + TIMEOUT_MS / 1000
         while not self.stream_open:
             if time.monotonic() > deadline:

@@ -1,10 +1,7 @@
 """Behaviour checks for the web app, driven through a real browser.
 
-    python scripts/e2e.py                    every check, against the shell
+    python scripts/e2e.py                    every check
     python scripts/e2e.py --only day.add     checks whose name begins with this
-    python scripts/e2e.py --old-pages        also run each check the separate pages
-                                             can pass against them, and require
-                                             both builds to send the same writes
     python scripts/e2e.py --list             name the checks and stop
 
 Playwright WebKit as an iPhone 14. Every check gets a server of its own on a
@@ -46,20 +43,19 @@ from harness import (DEVICE, LOGIN_PATH, ROOT, TIMEOUT_MS, TIMEZONE, Driver,  # 
 CHECKS = []
 
 
-def check(name: str, old: bool = True, clock: str = "fixed", still: bool = True,
+def check(name: str, clock: str = "fixed", still: bool = True,
           workers: bool = False, copy: bool = False, desktop: bool = False):
-    """Register a check. `old` says the separate pages can pass it too, which
-    is every check that does not depend on how the shell loads its data.
-    `clock` is "fixed" (Date frozen, timers real) or "installed" (the check
-    moves time itself). `still` turns the page's transitions and animations
-    off, which is what every check wants unless motion is what it checks.
+    """Register a check. `clock` is "fixed" (Date frozen, timers real) or
+    "installed" (the check moves time itself). `still` turns the page's
+    transitions and animations off, which is what every check wants unless
+    motion is what it checks.
     `workers` lets the shell's service worker in; such a check cannot hold or
     stub a request from the page and makes the server misbehave instead
     (Server.fault). `copy` serves the app from a throwaway copy the check may
     change, to stand for a deploy. `desktop` runs it in a wide window with a
     pointer that hovers and no touch, so it clicks where the others tap."""
     def register(fn):
-        CHECKS.append({"name": name, "fn": fn, "old": old, "clock": clock, "still": still,
+        CHECKS.append({"name": name, "fn": fn, "clock": clock, "still": still,
                        "workers": workers, "copy": copy, "desktop": desktop})
         return fn
     return register
@@ -86,7 +82,7 @@ WEEKDAY = "一二三四五六日"      # date.weekday(): Monday is 0
 
 
 def fmt(n) -> str:
-    """Money as the pages print it: cents only when there are some."""
+    """Money as the app prints it: cents only when there are some."""
     return f"{n:.2f}" if n % 1 else f"{n:.0f}"
 
 
@@ -244,10 +240,9 @@ BANNER_JS = """
 class Session(Driver):
     """One page on one server, with everything it asked the server recorded."""
 
-    def __init__(self, ctx, base_url: str, today: date, shell: bool, server: Server):
+    def __init__(self, ctx, base_url: str, today: date, server: Server):
         super().__init__(ctx, base_url)
         self.today = today
-        self.shell = shell
         self.server = server
         self.t = seed_demo_db.targets(today)
         self.requests = []     # (method, path, resource type), as they start
@@ -700,7 +695,7 @@ def day_boot(s: Session) -> None:
     s.eq(round(box["y"]), 0, "header top")
 
 
-@check("day.boot-requests", old=False)
+@check("day.boot-requests")
 def day_boot_requests(s: Session) -> None:
     s.open_day()
     docs = [r for r in s.requests if r[2] == "document"]
@@ -721,7 +716,7 @@ def day_boot_requests(s: Session) -> None:
         "a neighbour was answered before today")
 
 
-@check("day.handlers-resolve", old=False)
+@check("day.handlers-resolve")
 def day_handlers_resolve(s: Session) -> None:
     """Inline handlers resolve on window; every one the shell and its modules
     emit must name a function a module published."""
@@ -794,8 +789,7 @@ def day_date_first(s: Session) -> None:
     far = "/api/orders?date=" + s.day(2)
     s.wait(lambda: s.holding(far), "the request for the day after tomorrow")
     s.eq(s.rows(), shown, "rows while the answer is pending")
-    # One at a time, in the order they were asked: the separate pages paint
-    # whichever answer lands last.
+    # One at a time, in the order they were asked.
     answered = s.finished.count(("GET", near))
     s.release(near)
     s.wait(lambda: s.finished.count(("GET", near)) > answered, "tomorrow's answer")
@@ -806,7 +800,7 @@ def day_date_first(s: Session) -> None:
     s.settle()
 
 
-@check("day.prefetched-day-paints-before-the-answer", old=False)
+@check("day.prefetched-day-paints-before-the-answer")
 def day_prefetch_paints(s: Session) -> None:
     s.open_day()
     near = "/api/orders?date=" + s.day(1)
@@ -819,7 +813,7 @@ def day_prefetch_paints(s: Session) -> None:
     s.eq(s.rows(), s.ids(1), "tomorrow's rows after the answer")
 
 
-@check("day.late-answer-for-a-day-already-left", old=False)
+@check("day.late-answer-for-a-day-already-left")
 def day_out_of_order(s: Session) -> None:
     s.open_day()
     there, back = "/api/orders?date=" + s.day(1), "/api/orders?date=" + s.day()
@@ -860,7 +854,7 @@ def day_failed_load(s: Session) -> None:
     s.settle()
 
 
-@check("day.failed-load-of-a-held-day", old=False)
+@check("day.failed-load-of-a-held-day")
 def day_failed_held(s: Session) -> None:
     s.open_day()
     s.go_days(1)
@@ -872,7 +866,7 @@ def day_failed_held(s: Session) -> None:
     s.settle()
 
 
-@check("day.expired-login-does-not-toast", old=False)
+@check("day.expired-login-does-not-toast")
 def day_auth_expired(s: Session) -> None:
     s.open_day()
     s.allow("http 401", "status of 401")
@@ -1741,7 +1735,7 @@ def settle_boot(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("settle.boot-requests", old=False)
+@check("settle.boot-requests")
 def settle_boot_requests(s: Session) -> None:
     s.open_settle()
     s.eq(len([r for r in s.requests if r[2] == "document"]), 1, "document requests")
@@ -1756,8 +1750,8 @@ def settle_boot_requests(s: Session) -> None:
 
 @check("settle.page-rules-by-width")
 def settle_widths(s: Session) -> None:
-    """The settle page's own rules on the body and on shared controls, which
-    in the shell must hold for the settle view and for it alone."""
+    """The settle view's own rules on the body and on shared controls, which
+    must hold for that view and for it alone."""
     def measure():
         return s.page.evaluate(
             "() => { const vis = sel => [...document.querySelectorAll(sel)].find(e => e.getClientRects().length);"
@@ -2666,7 +2660,7 @@ def settle_timing(s: Session) -> None:
     s.never(s.toast, "a timing toast for a live update", ms=500)
 
 
-@check("settle.expired-login-does-not-toast", old=False)
+@check("settle.expired-login-does-not-toast")
 def settle_auth_expired(s: Session) -> None:
     s.open_settle()
     s.allow("http 401", "status of 401")
@@ -2743,7 +2737,7 @@ def settle_auth_expired(s: Session) -> None:
 
 # ---- the two views in one document (inventory A9, G3, L4, L10; plan review focus 3 and 5) ----
 
-@check("views.switch-without-a-document-request", old=False)
+@check("views.switch-without-a-document-request")
 def views_switch(s: Session) -> None:
     s.open_day()
     asked = len(s.requests)
@@ -2773,7 +2767,7 @@ def views_switch(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("views.reload-and-history", old=False)
+@check("views.reload-and-history")
 def views_history(s: Session) -> None:
     s.allow("request failed: GET /api/events")     # a reload cuts the event stream
     s.open_settle()
@@ -2801,7 +2795,7 @@ def views_history(s: Session) -> None:
     s.eq(s.count('[aria-label="埋數"]'), 1, "the way to the settle view")
 
 
-@check("views.each-view-keeps-its-scroll", old=False)
+@check("views.each-view-keeps-its-scroll")
 def views_scroll(s: Session) -> None:
     s.open_day()
     s.expect(s.scroll_room() > 40, "the day list does not scroll on this screen")
@@ -2835,7 +2829,7 @@ def views_scroll(s: Session) -> None:
     s.eq(sorted(s.asked(asked)), held, "months asked for after forward")
 
 
-@check("views.hidden-settle-waits-until-shown", old=False)
+@check("views.hidden-settle-waits-until-shown")
 def views_hidden_settle(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -2867,7 +2861,7 @@ def views_hidden_settle(s: Session) -> None:
     s.eq(s.page.eval_on_selector("#" + row, "e => e.innerHTML"), drawn, "the row, drawn on return and drawn afresh")
 
 
-@check("views.late-settle-answers-are-not-drawn-while-hidden", old=False)
+@check("views.late-settle-answers-are-not-drawn-while-hidden")
 def views_late_settle(s: Session) -> None:
     s.open_day()
     s.page.evaluate("() => window.scrollTo(0, 60)")
@@ -2921,7 +2915,7 @@ def views_late_settle(s: Session) -> None:
     s.eq(s.writes, [], "writes by the page")
 
 
-@check("views.late-day-answers-are-not-drawn-while-hidden", old=False)
+@check("views.late-day-answers-are-not-drawn-while-hidden")
 def views_late_day(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -2976,7 +2970,7 @@ def views_late_day(s: Session) -> None:
     s.eq(len(s.writes), 1, "writes")
 
 
-@check("views.order-sheet-follows-the-showing-view", old=False)
+@check("views.order-sheet-follows-the-showing-view")
 def views_order_host(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -3026,7 +3020,7 @@ def views_order_host(s: Session) -> None:
     s.eq(len(s.writes), 2, "writes")
 
 
-@check("views.late-order-answers-go-to-the-view-that-asked", old=False)
+@check("views.late-order-answers-go-to-the-view-that-asked")
 def views_late_order(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -3074,7 +3068,7 @@ def views_late_order(s: Session) -> None:
     s.eq(s.last_write(), ("PATCH", path, {"status": "cancelled"}), "the cancel")
 
 
-@check("views.statement-read-answered-on-the-day-view", old=False)
+@check("views.statement-read-answered-on-the-day-view")
 def views_statement(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -3100,7 +3094,7 @@ def views_statement(s: Session) -> None:
     s.eq(len(s.writes), 1, "writes")
 
 
-@check("views.sheets-do-not-leak", old=False)
+@check("views.sheets-do-not-leak")
 def views_sheets(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -3132,7 +3126,7 @@ def views_sheets(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("views.settle-listeners-stand-down-on-the-day-view", old=False)
+@check("views.settle-listeners-stand-down-on-the-day-view")
 def views_listeners(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -3156,7 +3150,7 @@ def views_listeners(s: Session) -> None:
     s.eq(s.count(".drop.show"), 1, "the drop overlay on the settle view")
 
 
-@check("views.switch-timing", old=False)
+@check("views.switch-timing")
 def views_timing(s: Session) -> None:
     ms = re.compile(r"\d+ ms")
     s.open("/?perf=1", ".orders .row")
@@ -3202,7 +3196,7 @@ LOST_SERVER = ("request failed", "Failed to load resource", "Could not connect",
 CUT_OFF = ("access control checks", "Access-Control-Allow-Origin")
 
 
-@check("worker.first-install-takes-control-without-a-reload", old=False, workers=True)
+@check("worker.first-install-takes-control-without-a-reload", workers=True)
 def worker_first_install(s: Session) -> None:
     s.open_day()
     s.mark()
@@ -3222,7 +3216,7 @@ def worker_first_install(s: Session) -> None:
     s.expect(wanted and wanted <= set(listed), f"the page asked for assets the worker does not hold: {wanted - set(listed)}")
 
 
-@check("worker.shell-from-the-cache-data-from-the-server", old=False, workers=True)
+@check("worker.shell-from-the-cache-data-from-the-server", workers=True)
 def worker_offline_shell(s: Session) -> None:
     s.allow(*LOST_SERVER)
     s.open_day()
@@ -3268,7 +3262,7 @@ def worker_offline_shell(s: Session) -> None:
     s.expect(("GET", "/api/orders?date=" + s.day(), "fetch") in s.requests[tried:], "today's orders were not asked for")
 
 
-@check("worker.stale-version-address-is-refused", old=False, workers=True)
+@check("worker.stale-version-address-is-refused", workers=True)
 def worker_stale_address(s: Session) -> None:
     s.allow("http 404", "status of 404")
     s.open_day()
@@ -3299,17 +3293,17 @@ def refused_install(s: Session, document: str, **fault) -> None:
     s.eq(s.worker()["caches"], {"shell-" + s.server.version(): s.precached()}, "what the worker holds")
 
 
-@check("worker.install-refused-for-a-document-of-another-version", old=False, workers=True)
+@check("worker.install-refused-for-a-document-of-another-version", workers=True)
 def worker_refuses_version(s: Session) -> None:
     refused_install(s, "/", doc_version="000000000000")
 
 
-@check("worker.install-refused-for-a-redirected-document", old=False, workers=True)
+@check("worker.install-refused-for-a-redirected-document", workers=True)
 def worker_refuses_redirect(s: Session) -> None:
     refused_install(s, "/?redirected=1", doc_redirect=True)
 
 
-@check("worker.update-waits-for-the-tap", old=False, workers=True, copy=True)
+@check("worker.update-waits-for-the-tap", workers=True, copy=True)
 def worker_update(s: Session) -> None:
     s.allow(*LOST_SERVER)
     s.open_day()
@@ -3344,7 +3338,7 @@ def worker_update(s: Session) -> None:
     s.eq(s.rows(), s.ids(), "rows on the new version")
 
 
-@check("worker.waiting-version-is-taken-at-launch", old=False, workers=True, copy=True)
+@check("worker.waiting-version-is-taken-at-launch", workers=True, copy=True)
 def worker_update_at_boot(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -3363,7 +3357,7 @@ def worker_update_at_boot(s: Session) -> None:
     s.expect(v1 != v2 and s.rows() == s.ids(), "rows on the new version")
 
 
-@check("worker.another-window-is-offered-the-reload", old=False, workers=True, copy=True)
+@check("worker.another-window-is-offered-the-reload", workers=True, copy=True)
 def worker_two_windows(s: Session) -> None:
     s.allow(*LOST_SERVER)
     s.open_day()
@@ -3391,7 +3385,7 @@ def worker_two_windows(s: Session) -> None:
     s.expect(not s.banner("update"), "the banner after the update")
 
 
-@check("worker.deploy-during-install-leaves-the-old-version-in-charge", old=False, workers=True, copy=True)
+@check("worker.deploy-during-install-leaves-the-old-version-in-charge", workers=True, copy=True)
 def worker_redeployed(s: Session) -> None:
     s.allow(*LOST_SERVER, "http 404", "status of 404")
     s.open_day()
@@ -3422,7 +3416,7 @@ def worker_redeployed(s: Session) -> None:
 
 # ---- an expired login (plan review focus 2) ----
 
-@check("auth.banner-instead-of-a-toast", old=False)
+@check("auth.banner-instead-of-a-toast")
 def auth_banner(s: Session) -> None:
     s.allow("http 401", "status of 401")
     s.open_settle()
@@ -3471,7 +3465,7 @@ def auth_banner(s: Session) -> None:
     s.settle()
 
 
-@check("auth.expired-at-launch-with-the-shell-from-the-cache", old=False, workers=True)
+@check("auth.expired-at-launch-with-the-shell-from-the-cache", workers=True)
 def auth_launch(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_settle()
@@ -3514,7 +3508,7 @@ def auth_launch(s: Session) -> None:
     s.settle()
 
 
-@check("auth.dropped-stream-finds-the-expired-login", old=False, workers=True)
+@check("auth.dropped-stream-finds-the-expired-login", workers=True)
 def auth_stream(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -3544,7 +3538,7 @@ def auth_stream(s: Session) -> None:
     s.never(lambda: made("/api/ping") > pings, "a ping once the login is known to be gone", ms=7000)
 
 
-@check("auth.expired-login-found-when-the-line-comes-straight-back", old=False, workers=True)
+@check("auth.expired-login-found-when-the-line-comes-straight-back", workers=True)
 def auth_stream_quick(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -3591,7 +3585,7 @@ def live_again(s: Session, opened: int) -> None:
     s.settle()
 
 
-@check("stream.reopened-after-the-gateway-refused-it", old=False)
+@check("stream.reopened-after-the-gateway-refused-it")
 def stream_bad_gateway(s: Session) -> None:
     s.allow(*LOST_SERVER, "http 502", "status of 502", "request failed: GET /api/events")
     s.open_day()
@@ -3619,7 +3613,7 @@ def stream_bad_gateway(s: Session) -> None:
     s.eq(s.writes, [], "writes by the page")
 
 
-@check("stream.reopened-after-the-server-was-away", old=False)
+@check("stream.reopened-after-the-server-was-away")
 def stream_server_away(s: Session) -> None:
     s.allow(*LOST_SERVER)
     s.open_settle()
@@ -3636,7 +3630,7 @@ def stream_server_away(s: Session) -> None:
     s.eq(s.writes, [], "writes by the page")
 
 
-@check("stream.coming-back-to-the-app-refreshes-the-showing-view", old=False)
+@check("stream.coming-back-to-the-app-refreshes-the-showing-view")
 def stream_visible(s: Session) -> None:
     s.open_day()
     today = "/api/orders?date=" + s.day()
@@ -3672,7 +3666,7 @@ def stream_visible(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("stream.nothing-reopens-or-refreshes-with-the-login-expired", old=False)
+@check("stream.nothing-reopens-or-refreshes-with-the-login-expired")
 def stream_expired(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -4077,13 +4071,13 @@ def inventory_styles(s: Session) -> None:
 
 # ---- running ----
 
-def run(playwright, browser, chk: dict, today: date, shell: bool):
-    """Run one check on a server of its own. Returns (problem or None, writes)."""
+def run(playwright, browser, chk: dict, today: date):
+    """Run one check on a server of its own. Returns the problem, or None."""
     with contextlib.ExitStack() as stack:
         root = ROOT
         if chk["copy"]:
             root = copy_app(stack.enter_context(tempfile.TemporaryDirectory(prefix="ride-app-")))
-        server = Server(today, root, shell=shell)
+        server = Server(today, root)
         url = stack.enter_context(server)
         if chk["clock"] == "installed":
             ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme="dark",
@@ -4093,7 +4087,7 @@ def run(playwright, browser, chk: dict, today: date, shell: bool):
         else:
             ctx = new_context(playwright, browser, "dark", today, still=chk["still"],
                               workers=chk["workers"], desktop=chk["desktop"])
-        s = Session(ctx, url, today, shell, server)
+        s = Session(ctx, url, today, server)
         problem = None
         try:
             chk["fn"](s)
@@ -4110,14 +4104,12 @@ def run(playwright, browser, chk: dict, today: date, shell: bool):
             if s.page:
                 s.page.unroute_all(behavior="ignoreErrors")
             ctx.close()
-        return problem, list(s.writes)
+        return problem
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--only", default="", metavar="PREFIX", help="checks whose name begins with this")
-    ap.add_argument("--old-pages", action="store_true",
-                    help="also run against the separate pages and compare the writes")
     ap.add_argument("--today", type=date.fromisoformat, default=date.today(),
                     help="the day the data and both clocks are built around (default: today)")
     ap.add_argument("--list", action="store_true", help="name the checks and stop")
@@ -4126,7 +4118,7 @@ def main() -> None:
     wanted = [c for c in CHECKS if c["name"].startswith(args.only)]
     if args.list:
         for c in wanted:
-            print(c["name"] + ("" if c["old"] else "   (shell only)"))
+            print(c["name"])
         return
     if not wanted:
         raise SystemExit(f"no check begins with {args.only!r}")
@@ -4143,14 +4135,8 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.webkit.launch()
         for chk in wanted:
-            problem, writes = run(p, browser, chk, args.today, shell=True)
+            problem = run(p, browser, chk, args.today)
             report(problem is None, chk["name"], problem or "")
-            if args.old_pages and chk["old"]:
-                old_problem, old_writes = run(p, browser, chk, args.today, shell=False)
-                report(old_problem is None, chk["name"] + "  [old pages]", old_problem or "")
-                same = writes == old_writes
-                report(same, chk["name"] + f"  [same {len(old_writes)} writes as the old pages]",
-                       "" if same else f"shell {writes!r} / old {old_writes!r}")
         browser.close()
     print(f"{total} checks, {failed} failed")
     sys.exit(1 if failed else 0)

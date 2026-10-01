@@ -1,4 +1,4 @@
-"""Build a synthetic database that puts every visual state of the two pages on screen.
+"""Build a synthetic database that puts every visual state of the two views on screen.
 
     python scripts/seed_demo_db.py PATH [--today YYYY-MM-DD]
 

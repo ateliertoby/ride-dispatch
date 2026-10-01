@@ -1,4 +1,4 @@
-"""Screenshot every state of the web pages from the synthetic database.
+"""Screenshot every state of the web app from the synthetic database.
 
     python scripts/shots.py --out DIR                   shoot into DIR
     python scripts/shots.py --out DIR --compare OTHER   shoot, then compare with OTHER
@@ -14,12 +14,12 @@ app from it on a free port and stops it afterwards. Both clocks are pinned to
 produce identical images whenever they are taken. With --base-url the server
 is somebody else's: it must be serving a database seeded for the same --today,
 and its clock is its own, so figures that depend on the time of day can move.
-The server the script starts inherits the environment, so RIDE_SHELL=1 shoots
-the single-document shell and anything else the two separate pages.
+With --app-root the app is served from another checkout of the repository,
+which is how two versions are shot from the same data for a comparison.
 
-The script drives the pages through what is on screen only (classes, data
-attributes, aria labels, text), never through a page's own functions, so the
-same run can be pointed at a build whose scripts are laid out differently.
+The script drives the app through what is on screen only (classes, data
+attributes, aria labels, text), never through its own functions, so the same
+run can be pointed at a build whose scripts are laid out differently.
 """
 import argparse
 import os
