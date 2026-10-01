@@ -13,6 +13,7 @@ from ride_dispatch.parking import (
     db_time, from_db_time, db_seconds, from_db_seconds,
     free_available, next_free_at, pay_plan, classify,
     arming_orders, is_armed, pick_order, FREE_MINUTES,
+    no_entry_orders, no_entry_sessions_since, NO_ENTRY_MINUTES, NO_ENTRY_STALE_SECONDS, NO_ENTRY_TAG,
     ParkingClient, callback_token, build_pay_url, BASE_URL,
 )
 from ride_dispatch.flight import landing_datetime
@@ -383,3 +384,101 @@ def test_car_park_3_is_named_from_hkias_display_name():
     # HKIA codes Car Park 3 as CP3, which does not start with its number.
     from ride_dispatch.parking import car_park_point
     assert car_park_point("CP3", "Car Park 3") == "P3"
+
+
+# ---- a pickup planned at Car Park 4 that the car never entered ----
+
+LANDING = datetime(2026, 8, 23, 19, 0)
+DUE = LANDING + timedelta(minutes=NO_ENTRY_MINUTES)
+
+
+def p4(**kw):
+    return order(**{"pickup_point": "P4", "parking_fee": 32.0, "flight_status": "landed", **kw})
+
+
+def visit(entry: datetime, order_id=None, exit: datetime | None = None, open: bool = False):
+    return {"id": 1, "order_id": order_id, "entry_time": db_time(entry),
+            "exit_time": None if open else db_time(exit or entry + timedelta(minutes=20))}
+
+
+def due_ids(orders, sessions, now):
+    return [o["order_id"] for o in no_entry_orders(orders, sessions, now)]
+
+
+def test_no_entry_is_due_at_ninety_minutes_after_landing_and_not_before():
+    assert NO_ENTRY_MINUTES == 90
+    assert due_ids([p4()], [], DUE - timedelta(minutes=1)) == []
+    assert due_ids([p4()], [], DUE) == ["O1"]
+
+
+def test_no_entry_needs_no_flight_feed_only_a_landing_estimate():
+    o = p4(flight_status=None, flight_eta=None, flight_scheduled=None)
+    assert landing_datetime(o) == LANDING
+    assert due_ids([o], [], DUE) == ["O1"]
+
+
+@pytest.mark.parametrize("change", [
+    {"pickup_point": "P1"},
+    {"pickup_point": "富豪"},
+    {"pickup_point": None},
+    {"status": "cancelled"},
+    {"service_type": "送机"},
+    {"flight_number": ""},
+    {"flight_status": "cancelled"},
+    {"flight_eta": None, "flight_scheduled": None, "passenger_exit_minutes": None},
+    {"reminders_sent": f"depart,{NO_ENTRY_TAG},svc"},
+])
+def test_no_entry_disqualifiers_on_the_order(change):
+    assert due_ids([p4(**change)], [], DUE) == []
+
+
+def test_no_entry_other_reminder_tags_do_not_count_as_switched():
+    assert due_ids([p4(reminders_sent="depart,svc")], [], DUE) == ["O1"]
+
+
+def test_no_entry_stops_once_the_due_moment_is_stale():
+    last = DUE + timedelta(seconds=NO_ENTRY_STALE_SECONDS - 1)
+    assert due_ids([p4()], [], last) == ["O1"]
+    assert due_ids([p4()], [], last + timedelta(seconds=1)) == []
+
+
+def test_no_entry_a_visit_linked_to_the_order_disqualifies_it_whenever_it_was():
+    # Linked while the landing estimate was hours earlier than it is now.
+    early = visit(LANDING - timedelta(hours=5), order_id="O1")
+    assert due_ids([p4()], [early], DUE) == []
+
+
+def test_no_entry_another_orders_visit_inside_the_window_disqualifies():
+    # One visit collects two passengers but links to one order only.
+    shared = visit(LANDING + timedelta(minutes=10), order_id="O2")
+    assert due_ids([p4()], [shared], DUE) == []
+    unlinked = visit(LANDING + timedelta(minutes=10))
+    assert due_ids([p4()], [unlinked], DUE) == []
+
+
+def test_no_entry_window_runs_from_the_arming_start_to_now():
+    edge = visit(LANDING - timedelta(minutes=30), order_id="O2")
+    assert due_ids([p4()], [edge], DUE) == []
+    before = visit(LANDING - timedelta(minutes=31), order_id="O2")
+    assert due_ids([p4()], [before], DUE) == ["O1"]
+
+
+def test_no_entry_judges_nothing_while_a_visit_is_open():
+    inside_now = visit(LANDING - timedelta(hours=3), order_id="O2", open=True)
+    assert due_ids([p4()], [inside_now], DUE) == []
+
+
+def test_no_entry_each_order_is_judged_on_its_own_window():
+    a = p4(order_id="A", flight_eta="16:00", scheduled_time="2026-08-23 16:30:00")
+    b = p4(order_id="B", flight_eta="17:00", scheduled_time="2026-08-23 17:30:00")
+    now = datetime(2026, 8, 23, 18, 30)
+    # A visit for B's flight is after A's landing, so it falls inside A's
+    # window too: the car was at the airport and A may have been in it.
+    assert due_ids([a, b], [visit(datetime(2026, 8, 23, 17, 5), order_id="B")], now) == []
+    # A visit before B's window speaks for A only.
+    assert due_ids([a, b], [visit(datetime(2026, 8, 23, 15, 35), order_id="A")], now) == ["B"]
+
+
+def test_no_entry_sessions_since_reaches_the_oldest_window_still_judged():
+    now = DUE + timedelta(seconds=NO_ENTRY_STALE_SECONDS)
+    assert no_entry_sessions_since(now) == LANDING - timedelta(minutes=30)

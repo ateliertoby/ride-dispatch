@@ -38,6 +38,18 @@ GRACE_MINUTES = 30         # granted after the paid-until time
 AUTO_LINK_MINUTE = 50      # unpaid this long inside -> send a link unprompted
 ARM_BEFORE_MINUTES = 30    # poll from this long before predicted landing
 ARM_AFTER_HOURS = 2        # ...until this long after; no entry by then = not coming
+# A pickup planned at Car Park 4 with no visit this long after landing is taken
+# to have met its passenger at the hotel instead.
+NO_ENTRY_MINUTES = 90
+# How long past that moment the verdict may still be given, so a bot restarted
+# shortly after it catches up. No longer than the other reminders' bound: the
+# absence of a visit is only evidence while the tracker was watching, and a
+# bot that comes back later than this was down for the rest of the arming
+# window (landing + ARM_AFTER_HOURS) and beyond.
+NO_ENTRY_STALE_SECONDS = 7200
+NO_ENTRY_TAG = "noentry"   # in orders.reminders_sent once the verdict was pushed
+NO_ENTRY_FROM = "P4"
+NO_ENTRY_TO = "富豪"
 
 API_TIME = "%Y%m%d%H%M"
 DB_TIME = "%Y-%m-%d %H:%M"
@@ -222,6 +234,54 @@ def arming_orders(orders: list[dict], now: datetime) -> list[dict]:
 
 def is_armed(orders: list[dict], now: datetime) -> bool:
     return bool(arming_orders(orders, now))
+
+
+def no_entry_sessions_since(now: datetime) -> datetime:
+    """Earliest entry time that can still fall inside the window of an order
+    no_entry_orders would judge at `now`."""
+    return now - timedelta(seconds=NO_ENTRY_STALE_SECONDS,
+                           minutes=NO_ENTRY_MINUTES + ARM_BEFORE_MINUTES)
+
+
+def no_entry_orders(orders: list[dict], sessions: list[dict], now: datetime) -> list[dict]:
+    """Pickups planned at Car Park 4 whose car demonstrably never went in.
+
+    `sessions` must hold every visit still open, every visit linked to one of
+    `orders`, and every visit entered since no_entry_sessions_since(now).
+
+    Only Car Park 4 can be judged: the lookup sees every visit there, so no
+    row means no visit, while a Car Park 1 visit never produces a row at all.
+    """
+    # The car is inside right now and that visit may yet turn out to be for
+    # any of these orders.
+    if any(not s.get("exit_time") for s in sessions):
+        return []
+    linked = {s.get("order_id") for s in sessions}
+    entries = [from_db_time(s["entry_time"]) for s in sessions if s.get("entry_time")]
+    due = []
+    for o in orders:
+        if not _trackable(o) or o.get("pickup_point") != NO_ENTRY_FROM:
+            continue
+        if o.get("flight_status") == "cancelled":
+            continue
+        if NO_ENTRY_TAG in (o.get("reminders_sent") or "").split(","):
+            continue
+        landing = landing_datetime(o)
+        if landing is None:
+            continue
+        due_at = landing + timedelta(minutes=NO_ENTRY_MINUTES)
+        if now < due_at or (now - due_at).total_seconds() >= NO_ENTRY_STALE_SECONDS:
+            continue
+        if o["order_id"] in linked:
+            continue
+        # A visit that collected two passengers is linked to one order only
+        # (pick_order), so any visit entered in this order's own window counts
+        # for it, whichever order it is linked to.
+        start = landing - timedelta(minutes=ARM_BEFORE_MINUTES)
+        if any(start <= e <= now for e in entries):
+            continue
+        due.append(o)
+    return due
 
 
 def pick_order(orders: list[dict], entry: datetime) -> dict | None:
