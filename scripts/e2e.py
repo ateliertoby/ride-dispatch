@@ -47,7 +47,7 @@ CHECKS = []
 
 
 def check(name: str, old: bool = True, clock: str = "fixed", still: bool = True,
-          workers: bool = False, copy: bool = False):
+          workers: bool = False, copy: bool = False, desktop: bool = False):
     """Register a check. `old` says the separate pages can pass it too, which
     is every check that does not depend on how the shell loads its data.
     `clock` is "fixed" (Date frozen, timers real) or "installed" (the check
@@ -56,10 +56,11 @@ def check(name: str, old: bool = True, clock: str = "fixed", still: bool = True,
     `workers` lets the shell's service worker in; such a check cannot hold or
     stub a request from the page and makes the server misbehave instead
     (Server.fault). `copy` serves the app from a throwaway copy the check may
-    change, to stand for a deploy."""
+    change, to stand for a deploy. `desktop` runs it in a wide window with a
+    pointer that hovers and no touch, so it clicks where the others tap."""
     def register(fn):
         CHECKS.append({"name": name, "fn": fn, "old": old, "clock": clock, "still": still,
-                       "workers": workers, "copy": copy})
+                       "workers": workers, "copy": copy, "desktop": desktop})
         return fn
     return register
 
@@ -3690,6 +3691,390 @@ def stream_expired(s: Session) -> None:
     s.never(s.toast, "a toast for an expired login", ms=200)
     s.eq(s.rows(), shown, "rows")
 
+
+# ---- inventory items no check above reaches ----
+
+# Where the page is scrolled to, and where it would be with this row's middle
+# at the middle of the screen (as far as the document can scroll).
+CENTRED_JS = """
+el => {
+  const r = el.getBoundingClientRect();
+  const most = document.documentElement.scrollHeight - window.innerHeight;
+  const want = window.scrollY + r.top + r.height / 2 - window.innerHeight / 2;
+  return [Math.round(window.scrollY), Math.round(Math.max(0, Math.min(most, want)))];
+}
+"""
+
+# Every style rule in force, nested ones included, as [selector, declarations,
+# the media query around it].
+RULES_JS = """
+() => {
+  const out = [];
+  const walk = (rules, media) => {
+    for (const r of rules) {
+      if (r.selectorText !== undefined) out.push([r.selectorText, r.style.cssText, media]);
+      if (r.cssRules && r.cssRules.length) walk(r.cssRules, r.media ? r.media.mediaText : media);
+    }
+  };
+  for (const sheet of document.styleSheets) walk(sheet.cssRules, '');
+  return out;
+}
+"""
+
+
+@check("inventory.day-scroll")
+def inventory_day_scroll(s: Session) -> None:
+    """A7, A8, A14, C16."""
+    s.open_day()
+    nxt = ".orders .row.next"
+
+    def centred(what: str) -> None:
+        at, want = s.on(nxt).first.evaluate(CENTRED_JS)
+        s.expect(abs(at - want) <= 1, f"the NEXT row is not at the middle of the screen {what}: at {at}, want {want}")
+
+    s.expect(s.on(nxt).first.evaluate(CENTRED_JS)[1] > 0, "the NEXT row is in the middle without any scrolling")
+    centred("after the load")
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.tap(".date-btn")
+    centred("after tapping the date")
+    s.go_days(1)
+    s.go_days(-1)
+    centred("after coming back to today")
+    # The header stays at the top while the list scrolls under it.
+    s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+    s.settle()
+    s.expect(s.scroll_y() > 0, "the list does not scroll")
+    s.eq(round(s.on(".header").first.bounding_box()["y"]), 0, "header top with the list scrolled")
+    # A filter tap and a saved edit do not move the list.
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.tap(".chip", has_text="接送")
+    s.eq(s.scroll_y(), 0, "scroll after a filter tap")
+    s.tap(".chip", has_text="接送")
+    s.eq(s.scroll_y(), 0, "scroll after clearing the filter")
+    s.open_order(s.t["order"]["done_pickup"])
+    s.edit("價錢", "481")
+    s.tap(".sheet.show .sheet-x")
+    s.eq(s.scroll_y(), 0, "scroll after a saved edit")
+    # A new row is brought into view.
+    s.tap('[aria-label="入單"]')
+    quick_order(s, "foodpanda", "2350", "40", False)
+    before = s.rows()
+    s.press(".drop.show #addSave")
+    s.wait_toast("foodpanda 已入單")
+    s.settle()
+    new = [r for r in s.rows() if r not in before]
+    s.eq((len(new), s.rows()[-1] == new[0] if new else None), (1, True), "the new row, last in the list")
+    box = s.on(s.row(new[0])).first.bounding_box()
+    s.expect(s.scroll_y() > 0 and box["y"] >= 0 and box["y"] + box["height"] <= s.page.viewport_size["height"],
+             f"the new row was not scrolled into view: {box}")
+
+
+@check("inventory.now-line-after-the-last-row", clock="installed")
+def inventory_now_last(s: Session) -> None:
+    """C12, A8: with every row's time passed the NOW line closes the list."""
+    s.open_day()
+    s.page.evaluate("() => window.scrollTo(0, 0)")
+    s.page.clock.fast_forward(9 * 60 * 60 * 1000 + 30 * 60 * 1000)
+    s.wait(lambda: s.text(".orders .now .now-t").startswith("23:3"), "the NOW line to follow the clock")
+    last = s.page.evaluate("() => { const g = document.querySelector('.orders').lastElementChild;"
+                           " return [g.className, !!g.querySelector('.now')]; }")
+    s.eq(last, ["gap", True], "what closes the list")
+    s.eq(s.count(".orders .now"), 1, "NOW lines")
+    s.eq(s.count(".orders .row.next"), 0, "NEXT rows with every order done")
+    s.eq(s.scroll_y(), 0, "scroll after the minute re-render")
+
+
+@check("inventory.day-rows-and-sheet")
+def inventory_day_rows(s: Session) -> None:
+    """B2, B5, C9, D12, D13, D14, D15, D23, L8."""
+    s.open_day()
+    o = s.t["order"]
+    # The filter outlives a change made elsewhere.
+    s.tap(".chip", has_text="接送")
+    s.api("PATCH", "/api/orders/" + o["dropoff"], {"price": 455})
+    s.wait(lambda: s.text(s.row(o["dropoff"]) + " .price") == "$455", "the change made elsewhere")
+    s.expect(s.text(".chip.on").startswith("接送"), "the filter after a live update")
+    s.tap(".chip", has_text="接送")
+    # Quick orders have their own fields; an unpriced order says so in amber.
+    fields = "els => els.map(e => e.textContent)"
+    s.open_order([r for r in s.rows() if r.startswith("didi_")][0])
+    s.eq(s.page.eval_on_selector_all(".sheet.show .field-row .fk", fields), ["車費", "隧道費", "時間"], "fields of a 滴滴 order")
+    s.tap(".sheet.show .sheet-x")
+    s.open_order(o["unpriced"])
+    s.eq(s.text(".sheet.show .field-row .fv.unset"), "未入價", "the price of an unpriced order")
+    s.tap(".sheet.show .sheet-x")
+    s.open_order([r for r in s.rows() if r.startswith("foodpanda_")][0])
+    s.eq(s.page.eval_on_selector_all(".sheet.show .field-row .fk", fields), ["價錢", "時間"], "fields of a foodpanda order")
+    # Behind an open sheet the page is covered, not locked: it scrolls, and a
+    # tap where a row lies reaches the scrim and no row.
+    s.page.evaluate("() => window.scrollTo(0, 30)")
+    s.eq(s.scroll_y(), 30, "scroll behind an open sheet")
+    x, y = s.page.evaluate("""() => {
+      const top = [...document.querySelectorAll('.sheet.show')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().top;
+      const head = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().bottom;
+      for (const row of document.querySelectorAll('.orders .row')) {
+        const r = row.getBoundingClientRect();
+        const y = r.top + r.height / 2;
+        if (y > head + 4 && y < top - 4) return [r.left + r.width / 2, y];
+      }
+      return [0, 0];
+    }""")
+    s.expect(y > 0, "no row lies clear of both the header and the sheet")
+    hit = s.page.evaluate("([x, y]) => document.elementFromPoint(x, y).className", [x, y])
+    s.eq(hit, "scrim show", "what a tap on a row behind the sheet lands on")
+    s.page.touchscreen.tap(x, y)
+    s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "the scrim to close the sheet")
+    # A zero chip is dimmed and still takes a tap.
+    s.go_days(1)
+    s.tap(".chip.zero", has_text="滴滴")
+    s.eq((s.text(".chip.on"), s.text(".empty")), ("滴滴 0", "冇滴滴訂單"), "a tapped zero chip")
+    # A reload forgets the filter.
+    s.allow("request failed: GET /api/events")     # the reload cuts the event stream
+    s.page.reload()
+    s.on(".orders .row").first.wait_for()
+    s.settle()
+    s.eq(s.count(".chip.on"), 0, "the filter after a reload")
+    # A fined, collected order: the fine on the row and on the sheet.
+    s.go_days(-34)
+    fined = seed_demo_db._oid(111)
+    s.eq(s.text(s.row(fined) + " .price"), "$540−$63.45", "gross and fine on the row")
+    s.eq(s.text(s.row(fined) + " .price .pen"), "−$63.45", "the fine's badge")
+    s.open_order(fined)
+    info = s.info()
+    paid = s.back(29)
+    s.eq((info["判罰"], info["結算"]), ("−$63.45（淨收 $476.55）", f"已收 {paid.month}/{paid.day}"), "fine and settlement rows")
+    s.tap(".sheet.show .sheet-x")
+    # A car park that is none of the three shows as a fourth, fixed pill.
+    orders = s.orders(-34)
+    [x for x in orders if x["order_id"] == fined][0]["pickup_point"] = "示範停車場"
+    s.stub("GET", "**/api/orders?date=" + s.day(-34), 200,
+           json.dumps({"orders": orders, "date": s.day(-34)}), "application/json")
+    s.go_days(-1)
+    s.go_days(1)
+    s.open_order(fined)
+    s.eq(s.page.eval_on_selector_all(
+        ".sheet.show .pp-opt", "els => els.map(e => e.tagName + ' ' + e.textContent + (e.classList.contains('on') ? '*' : ''))"),
+        ["BUTTON P1", "BUTTON P4", "BUTTON 富豪", "SPAN 示範停車場*"], "pickup points")
+    s.eq(s.writes, [], "writes")
+
+
+@check("inventory.writes-in-flight")
+def inventory_in_flight(s: Session) -> None:
+    """D20, D28, E9, F2, F7, F11, F13."""
+    s.open_day()
+    s.allow("http 400", "status of 400")
+    refusal = dict(status=400, content_type="application/json", body=json.dumps({"error": "測試拒絕"}))
+    oid = s.t["order"]["dropoff"]
+    one = "/api/orders/" + oid
+    s.hold(one, "/api/orders", "/api/orders/parse")
+
+    def button(selector: str) -> tuple:
+        el = s.on(selector).first
+        return el.text_content().strip(), el.is_disabled()
+
+    # A save from the numpad.
+    s.open_order(oid)
+    s.tap(".sheet.show .field-row", has_text="價錢")
+    s.keys(".sheet.show", "450")
+    s.press(".sheet.show #npOk")
+    s.wait(lambda: s.holding(one), "the save")
+    s.eq(button(".sheet.show #npOk")[1], True, "確認 disabled while its request is in flight")
+    s.answer(one, **refusal)
+    s.wait_toast("測試拒絕")
+    s.tap(".sheet.show .sheet-x")
+    # A cancel.
+    s.tap(".sheet.show .cancel-link")
+    s.press(".sheet.show .primary-btn.danger")
+    s.wait(lambda: s.holding(one), "the cancel")
+    s.eq(button(".sheet.show .primary-btn.danger"), ("取消緊…", True), "the cancel button in flight")
+    s.answer(one, **refusal)
+    s.wait(lambda: button(".sheet.show .primary-btn.danger") == ("確認取消", False), "the cancel button to come back")
+    s.tap(".sheet.show .sheet-x")
+    s.tap(".sheet.show .sheet-x")
+    # A quick order's save.
+    s.tap('[aria-label="入單"]')
+    quick_order(s, "foodpanda", "1200", "40", False)
+    s.press(".drop.show #addSave")
+    s.wait(lambda: s.holding("/api/orders"), "the save")
+    s.eq(button(".drop.show #addSave"), ("儲存緊…", True), "the save button in flight")
+    s.answer("/api/orders", **refusal)
+    s.wait(lambda: button(".drop.show #addSave") == ("儲存", False), "the save button to come back")
+    height = s.page.viewport_size["height"]
+    s.on(".scrim").first.tap(position={"x": 8, "y": height - 8})
+    s.wait(lambda: not s.panel_open(), "the panel to close")
+    # Parsing a pasted message.
+    s.page.wait_for_timeout(2500)
+    s.tap('[aria-label="入單"]')
+    s.on(".drop.show .paste-box").first.fill(paste_message())
+    s.press(".drop.show .primary-btn", has_text="解析")
+    s.wait(lambda: s.holding("/api/orders/parse"), "the parse")
+    s.eq(button(".drop.show #parseBtn"), ("解析緊…", True), "the parse button in flight")
+    s.release("/api/orders/parse")
+    s.stage("#000002 · 入價")
+    # Saving it without a price, refused: the link comes back.
+    s.press(".drop.show #npSkip")
+    s.wait(lambda: s.holding("/api/orders"), "the save without a price")
+    s.eq(button(".drop.show #npSkip")[1], True, "the skip link in flight")
+    s.answer("/api/orders", **refusal)
+    s.wait_toast("測試拒絕")
+    s.wait(lambda: button(".drop.show #npSkip") == ("先唔入價，直接儲存", False), "the skip link to come back")
+    # Saving it at a price of its own, refused: back to the suggestion.
+    s.page.wait_for_timeout(2500)
+    s.press('.drop.show .step[data-s="10"]')
+    s.eq(s.text(".drop.show .numpad-display"), "$490", "after +$10")
+    s.press(".drop.show #npOk")
+    s.answer("/api/orders", **refusal)
+    s.wait_toast("測試拒絕")
+    s.wait(lambda: s.text(".drop.show .numpad-display") == "$480建議", "the amount to go back to the suggestion")
+    # The steppers stop at nothing.
+    for _ in range(50):
+        s.press('.drop.show .step[data-s="-10"]')
+    s.eq(s.text(".drop.show .numpad-display"), "$0", "the amount after more −$10 than it holds")
+    s.release_all()
+    s.settle()
+
+
+@check("inventory.settle-details")
+def inventory_settle(s: Session) -> None:
+    """G11, H10, H28, I5, I16, I18, I23, J5."""
+    s.open_settle()
+    b, c = s.t["batch"], s.t["credit"]
+    # The weekday heads stay with the header while the strip scrolls.
+    s.page.evaluate("() => window.scrollBy(0, 300)")
+    s.settle()
+    s.eq(round(s.on(".header").first.bounding_box()["y"]), 0, "header top with the strip scrolled")
+    wk, head = s.on(".header .wk").first.bounding_box(), s.on(".header").first.bounding_box()
+    s.expect(wk["y"] >= 0 and wk["y"] + wk["height"] <= head["y"] + head["height"] + 1, "the weekday heads left the header")
+    # A batch confirmed for less than the system expected says by how much.
+    s.open_mark(s.bar("awaiting"))
+    s.eq(s.sum_pairs(".sheet.show .sum-rows .sum-row"), [["應收", "$1290"], ["差額", "−$20"]], "expected and difference")
+    s.close_sheets()
+    # A tap on an empty day falls through to the calendar and clears a focus.
+    bar = s.bar("short")
+    s.reach(bar)
+    s.tap(bar)
+    s.expect(s.lit(), "nothing was lit by the first tap")
+    x, y = s.page.evaluate("""() => {
+      const head = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().bottom;
+      for (const cell of document.querySelectorAll('#grid .cell.none')) {
+        const r = cell.getBoundingClientRect();
+        if (r.top > head && r.bottom < window.innerHeight) return [r.left + r.width / 2, r.top + r.height / 2];
+      }
+      return [0, 0];
+    }""")
+    s.expect(y > 0, "no empty day on screen")
+    s.page.touchscreen.tap(x, y)
+    s.wait(lambda: s.lit() == [] and s.count("#grid .dim") == 0, "a tap on an empty day to clear the focus")
+    s.expect(not s.sheet_open(), "an empty day opened a sheet")
+    # The make-up payment arrives: the batch says which leg it was for.
+    s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["short"]})
+    s.wait(lambda: s.marks("bar")[b["short"]]["classes"] == {"bar", "paid"}, "the batch to be collected")
+    s.settle()
+    s.open_mark(bar)
+    notes = s.texts(".sheet.show .sub-note")
+    s.eq(notes, ["其餘 4 程", "補 …0204"], "which legs each transfer was for")
+    s.tap(".sheet.show .fold")
+    made_up = s.back(14)
+    s.expect(any(f"補收 {md_slash(made_up)}" in t for t in s.texts(".sheet.show .orow")), "the held-back leg in the order list")
+    s.close_sheets()
+    s.open_cell(26)
+    s.eq(s.texts(f'.sheet.show .orow[data-od="{seed_demo_db._oid(204)}"] .otag'), [f"補收 {md_slash(made_up)}"], "the leg on its day")
+    s.close_sheets()
+    # A focus is dropped when what it names is gone.
+    group = s.bar("group")
+    s.reach(group)
+    s.tap(group)
+    s.expect(f"bar {b['group']}" in s.lit(), "the focus on a batch")
+    s.api("DELETE", f"/api/settlements/{b['group']}")
+    s.wait(lambda: s.lit() == [] and s.count("#grid .dim") == 0, "the focus on a batch that is gone to be dropped")
+    # A read that never reaches the server.
+    s.allow("request failed: POST /api/statements/read", "Failed to load resource")
+    s.page.route("**/api/statements/read", lambda route: route.abort())
+    s.pick_statement()
+    s.wait_toast("讀唔到張圖")
+    s.eq(s.text('[aria-label="讀結算圖"]'), "圖", "the read button after a failed read")
+    s.settle()
+
+
+@check("inventory.hover-lights-and-a-click-opens", desktop=True)
+def inventory_hover(s: Session) -> None:
+    """H27, H31: a pointer that can hover makes the first ask by resting."""
+    s.open_settle()
+    bar = s.bar("short")
+    for _ in range(8):
+        if s.count(bar):
+            break
+        s.on('[aria-label="前一個月"]').first.click()
+        s.settle()
+    s.eq(round(s.page.evaluate("() => document.body.getBoundingClientRect().width")), 640, "the column on a wide screen")
+    s.on(bar).first.hover()
+    s.wait(lambda: f"bar {s.t['batch']['short']}" in s.lit(), "a resting pointer to light the relation")
+    s.expect(not s.sheet_open(), "resting on a bar opened a sheet")
+    s.on(".legend").first.hover()
+    s.wait(lambda: s.lit() == [] and s.count("#grid .dim") == 0, "the focus to clear when the pointer moves off")
+    s.on(bar).first.click()
+    s.on(".sheet.show .hero").wait_for()
+    s.eq(s.title(), "結算 " + span_label(s.back(27), s.back(25)), "the sheet one click opened")
+    s.eq(s.writes, [], "writes")
+
+
+@check("inventory.styles", still=False)
+def inventory_styles(s: Session) -> None:
+    """C17, D1, E2, F6, H29, K10, L5, L6, L7: what the stylesheets promise and
+    no tap can show."""
+    def promised(pressed_parts: tuple, safe_parts: tuple, calm_parts: tuple) -> None:
+        rules = s.page.evaluate(RULES_JS)
+
+        def need(parts: tuple, found: list, what: str) -> None:
+            for part in parts:
+                s.expect(any(part in sel for sel in found), f"{part}: {what}: {found}")
+
+        need(pressed_parts, sorted({sel for sel, _, _ in rules if ":active" in sel}), "no pressed state")
+        need(safe_parts, sorted({sel for sel, text, _ in rules if "safe-area-inset" in text}), "no safe-area inset")
+        need(calm_parts, sorted({sel for sel, _, m in rules if "prefers-reduced-motion" in m}), "still moves under reduced motion")
+
+    s.open_settle()
+    promised((".bar:active", ".cell:not(.none):active", ".orow.tap:active", ".pbtn:active", ".nav-btn:active", ".field-row:active"),
+             ("body", ".header", ".sheet", ".toast"), (".sheet", ".scrim", ".np-pad"))
+    s.open_day()
+    promised((".row:active", ".field-row:active", ".key:active", ".nav-btn:active"),
+             ("body", ".header", ".sheet", ".toast", ".drop"),
+             (".sheet", ".scrim", ".drop", ".paste-preview .sum-row", ".np-pad"))
+    # With motion on, the sheet and panel slide; with it reduced they do not.
+    def moving() -> list:
+        return s.page.evaluate("() => ['.sheet', '.scrim', '.drop'].map(q => {"
+                               " const e = [...document.querySelectorAll(q)].find(x => x.closest('#view-day') || !document.getElementById('view-day'));"
+                               " return parseFloat(getComputedStyle(e || document.querySelector(q)).transitionDuration) > 0; })")
+    s.eq(moving(), [True, True, True], "sheet, scrim and panel transitions")
+    s.page.emulate_media(reduced_motion="reduce")
+    s.eq(moving(), [False, False, False], "sheet, scrim and panel transitions under reduced motion")
+    s.page.emulate_media(reduced_motion="no-preference")
+    # The toast never takes a tap; the sheet stops at 88% of the screen.
+    toast = s.page.eval_on_selector(".toast", "e => { const c = getComputedStyle(e); return [c.pointerEvents, c.position]; }")
+    s.eq(toast, ["none", "fixed"], "the toast")
+    s.open_order(s.t["order"]["landed_banner"])
+    height = s.page.viewport_size["height"]
+    s.eq(s.page.evaluate("() => { const e = [...document.querySelectorAll('.sheet.show')].find(x => x.getClientRects().length);"
+                         " return [Math.round(parseFloat(getComputedStyle(e).maxHeight)), getComputedStyle(e).overflowY]; }"),
+         [round(height * 0.88), "auto"], "the sheet's height limit")
+    s.eq(s.count(".sheet.show .grab"), 1, "grab bars")
+    s.tap(".sheet.show .sheet-x")
+    # One text input in the whole app, at 16px.
+    s.tap('[aria-label="入單"]')
+    s.stage("入單")
+    s.eq(s.page.evaluate("() => [...document.querySelectorAll('textarea, input:not([type=file])')].map(e => e.className)"),
+         ["paste-box"], "text inputs")
+    s.eq(s.page.eval_on_selector(".paste-box", "e => getComputedStyle(e).fontSize"), "16px", "the paste box's text size")
+    s.on(".drop.show .paste-box").first.fill(paste_message())
+    s.press(".drop.show .primary-btn", has_text="解析")
+    s.on(".drop.show .paste-preview").wait_for()
+    s.eq(s.page.eval_on_selector(".drop.show .paste-preview", "e => getComputedStyle(e).overflowY"), "auto", "the preview scrolls inside itself")
+    s.eq(s.page.eval_on_selector(".drop.show", "e => getComputedStyle(e).overflowY"), "hidden", "the panel does not scroll")
+    s.settle()
+
 # ---- running ----
 
 def run(playwright, browser, chk: dict, today: date, shell: bool):
@@ -3707,7 +4092,7 @@ def run(playwright, browser, chk: dict, today: date, shell: bool):
             ctx.clock.install(time=demo_now(today))
         else:
             ctx = new_context(playwright, browser, "dark", today, still=chk["still"],
-                              workers=chk["workers"])
+                              workers=chk["workers"], desktop=chk["desktop"])
         s = Session(ctx, url, today, shell, server)
         problem = None
         try:

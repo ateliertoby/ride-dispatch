@@ -266,17 +266,23 @@ class Server:
 
 # ---- the browser ----
 
+DESKTOP = {"viewport": {"width": 1000, "height": 800}}
+
+
 def new_context(playwright, browser, scheme: str, today: date, still: bool = True,
-                workers: bool = False):
+                workers: bool = False, desktop: bool = False):
     """A context shaped like the operator's phone, its clock pinned to the
     demo hour. Date is frozen and timers keep running: the NOW line and the
-    done-dimming stay put, and the pages' own timeouts still fire.
+    done-dimming stay put, and the app's own timeouts still fire.
+
+    `desktop` shapes it like a desktop browser instead: a wide window and a
+    pointer that hovers, with no touch.
 
     The shell's service worker is refused unless `workers` is set. A page a
     worker controls is out of reach of request interception in WebKit, which
     most checks depend on, and a worker installing in the background would
     make the moment a page comes to rest depend on timing."""
-    ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme=scheme,
+    ctx = browser.new_context(**(DESKTOP if desktop else playwright.devices[DEVICE]), color_scheme=scheme,
                               timezone_id=TIMEZONE, locale="zh-HK",
                               service_workers="allow" if workers else "block")
     if still:
