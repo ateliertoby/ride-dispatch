@@ -257,35 +257,49 @@ body[data-view="day"] .toast { bottom: calc(78px + env(safe-area-inset-bottom));
 :where(.view-day) {
   .st.turn { animation: st-turn .5s cubic-bezier(.2,0,.2,1); backface-visibility: hidden; }
 
-  /* ---- sheet ---- */
+  /* ---- panels ---- */
   /* Paste panel drops from the top: it opens right under the finger that
      tapped "+", and a top-anchored panel is not displaced by the iOS keyboard */
   .drop {
     position: fixed; z-index: 21; left: 0; right: 0; top: 0;
     max-width: 480px; margin: 0 auto; max-height: 100dvh;
-    background: var(--sheet-bg); border-radius: 0 0 18px 18px;
-    padding: calc(12px + env(safe-area-inset-top)) 18px 16px;
+    background: var(--sheet-bg); border-bottom: 1px solid var(--line);
+    padding: calc(14px + env(safe-area-inset-top)) var(--gutter) 16px;
     overflow: hidden;
     transform: translateY(-105%);
     transition: transform .3s cubic-bezier(.32,.72,.35,1), height .3s cubic-bezier(.32,.72,.35,1);
   }
   .drop.show { transform: translateY(0); }
   .paste-box {
-    width: 100%; margin-top: 12px; padding: 12px;
-    background: var(--key-bg); color: var(--text);
+    display: block; width: 100%; margin-top: 4px; padding: 12px;
+    background: var(--bg); color: var(--text);
     /* 16px floor: iOS Safari auto-zooms the page when focusing any
        input/textarea whose font-size is below 16px */
-    border: none; border-radius: 12px; font-size: 16px; font-family: inherit;
+    border: 1px solid var(--line); border-radius: 3px; font-size: 16px; line-height: 1.4; font-family: inherit;
     resize: vertical; min-height: 150px;
   }
-  .quick-types { display: flex; gap: 8px; margin-top: 14px; }
+  .paste-box:focus { outline: none; border-color: var(--text-2); }
+  .paste-box::placeholder { color: var(--text-3); }
+  /* The three quick orders: outlined keys, told apart by their names. */
+  .quick-types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
   .quick-type-btn {
-    flex: 1; border: none; border-radius: 10px; padding: 10px 0;
-    background: var(--key-bg); font-size: 14px; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 3px; padding: 11px 0;
+    background: none; color: var(--text); font-size: 14px; line-height: 1.35; cursor: pointer;
   }
-  .quick-type-btn.didi { color: var(--didi-fg); }
-  .quick-type-btn.uber { color: var(--uber-fg); }
-  .quick-type-btn.foodpanda { color: var(--fp-fg); }
+  .quick-type-btn:active { background: var(--surface-press); }
+
+  /* A summary before a save: a ledger, label left and figure right, with a
+     hairline under each line and the total in bold. */
+  .sum-rows { padding: 0; border-top: 1px solid var(--line); }
+  .sum-row {
+    align-items: baseline; gap: 12px; padding: 10px 0 9px;
+    border-bottom: 1px solid var(--line); font-size: 15px; line-height: 1.35;
+  }
+  .sum-row .k { font-size: 13px; flex-shrink: 0; }
+  .sum-row .v { font-weight: 400; min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .sum-row.total .k { color: var(--text); font-weight: 600; }
+  .sum-row.total .v { font-size: 17px; font-weight: 700; }
+
   .paste-preview {
     padding: 4px 0 0; border-bottom: 1px solid var(--line); margin-bottom: 2px;
     max-height: 28vh; overflow-y: auto;

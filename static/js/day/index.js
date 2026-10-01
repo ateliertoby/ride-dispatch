@@ -528,7 +528,7 @@ function closeSheet() {
 }
 function sheetHead(title, sub) {
   return '<div class="sheet-head"><div class="sheet-title">' + title + '</div>' +
-    '<button class="sheet-x" onclick="rd.day.popView()">&#10005;</button></div>' +
+    '<button class="sheet-x" onclick="rd.day.popView()" aria-label="關閉">&#10005;</button></div>' +
     (sub ? '<div class="sheet-sub">' + sub + '</div>' : '');
 }
 
@@ -614,7 +614,7 @@ function openAdd() {
 
 function addFormView(el) {
   el.insertAdjacentHTML('beforeend',
-    sheetHead('入單', esc(addState.date) + ' 星期' + weekday(addState.date)) +
+    sheetHead('入單', '<span class="num">' + esc(addState.date) + '</span> 星期' + weekday(addState.date)) +
     '<textarea class="paste-box" id="pasteBox" placeholder="喺度貼訂單 message"></textarea>' +
     '<button class="primary-btn" id="parseBtn">解析</button>' +
     '<div class="quick-types">' +
@@ -654,7 +654,7 @@ function addFormView(el) {
 function addTimeView() {
   const meta = TYPE_META[addState.type];
   return numpadView({
-    title: meta.label + ' · 時間', hint: esc(addState.date), mode: 'time',
+    title: meta.label + ' · 時間', hint: addState.date, mode: 'time',
     onConfirm: v => { addState.time = v; pushView(addPriceView()); },
   });
 }
@@ -694,10 +694,10 @@ function addConfirmView(sheet) {
   sheet.insertAdjacentHTML('beforeend',
     sheetHead(meta.label + ' · 確認', '') +
     '<div class="sum-rows">' +
-    rows.map(r => '<div class="sum-row"><span class="k">' + esc(r[0]) + '</span><span class="v">' + esc(r[1]) + '</span></div>').join('') +
+    rows.map(r => '<div class="sum-row"><span class="k">' + esc(r[0]) + '</span><span class="v num">' + tight(esc(r[1])) + '</span></div>').join('') +
     (addState.tunnel ? '<div class="sum-row total"><span class="k">' +
-      (addState.type === 'uber' ? '總收入' : '淨收入') + '</span><span class="v">$' +
-      $(addState.type === 'uber' ? price : net) + '</span></div>' : '') +
+      (addState.type === 'uber' ? '總收入' : '淨收入') + '</span><span class="v num">' +
+      tight('$' + $(addState.type === 'uber' ? price : net)) + '</span></div>' : '') +
     '</div>' +
     '<button class="primary-btn" id="addSave">儲存</button>' +
     '<button class="ghost-btn" onclick="rd.day.popView()">返上一步</button>'
