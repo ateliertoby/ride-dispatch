@@ -391,6 +391,24 @@ class Driver:
             self.tap('[aria-label="前一個月"]')
         raise RuntimeError(f"not on the strip after 8 months back: {selector}")
 
+    def to_top(self, selector: str) -> None:
+        """Put the week row holding a mark at the top of the strip, clear of
+        the sticky header and the fixed foot. The strip can grow as it is
+        scrolled, so this is repeated until the row stays there."""
+        for _ in range(6):
+            moved = self.page.evaluate("""sel => {
+              const seen = e => e.getClientRects().length;
+              const row = [...document.querySelectorAll(sel)].find(seen).closest('.wkblock');
+              const head = [...document.querySelectorAll('.header')].find(seen).getBoundingClientRect().bottom;
+              const by = row.getBoundingClientRect().top - head;
+              window.scrollBy(0, by);
+              return by;
+            }""", selector)
+            self.settle()
+            if abs(moved) < 1:
+                return
+        raise RuntimeError(f"the strip never came to rest under {selector}")
+
     def keys(self, host: str, digits: str) -> None:
         """Type on the on-screen numpad inside `host`."""
         for d in digits:
@@ -451,6 +469,30 @@ def stress_strip(ctx, today: date) -> None:
         return handler
     ctx.route("**/api/settle?*", rewrite(stress_settle))
     ctx.route("**/api/credits?*", rewrite(stress_credits))
+
+
+# What POST /api/statements/read answers for a statement that can be settled,
+# in the words statement_flow.prepare prints: a held-back leg, a leg the
+# platform priced differently, and a credit that could be its payment. The
+# numbers are the seed's own.
+STATEMENT_SAMPLE = {
+    "token": "demo-token",
+    "report": ("結算單 YY0000 · 3 日 4 行 · 平台 $1,820\n\n9月28日 · 1 行 · $415\n  抽起  #…0601  $525（今次冇計）\n"
+               "  8800000000000601\n9月29日 · 1 行 · $485 ✓\n9月30日 · 2 行 · $920\n"
+               "  金額唔同  #…0012  平台 $380 · 系統 $400\n  8800000000000012\n\n系統應收 $1,840 · 差額 −$20"),
+    "credit_line": "入數可能係：\n入數 $2,870 · 10-01",
+    "confirm_label": "照平台數確認 · 4 程 · $1,820（差額 −$20）", "can_settle": True, "no_orders_offer": None,
+}
+
+LONG_REF = "HSBCNET-DEMO-20261001-0000000000000042-SUPPLIERPAYMENT-REF"
+LONG_MEMO = "DEMO PLATFORM LTD SUPPLIER PAYMENT FOR STATEMENTS OF SEPTEMBER WEEK FOUR 示範備註"
+
+
+def stress_sheets(body: dict) -> None:
+    """Rewrite the answer from /api/credits so a credit's sheet carries a
+    reference and a memo far longer than its line."""
+    for c in body["credits"]:
+        c.update(ref=LONG_REF, memo=LONG_MEMO)
 
 
 def paste_message() -> str:

@@ -6,7 +6,10 @@
 
 Each state is saved as `<state>-dark.png` and `<state>-light.png`, taken in
 Playwright WebKit as an iPhone 14. Every state is taken a second time in a
-window 340 wide (`<state>-340-…`), where the columns are tightest;
+window 340 wide (`<state>-340-…`), where the columns are tightest, and the
+settle view's a third time 1000 wide (`<state>-1000-…`), under its desktop
+rule; `stress-sheet-…` is its sheets with seven-figure amounts and a bank
+reference longer than a line;
 `stress-<width>-…` is the day view with long names, every mark and wide
 fares at each width it is laid out for, and `stress-settle-…` is the settle
 strip with seven-figure labels, a week of five lanes, a batch in three runs
@@ -36,12 +39,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (ROOT, SCHEMES, Driver, Server, new_context, paste_message,  # noqa: E402
-                     stress_strip)
+from harness import (ROOT, SCHEMES, STATEMENT_SAMPLE, Driver, Server, new_context,  # noqa: E402
+                     paste_message, stress_sheets, stress_strip)
 
 
-# The narrow window every state is shot at a second time.
+# The narrow window every state is shot at a second time, and the wide one
+# the settle view's states are shot at a third time, where its desktop rule
+# applies.
 NARROW = 340
+WIDE = 1000
 
 # The widths the day view is shot at with the rows under stress: the narrowest
 # and the widest it is laid out for, and the two phone widths between.
@@ -151,19 +157,7 @@ class Shooter(Driver):
         the strip may still be growing above it, and where that comes to rest
         depends on timing; put there beforehand, the tap moves nothing."""
         super().reach(selector)
-        for _ in range(6):
-            moved = self.page.evaluate("""sel => {
-              const seen = e => e.getClientRects().length;
-              const row = [...document.querySelectorAll(sel)].find(seen).closest('.wkblock');
-              const head = [...document.querySelectorAll('.header')].find(seen).getBoundingClientRect().bottom;
-              const by = row.getBoundingClientRect().top - head;
-              window.scrollBy(0, by);
-              return by;
-            }""", selector)
-            self.settle()
-            if abs(moved) < 1:
-                return
-        raise RuntimeError(f"the strip never came to rest under {selector}")
+        self.to_top(selector)
 
     def open_mark(self, selector: str, ready: str) -> None:
         """A bar or chip: the first tap lights its relation, the second opens it."""
@@ -363,6 +357,54 @@ def states() -> dict:
         s.on(".sheet.show [data-unlinkgo]").wait_for()
         s.save("settle-unlink")
 
+    def settle_statement(s):
+        s.settle_page()
+        s.page.route("**/api/statements/read", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(STATEMENT_SAMPLE)))
+        s.page.locator("#stmtFile").set_input_files(
+            {"name": "statement.png", "mimeType": "image/png", "buffer": seed_demo_db._png()})
+        s.on(".sheet.show .stmt-report").wait_for()
+        s.settle()
+        s.save("settle-statement")
+
+    def settle_drop(s):
+        s.settle_page()
+        s.page.evaluate("""() => {
+          const dt = new DataTransfer();
+          dt.items.add(new File(['x'], 'statement.png', { type: 'image/png' }));
+          document.body.dispatchEvent(new DragEvent('dragenter', { dataTransfer: dt, bubbles: true, cancelable: true }));
+        }""")
+        s.on(".drop.show").wait_for()
+        s.save("settle-drop")
+
+    def sheets_stressed(width):
+        """The sheets with what strains a line: seven-figure amounts with
+        cents in a batch paid short, and a credit whose reference and memo
+        are longer than the sheet is wide."""
+        def credits(route):
+            body = route.fetch().json()
+            stress_sheets(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+        def run(s):
+            s.viewport = {"width": width, "height": 844}
+            stress_strip(s.ctx, date.fromisoformat(s.t["today"]))
+            try:
+                s.batch_sheet("short")
+                s.on(".sheet.show .up-sec").wait_for()
+                s.save(f"stress-sheet-batch-{width}")
+                s.done()
+            finally:
+                s.ctx.unroute("**/api/settle?*")
+                s.ctx.unroute("**/api/credits?*")
+            s.ctx.route("**/api/credits?*", credits)
+            try:
+                s.open_mark(f'[data-chip="{s.t["credit"]["partial"]}"]', ".sheet.show .hero")
+                s.save(f"stress-sheet-credit-{width}")
+            finally:
+                s.ctx.unroute("**/api/credits?*")
+        return run
+
     def settle_stressed(width, focus):
         def run(s):
             # Tall enough for two months of the strip above the fixed foot.
@@ -383,6 +425,13 @@ def states() -> dict:
         def run(s):
             s.viewport = {"width": NARROW, "height": 844}
             s.suffix = f"-{NARROW}"
+            fn(s)
+        return run
+
+    def wide_of(fn):
+        def run(s):
+            s.viewport = {"width": WIDE, "height": 800}
+            s.suffix = f"-{WIDE}"
             fn(s)
         return run
 
@@ -410,8 +459,11 @@ def states() -> dict:
         "settle-batch-list": settle_batch_list, "settle-batch-ahead": settle_batch_ahead,
         "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
         "settle-undo": settle_undo, "settle-unlink": settle_unlink,
+        "settle-statement": settle_statement, "settle-drop": settle_drop,
     }
     return (wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()}
+            | {f"{name}-{WIDE}": wide_of(fn) for name, fn in wide.items() if name.startswith("settle")}
+            | {f"stress-sheet-{w}": sheets_stressed(w) for w in (NARROW, 390)}
             | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS}
             | {f"stress-settle-{'focus-' if f else ''}{w}": settle_stressed(w, f)
                for w in (NARROW, 390) for f in (False, True)})

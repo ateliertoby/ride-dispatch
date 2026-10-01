@@ -213,6 +213,15 @@ LABELS_JS = """
         if (mark.matches('.makeup:not(.out)') && (r.left < m.left || r.right > m.right)) bad.push('label crosses its outline: ' + name);
         if (mark.matches('.makeup.out') && r.left < m.right && m.left < r.right) bad.push('label over its outline: ' + name);
       }
+      // A bar's label starts inside the bar's padding, whatever it does at
+      // its far end, or stands whole beside the bar, clear of its edge and
+      // of the outline a focus draws round it: it never starts on the edge.
+      if (mark.matches('.bar:not(.makeup)')) {
+        const m = mark.getBoundingClientRect();
+        const inside = r.left >= m.left + 3.5 && r.left < m.right, beside = r.right <= m.left - 3.5;
+        if (!inside && !beside) bad.push('label starts on the edge of its bar (' + (m.left - r.left).toFixed(1) + '): ' + name);
+        if (mark.matches('.out') !== beside) bad.push('label beside its bar and not marked so, or the reverse: ' + name);
+      }
       for (const o of seen) {
         if (o.row === row && o.r.left < r.right - 0.5 && r.left < o.r.right - 0.5) bad.push('overlap: ' + o.name + ' / ' + name);
       }
@@ -2968,7 +2977,7 @@ def settle_batch_sheets(s: Session) -> None:
     s.eq(s.count(".sheet.show .orow"), 0, "order rows while folded")
     s.tap(".sheet.show .fold")
     s.eq(s.texts(".sheet.show .oday"), [md_label(s.back(n)) + " 星期" + WEEKDAY[s.back(n).weekday()] for n in (34, 33)], "day headings")
-    s.eq(s.texts(".sheet.show .orow .oa"), ["$476.55 · 判罰 −$63.45", "$420", "$480"], "order figures")
+    s.eq(s.texts(".sheet.show .orow .oend"), ["$476.55判罰 −$63.45", "$420", "$480"], "order figures")
     # The fold survives a change made elsewhere.
     s.api("PATCH", "/api/orders/" + o(12), {"price": 401})
     s.wait(lambda: s.text(s.cell(1) + " .amt") == "$941", "the change made elsewhere")
@@ -3323,6 +3332,265 @@ def settle_order_refetch(s: Session) -> None:
     s.eq(s.count(".sheet.show .order-err"), 0, "the error once the order was read")
     s.eq(s.writes, [], "writes by the page")
     s.settle()
+
+
+# ---- settle view: how the sheets are drawn ----
+
+# The showing sheet, measured: its panel, what lies over its last control,
+# anything in it that is cut instead of wrapped, and any field iOS would zoom
+# the page for.
+SHEET_JS = """
+() => {
+  const seen = e => e.getClientRects().length > 0;
+  const sheet = [...document.querySelectorAll('.sheet.show')].find(seen);
+  const cs = getComputedStyle(sheet), box = sheet.getBoundingClientRect();
+  sheet.scrollTop = sheet.scrollHeight;
+  const last = [...sheet.querySelectorAll('button, a')].filter(seen).pop();
+  const lr = last.getBoundingClientRect();
+  const hit = document.elementFromPoint(lr.left + lr.width / 2, lr.top + lr.height / 2);
+  const cut = [...sheet.querySelectorAll('*')].filter(seen).filter(e => {
+    const c = getComputedStyle(e);
+    return c.textOverflow === 'ellipsis' || (c.overflowX !== 'visible' && e !== sheet && e.scrollWidth > e.clientWidth + 1);
+  }).map(e => e.className);
+  const wide = [...sheet.querySelectorAll('*')].filter(seen).filter(e => {
+    const r = e.getBoundingClientRect();
+    return r.left < box.left - 0.5 || r.right > box.right + 0.5;
+  }).map(e => e.className || e.tagName);
+  sheet.scrollTop = 0;
+  return {
+    radius: cs.borderTopLeftRadius, edge: cs.borderTopWidth, grab: sheet.querySelectorAll('.grab').length,
+    scrolls: cs.overflowY, bottom: Math.round(window.innerHeight - box.bottom),
+    tall: box.height <= window.innerHeight * 0.88 + 1,
+    lastHit: !!hit && (hit === last || last.contains(hit)),
+    overFoot: (() => { const f = [...document.querySelectorAll('.foot')].find(seen); if (!f) return true;
+      const r = f.getBoundingClientRect(); const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return !!top && !f.contains(top); })(),
+    cut, wide, sideways: document.documentElement.scrollWidth > window.innerWidth,
+    small: [...document.querySelectorAll('#view-settle textarea, #view-settle select, #view-settle input:not([type=file])')]
+      .filter(e => parseFloat(getComputedStyle(e).fontSize) < 16).map(e => e.className || e.id || e.tagName),
+  };
+}
+"""
+
+SHEET_WANT = {"radius": "0px", "edge": "1px", "grab": 0, "scrolls": "auto", "bottom": 0, "tall": True,
+              "lastHit": True, "overFoot": True, "cut": [], "wide": [], "sideways": False, "small": []}
+
+
+def every_settle_sheet(s: Session, look) -> None:
+    """Open each kind of sheet the settle view has, one after another, and
+    call look(name) with it showing."""
+    o = seed_demo_db._oid
+    s.open_cell(26)
+    look("day")
+    s.open_leg(o(203))
+    look("order")
+    s.tap(".sheet.show .field-row", has_text="停車費")
+    look("numpad")
+    s.close_sheets()
+    s.open_cell(1)
+    s.open_leg(o(12))
+    s.tap(".sheet.show .cancel-link")
+    look("cancel confirm")
+    s.close_sheets()
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    look("batch paid short")
+    s.close_sheets()
+    s.open_mark(s.bar("held_back"))
+    s.tap(".sheet.show .fold")
+    look("batch with its list open")
+    s.tap(".sheet.show .xbtn")
+    look("解除入數")
+    s.tap(".sheet.show .sheet-back")
+    s.tap(".sheet.show [data-undo]")
+    look("undo")
+    s.close_sheets()
+    s.open_mark(s.bar("ahead"))
+    look("batch with its own lines")
+    s.close_sheets()
+    s.open_mark(s.chip("partial"))
+    look("credit")
+    s.close_sheets()
+    s.tap(".foot [data-credits]")
+    look("queue")
+    s.close_sheets()
+    s.stub("POST", "**/api/statements/read", 200, json.dumps(STATEMENT_READ), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    look("statement")
+    s.close_sheets()
+    s.page.unroute("**/api/statements/read")
+
+
+@check("settle.sheets-are-flat-panels-at-every-width")
+def settle_sheet_panels(s: Session) -> None:
+    """Each sheet is the flat panel the order's sheet is: a hairline at the
+    top, no corner and no grab bar, scrolling inside itself, lying over the
+    foot with its last control in reach, nothing in it cut short or wider
+    than it, and no field under 16px. At the narrow phone, the usual one and
+    the desktop rule."""
+    s.open_settle()
+    s.reach(s.bar("paid"))
+    for width in (390, 340, 1000):
+        if width != 390:
+            s.resize(width)
+        every_settle_sheet(s, lambda name: s.eq(s.page.evaluate(SHEET_JS), SHEET_WANT, f"the {name} sheet at {width}"))
+    s.eq(len(s.writes), 3, "writes (the three statement reads)")
+
+
+@check("settle.order-rows-share-one-grid")
+def settle_row_grid(s: Session) -> None:
+    """Time, number and figure start on the same lines down a list, in the
+    day sheet, a batch's list and the tick list; the tick list has a square
+    box before the time and is otherwise the same row."""
+    rows_js = """() => {
+      const seen = e => e.getClientRects().length > 0;
+      const sheet = [...document.querySelectorAll('.sheet.show')].find(seen);
+      const edge = sheet.getBoundingClientRect().left + parseFloat(getComputedStyle(sheet).paddingLeft);
+      const x = (e, side) => Math.round((e.getBoundingClientRect()[side] - edge) * 2) / 2;
+      const mono = e => getComputedStyle(e).fontFamily.includes('B612 Mono');
+      const rows = [...sheet.querySelectorAll('.orow')];
+      const set = f => [...new Set(rows.map(f))];
+      const box = rows[0].querySelector('.up-chk');
+      const b = box && box.getBoundingClientRect();
+      return {
+        n: rows.length,
+        box: box ? [Math.round(b.width), Math.round(b.height), x(box, 'left')] : null,
+        boxes: sheet.querySelectorAll('.orow .up-chk').length,
+        time: set(r => x(r.querySelector('.ot'), 'left')),
+        number: set(r => x(r.querySelector('.ol'), 'left')),
+        end: set(r => Math.round(sheet.getBoundingClientRect().right - r.querySelector('.oend').getBoundingClientRect().right)),
+        mono: rows.every(r => mono(r.querySelector('.ot .num')) && mono(r.querySelector('.oid')) &&
+                              [...r.querySelectorAll('.oa .num')].every(mono)),
+        words: rows.every(r => !mono(r.querySelector('.oll'))),
+        whole: rows.every(r => r.querySelector('.oid').textContent.replace(/\\s/g, '') ===
+                               (r.dataset.od || r.dataset.uptick || r.querySelector('.oid').dataset.copy)),
+        pills: [...sheet.querySelectorAll('.otag')].filter(e => {
+          const c = getComputedStyle(e);
+          return c.backgroundColor !== 'rgba(0, 0, 0, 0)' || parseFloat(c.borderTopLeftRadius) > 3; }).length,
+        heads: [...sheet.querySelectorAll('.oday')].map(e => getComputedStyle(e).letterSpacing !== 'normal'),
+      };
+    }"""
+    s.open_settle()
+    s.reach(s.bar("paid"))
+    s.open_cell(26)
+    day = s.page.evaluate(rows_js)
+    s.eq((day["n"], day["box"], day["boxes"], len(day["time"]), len(day["number"]), day["end"]),
+         (2, None, 0, 1, 1, [16]), "the day sheet's rows")
+    s.expect(day["mono"] and day["words"] and day["whole"] and not day["pills"], f"the day sheet's rows: {day}")
+    s.close_sheets()
+    s.open_mark(s.bar("held_back"))
+    s.tap(".sheet.show .fold")
+    read = s.page.evaluate(rows_js)
+    s.eq((read["n"], read["boxes"], read["time"], read["number"], read["end"], read["heads"]),
+         (4, 0, day["time"], day["number"], [16], [True, True, True]), "a batch's list against the day sheet's")
+    s.expect(read["mono"] and read["words"] and read["whole"] and not read["pills"], f"a batch's list: {read}")
+    s.close_sheets()
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    tick = s.page.evaluate(rows_js)
+    s.eq((tick["n"], tick["boxes"], tick["box"], len(tick["time"]), len(tick["number"]), tick["end"]),
+         (5, 5, [18, 18, 0], 1, 1, [16]), "the tick list")
+    # The box and its gap are all the other columns move by.
+    s.eq((tick["time"][0] - day["time"][0], tick["number"][0] - day["number"][0]), (28, 28), "what the box moves")
+    s.expect(tick["mono"] and tick["words"] and tick["whole"] and not tick["pills"], f"the tick list: {tick}")
+    # The same at the narrowest phone, where a number may wrap but is whole.
+    s.close_sheets()
+    s.resize(340)
+    # The bar is still the focus, so one tap opens it.
+    s.to_top(s.bar("short"))
+    s.tap(s.bar("short"))
+    s.on(".sheet.show .up-sec").wait_for()
+    narrow = s.page.evaluate(rows_js)
+    s.eq((narrow["boxes"], len(narrow["time"]), len(narrow["number"]), narrow["end"], narrow["whole"]),
+         (5, 1, 1, [16], True), "the tick list at 340")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.sheet-actions-and-states")
+def settle_sheet_actions(s: Session) -> None:
+    """What moves money is a key a thumb can hit; state is said by a solid
+    block or by coloured text, in the four colours and no other."""
+    def box(selector: str) -> dict:
+        return s.on(selector).first.evaluate(
+            "e => { const c = getComputedStyle(e), r = e.getBoundingClientRect();"
+            " return { h: r.height, bg: c.backgroundColor, ink: c.color, line: c.borderTopColor, radius: c.borderTopLeftRadius }; }")
+
+    s.open_settle()
+    clear = "rgba(0, 0, 0, 0)"
+    green, amber, red, blue = (s.token(n) for n in ("--green", "--amber", "--red", "--blue"))
+    ink, ground, solid = s.token("--text"), s.token("--bg"), s.token("--on-solid")
+    # The queue: rows that open a credit, and the keys under them.
+    s.tap(".foot [data-credits]")
+    s.expect(all(h >= 44 for h in s.page.eval_on_selector_all(
+        ".sheet.show .qrow, .sheet.show .qitem", "els => els.map(e => e.getBoundingClientRect().height)")), "a queue row under 44px")
+    for sel in (".sheet.show .pbtn[data-alloc-credit]", ".sheet.show .pbtn[data-alloc-all]"):
+        key = box(sel)
+        s.expect(key["h"] >= 44 and key["bg"] == clear and key["radius"] == "3px", f"{sel} is not an outlined key 44px tall: {key}")
+    s.eq(s.colour(".sheet.show .qrow .s"), blue, "未對 in the queue")
+    s.close_sheets()
+    # A credit: the group row's block and key.
+    s.open_mark(s.chip("group"))
+    tag = box(".sheet.show .ptag")
+    s.eq((tag["bg"], tag["ink"]), (green, solid), "啱數 is a solid green block")
+    s.expect(box(".sheet.show .pbtn")["h"] >= 44, "對晒 under 44px")
+    s.eq(s.colour(".sheet.show .hero-s"), blue, "an unmatched credit's state line")
+    s.expect("B612 Mono" in s.colour(".sheet.show .hero-v", "fontFamily"), "the headline figure is not in the figure face")
+    s.expect("B612 Mono" in s.colour(".sheet.show .sum-row .v .num", "fontFamily"), "the reference is not in the figure face")
+    s.expect("B612 Mono" not in s.on(".sheet.show .sum-row", has_text="備註").first.locator(".v").evaluate(
+        "e => getComputedStyle(e).fontFamily"), "a memo is set in the figure face")
+    s.close_sheets()
+    # A batch paid short: the long key, the small one, the ticks' foot.
+    s.open_mark(s.bar("short"), ".sheet.show .up-sec")
+    s.eq(s.colour(".sheet.show .hero-s"), amber, "a short-paid batch's state line")
+    long = s.on(".sheet.show .pbtn", has_text="對 $300（差 $80）").first
+    s.expect(long.bounding_box()["height"] >= 44, "the long key under 44px")
+    hit = s.page.evaluate("""() => {
+      const seen = e => e.getClientRects().length > 0;
+      const k = [...document.querySelectorAll('.sheet.show .xbtn')].find(seen), r = k.getBoundingClientRect();
+      const at = y => { const e = document.elementFromPoint(r.left + r.width / 2, y); return !!e && e.closest('.xbtn') === k; };
+      return [r.height < 44, at(r.top + r.height / 2 - 21), at(r.top + r.height / 2 + 21)];
+    }""")
+    s.eq(hit, [True, True, True], "解除 is small and takes a tap 44px tall")
+    s.eq((s.colour(".sheet.show .up-sum"), s.on(".sheet.show .up-btn").first.is_enabled()), (green, True), "ticks that add up")
+    save = box(".sheet.show .up-btn")
+    s.expect(save["h"] >= 44 and (save["bg"], save["ink"]) == (ink, ground), f"記低 is not a solid key 44px tall: {save}")
+    o = seed_demo_db._oid
+    s.tap(f'.sheet.show [data-uptick="{o(204)}"] .up-chk')
+    s.eq((s.colour(".sheet.show .up-sum"), s.on(".sheet.show .up-btn").first.is_enabled()), (amber, False), "ticks that do not")
+    off = box(".sheet.show .up-btn")
+    s.expect(off["bg"] == clear and off["h"] >= 44, f"記低 disabled is not an outline: {off}")
+    s.tap(f'.sheet.show [data-uptick="{o(204)}"] .up-chk')
+    s.eq(s.colour(f'.sheet.show [data-uptick="{o(204)}"] .otag'), amber, "未過數 on a ticked row")
+    # Destructive: a red outline where it is offered, solid red where it is confirmed.
+    undo = box(".sheet.show [data-undo]")
+    s.eq((undo["bg"], undo["ink"], undo["line"]), (clear, red, red), "撤銷結算")
+    s.expect(undo["h"] >= 44 and box(".sheet.show .ghost-btn:not(.danger)")["h"] >= 44, "a closing key under 44px")
+    s.tap(".sheet.show [data-undo]")
+    go = box(".sheet.show [data-undogo]")
+    s.eq((go["bg"], go["ink"]), (red, solid), "確認撤銷")
+    s.close_sheets()
+    # A collected batch and a day on it: finished is green, as text.
+    s.open_mark(s.bar("paid"))
+    s.eq(s.colour(".sheet.show .hero-s"), green, "a collected batch's state line")
+    s.expect(s.on(".sheet.show .fold").first.bounding_box()["height"] >= 44, "the fold under 44px")
+    s.close_sheets()
+    s.open_cell(26)
+    s.eq([s.colour(".sheet.show .otag.paid"), s.colour(".sheet.show .otag.unsettled")], [green, amber], "leg states on a day")
+    s.expect(s.on(".sheet.show .blink").first.bounding_box()["height"] >= 44, "the batch link under 44px")
+    s.close_sheets()
+    # The statement: its confirm is solid ink and names what it will do.
+    s.stub("POST", "**/api/statements/read", 200, json.dumps(STATEMENT_READ), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    go = box(".sheet.show [data-stmtgo]")
+    s.eq((go["bg"], go["ink"], s.text(".sheet.show [data-stmtgo]")), (ink, ground, STATEMENT_READ["confirm_label"]), "the statement's confirm")
+    s.expect(s.count(".sheet.show .stmt-report .num"), "the report's figures are not in the figure face")
+    s.close_sheets()
+    # The overlay a dragged file brings up.
+    s.drag("dragenter")
+    drop = box(".drop.show span")
+    s.eq((drop["radius"], s.colour(".drop.show", "backgroundColor")), ("3px", s.token("--scrim")), "the drop overlay")
+    s.page.evaluate("() => document.body.dispatchEvent(new DragEvent('dragleave', { bubbles: true }))")
+    s.eq(len(s.writes), 1, "writes (the statement read)")
 
 
 # ---- settle view: statement intake (inventory J) ----
@@ -4679,6 +4947,12 @@ def inventory_day_rows(s: Session) -> None:
     s.go_days(1)
     s.tap(".tab.zero", has_text="滴滴")
     s.eq((s.text(".tab.on"), s.text(".empty")), ("滴滴0", "冇滴滴訂單"), "a tapped zero tab")
+    # The empty line stands in the middle of the column.
+    left, right, width = s.page.evaluate(
+        "() => { const e = [...document.querySelectorAll('.orders .empty')].find(x => x.getClientRects().length);"
+        " const r = document.createRange(); r.selectNodeContents(e); const b = r.getBoundingClientRect();"
+        " return [b.left, b.right, window.innerWidth]; }")
+    s.expect(abs((left + right) / 2 - width / 2) <= 1, f"the empty line is not centred: {left}, {right} in {width}")
     # A reload forgets the filter.
     s.allow("request failed: GET /api/events")     # the reload cuts the event stream
     s.page.reload()
@@ -4900,6 +5174,11 @@ def inventory_styles(s: Session) -> None:
     s.eq(moving(), [True, True, True], "sheet, scrim and panel transitions")
     s.page.emulate_media(reduced_motion="reduce")
     s.eq(moving(), [False, False, False], "sheet, scrim and panel transitions under reduced motion")
+    # The toast fades where it stands: shown or not, it is in the same place.
+    s.eq(s.page.evaluate("() => { const e = document.querySelector('.toast'), at = () => getComputedStyle(e).transform;"
+                         " const off = at(); e.classList.add('show'); const on = at(); e.classList.remove('show');"
+                         " return [off === on, getComputedStyle(e).transitionProperty]; }"),
+         [True, "opacity"], "the toast under reduced motion")
     s.page.emulate_media(reduced_motion="no-preference")
     # The toast never takes a tap; the sheet stops at 88% of the screen.
     toast = s.page.eval_on_selector(".toast", "e => { const c = getComputedStyle(e); return [c.pointerEvents, c.position]; }")
