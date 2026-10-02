@@ -191,11 +191,15 @@ class Server:
     def __enter__(self) -> str:
         self.dir = tempfile.TemporaryDirectory(prefix="ride-shots-")
         self.db_path = os.path.join(self.dir.name, "demo.db")
+        began = time.monotonic()
         seed_demo_db.seed(self.db_path, self.today)
+        self.seed_s = time.monotonic() - began
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.log = open(os.path.join(self.dir.name, "server.log"), "w")
+        began = time.monotonic()
         self.start()
+        self.start_s = time.monotonic() - began
         return self.url
 
     def start(self) -> None:

@@ -3,6 +3,7 @@
     python scripts/e2e.py                    every check
     python scripts/e2e.py --only day.add     checks whose name begins with this
     python scripts/e2e.py --list             name the checks and stop
+    python scripts/e2e.py --timings          and say where the time went
 
 Playwright WebKit as an iPhone 14. Every check gets a server of its own on a
 freshly seeded synthetic database (scripts/seed_demo_db.py) with both clocks
@@ -384,6 +385,9 @@ BANNER_JS = """
 """
 
 
+POLLERS = ("wait", "never", "open")
+
+
 class Session(Driver):
     """One page on one server, with everything it asked the server recorded."""
 
@@ -399,11 +403,25 @@ class Session(Driver):
         self.noise = []        # console errors, failed requests, error statuses
         self.allowed = []
         self.held = {}         # path -> routes, oldest first, for requests a check is holding back
+        self.spent = {"fixed": 0.0, "poll": 0.0, "settle": 0.0}    # seconds, for --timings
 
     # -- recording --
 
     def _watch(self, page) -> None:
         super()._watch(page)
+        sleep = page.wait_for_timeout
+
+        def timed_sleep(ms):
+            # Told apart by who asks: a poll between two looks at the page, a
+            # wait for the page to come to rest (timed as a whole in settle),
+            # or a fixed wait.
+            who = sys._getframe(1).f_code.co_name
+            began = time.monotonic()
+            sleep(ms)
+            if who != "_quiet":
+                self.spent["poll" if who in POLLERS else "fixed"] += time.monotonic() - began
+
+        page.wait_for_timeout = timed_sleep
 
         def path_of(url: str) -> str:
             return url[len(self.base):] if url.startswith(self.base) else url
@@ -443,6 +461,13 @@ class Session(Driver):
     def unexpected(self) -> list:
         out = [f"page error: {e}" for e in self.errors] + self.noise
         return [n for n in out if not any(a in n for a in self.allowed)]
+
+    def settle(self) -> None:
+        began = time.monotonic()
+        try:
+            super().settle()
+        finally:
+            self.spent["settle"] += time.monotonic() - began
 
     # -- asserting --
 
@@ -6642,8 +6667,10 @@ def inventory_styles(s: Session) -> None:
 
 # ---- running ----
 
-def run(playwright, browser, chk: dict, today: date):
-    """Run one check on a server of its own. Returns the problem, or None."""
+def run(playwright, browser, chk: dict, today: date) -> tuple:
+    """Run one check on a server of its own. Returns the problem, or None,
+    and where the time went, in seconds."""
+    began = time.monotonic()
     with contextlib.ExitStack() as stack:
         root = ROOT
         if chk["copy"]:
@@ -6660,6 +6687,7 @@ def run(playwright, browser, chk: dict, today: date):
                               workers=chk["workers"], desktop=chk["desktop"])
         s = Session(ctx, url, today, server)
         problem = None
+        ready = time.monotonic()
         try:
             chk["fn"](s)
             bad = s.unexpected()
@@ -6671,11 +6699,31 @@ def run(playwright, browser, chk: dict, today: date):
             if bad:
                 problem += " | also: " + "; ".join(bad[:3])
         finally:
+            ran = time.monotonic()
             # A request a failed check left waiting must not outlive its page.
             if s.page:
                 s.page.unroute_all(behavior="ignoreErrors")
             ctx.close()
-        return problem
+    spent = dict(s.spent, seed=server.seed_s, start=server.start_s, body=ran - ready,
+                 setup=ready - began, teardown=time.monotonic() - ran)
+    spent["total"] = time.monotonic() - began
+    return problem, spent
+
+
+def print_timings(timings: dict, launch: float, wall: float) -> None:
+    """Where a run's time went. `timings` is check name -> what run() measured."""
+    def total(key: str) -> float:
+        return sum(t[key] for t in timings.values())
+
+    print(f"\nwall {wall:.1f}s, checks {total('total'):.1f}s, browser launch {launch:.1f}s")
+    print(f"  setup {total('setup'):.1f}s (seeding {total('seed'):.1f}s, server start {total('start'):.1f}s),"
+          f" teardown {total('teardown'):.1f}s")
+    print(f"  check bodies {total('body'):.1f}s: fixed waits {total('fixed'):.1f}s,"
+          f" waiting for the page to rest {total('settle'):.1f}s, polling {total('poll'):.1f}s")
+    print("slowest:")
+    for name, t in sorted(timings.items(), key=lambda kv: -kv[1]["total"])[:15]:
+        print(f"  {t['total']:6.1f}s  {name}  (fixed {t['fixed']:.1f}s, rest {t['settle']:.1f}s,"
+              f" poll {t['poll']:.1f}s, setup {t['setup']:.1f}s)")
 
 
 def main() -> None:
@@ -6684,6 +6732,8 @@ def main() -> None:
     ap.add_argument("--today", type=date.fromisoformat, default=date.today(),
                     help="the day the data and both clocks are built around (default: today)")
     ap.add_argument("--list", action="store_true", help="name the checks and stop")
+    ap.add_argument("--timings", action="store_true",
+                    help="after the report, say where the time went and name the slowest checks")
     args = ap.parse_args()
 
     wanted = [c for c in CHECKS if c["name"].startswith(args.only)]
@@ -6696,6 +6746,8 @@ def main() -> None:
 
     from playwright.sync_api import sync_playwright
     failed = total = 0
+    timings = {}
+    began = time.monotonic()
 
     def report(ok: bool, label: str, problem: str = "") -> None:
         nonlocal failed, total
@@ -6705,11 +6757,14 @@ def main() -> None:
 
     with sync_playwright() as p:
         browser = p.webkit.launch()
+        launch = time.monotonic() - began
         for chk in wanted:
-            problem = run(p, browser, chk, args.today)
+            problem, timings[chk["name"]] = run(p, browser, chk, args.today)
             report(problem is None, chk["name"], problem or "")
         browser.close()
     print(f"{total} checks, {failed} failed")
+    if args.timings:
+        print_timings(timings, launch, time.monotonic() - began)
     sys.exit(1 if failed else 0)
 
 
