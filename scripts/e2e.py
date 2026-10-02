@@ -3154,6 +3154,206 @@ def settle_lens(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
+# ---- settle view: the 未結算 lens ----
+
+# Every day holding work, as the strip draws it now: its classes, its figure
+# and the length the figure is sized by.
+STRIP_SNAP_JS = """
+() => Object.fromEntries([...document.querySelectorAll('#grid .cell[data-d]')].map(e => {
+  const a = e.querySelector('.amt');
+  return [e.dataset.d, [e.className, a.textContent, a.style.getPropertyValue('--n')]];
+}))
+"""
+
+
+def cents(text: str) -> int:
+    """A money figure as printed, in cents: a cell's bare figure or a key's
+    with its $ and commas."""
+    from decimal import Decimal
+    return int(Decimal(text.replace("$", "").replace(",", "").replace("−", "-")) * 100)
+
+
+def loose_days(body: dict) -> dict:
+    """One month's answer from /api/settle -> {day: cents} for the days
+    holding money no statement has claimed, counted as the page is meant to:
+    orders already driven that are on no batch, each at what is owed for it."""
+    from ride_dispatch.service import owed_of
+    batched = {o["order_id"] for b in body["settlements"] for o in b["orders"]}
+    out = {}
+    for o in body["orders"]:
+        if o["order_id"] in batched or o["scheduled_time"] >= body["now"]:
+            continue
+        day = o["scheduled_time"][:10]
+        out[day] = out.get(day, 0) + round(owed_of(o) * 100)
+    return {d: c for d, c in out.items() if c > 0}
+
+
+def lens_strip(s: Session) -> dict:
+    """The strip under a lens: day -> (lit, receded, printing its part, figure)."""
+    return {d: ("lit" in cls.split(), "dim" in cls.split(), "part" in cls.split(), text)
+            for d, (cls, text, _) in s.page.evaluate(STRIP_SNAP_JS).items()}
+
+
+@check("settle.unsettled-lens")
+def settle_unsettled_lens(s: Session) -> None:
+    """Under 未結算 the days holding unclaimed money are lit and print that
+    part; the lit figures of a month add up to the key to the cent; every
+    other day recedes by colour and keeps its whole fare; choosing another
+    key puts everything back."""
+    from ride_dispatch.service import expected_of
+    mixed_day, mixed_month = s.back(19), settle_path(s.back(19))
+    moved = seed_demo_db._oid(302)
+
+    def change(body: dict, path: str) -> None:
+        # One of the two legs of a day on a statement awaiting its transfer
+        # is taken off the statement, which makes the day a mixed one. The
+        # month's totals are the server's, so the leg's fare is moved between
+        # them the way the server would have counted it.
+        fare = sum(expected_of(o) for o in body["orders"] if o["order_id"] == moved)
+        for b in body["settlements"]:
+            if b["id"] == s.t["batch"]["awaiting"]:
+                b["orders"] = [x for x in b["orders"] if x["order_id"] != moved]
+        if path == mixed_month and body.get("month_totals"):
+            t = body["month_totals"]
+            t.update(unsettled=round(t["unsettled"] + fare, 2), awaiting=round(t["awaiting"] - fare, 2))
+
+    def served(d: date) -> dict:
+        body = s.api("GET", settle_path(d))
+        change(body, settle_path(d))
+        return body
+
+    def adds_up(what: str) -> None:
+        """The lit figures of the month the header names against its key."""
+        month = s.view_month()
+        body = served(date.fromisoformat(month + "-01"))
+        want = loose_days(body)
+        strip = {d: v for d, v in lens_strip(s).items() if d.startswith(month)}
+        lit = {d: cents(v[3]) for d, v in strip.items() if v[0]}
+        key = cents(s.text('.lkey[data-lens="unsettled"] .v'))
+        s.eq(lit, want, f"the days lit in {month} and what each prints, {what}")
+        s.eq(sum(lit.values()), key, f"the lit figures of {month} against the 未結算 key, in cents, {what}")
+        s.eq(key, round(body["month_totals"]["unsettled"] * 100), f"the key against the server's figure, {what}")
+        s.expect(lit, f"no day is lit in {month}, {what}")
+        s.expect(all(d <= s.day() for d in lit), f"a day still to come is lit, {what}: {sorted(lit)}")
+        s.eq([d for d, v in strip.items() if v[0] == v[1] or v[2] != v[0]], [],
+             f"days of {month} neither lit nor receded, or printing the wrong amount, {what}")
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    s.reach(s.cell(38))
+    s.reach(s.cell(19))
+    before = s.page.evaluate(STRIP_SNAP_JS)
+    s.eq((s.cell_state(19), s.cell_state(18)), (("unsettled", "900"), ("awaiting", "390")),
+         "the mixed day and its statement's other day under 本月車費")
+    asked = len(s.requests)
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq(s.pressed(), ["unsettled"], "the chosen key")
+    s.eq(s.asked(asked, "/api/"), [], "requests made by choosing the lens")
+    # The mixed day prints the part no statement has claimed, the 390 leg of
+    # its 900; the day beside it, wholly on the statement, keeps its whole
+    # fare (which happens to be 390 as well) and recedes.
+    s.eq((s.cell_state(19), s.cell_state(18)), (("unsettled", "390"), ("awaiting", "390")),
+         "the mixed day and its statement's other day under 未結算")
+    adds_up("with the mixed day in view")
+    strip = lens_strip(s)
+    s.eq((strip[mixed_day.isoformat()][:3], strip[s.back(18).isoformat()][:3], strip[s.back(34).isoformat()][:3]),
+         ((True, False, True), (False, True, False), (False, True, False)), "lit and receded: mixed, awaiting, collected")
+    # A day still to be driven is counted nowhere, so it is never lit.
+    s.eq(strip[s.day(1)], (False, True, False, "900"), "a day still to come under the lens")
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        lit, waiting, done, ahead = (s.look(n) for n in (19, 18, 34, -1))
+        s.expect(not any(x["faded"] for x in (lit, waiting, done, ahead)), f"a day is faded by opacity under the lens ({scheme})")
+        s.eq((lit["ground"], lit["ink"], lit["weight"], lit["rule"][:3]),
+             (s.token("--surface"), s.token("--amber"), "700", [24, 3, s.token("--amber")]), f"a lit day ({scheme})")
+        s.eq((waiting["ink"], waiting["weight"], waiting["rule"][2], waiting["ground"]),
+             (s.token("--text-3"), "400", s.token("--line"), CLEAR), f"a receded day awaiting its transfer ({scheme})")
+        for name, got in (("collected", done), ("still to come", ahead)):
+            s.eq((got["ink"], got["weight"], got["ground"]), (s.token("--text-3"), "400", CLEAR), f"a receded day {name} ({scheme})")
+        for width in PHONE_WIDTHS:
+            s.resize(width)
+            cells_hold(s, f"under the lens at {width} ({scheme})")
+        s.resize(390)
+    s.page.emulate_media(color_scheme="dark")
+    # The month button goes to the current month, which adds up on its own.
+    s.tap(".date-btn")
+    adds_up("on the current month")
+    # A change made elsewhere repaints the strip with the lens still applied.
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.cell_state(1)[1] == "941", "the change made elsewhere, drawn under the lens")
+    adds_up("after a live update")
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 400})
+    s.wait(lambda: s.cell_state(1)[1] == "940", "the change undone")
+    # Another platform's strip is built from months that all arrive after the
+    # lens was chosen, and so is this platform's on coming back to it.
+    s.tap(".tab", has_text="滴滴")
+    s.eq(s.pressed(), ["unsettled"], "the chosen key after changing platform")
+    s.eq([d for d, v in lens_strip(s).items() if v[0] == v[1] or v[2] != v[0]], [], "another platform's days neither lit nor receded")
+    s.tap(".tab", has_text="接送")
+    s.reach(s.cell(38))
+    s.eq(s.cell_state(38), ("unsettled", "450"), "a day of a month loaded under the lens")
+    s.reach(s.cell(19))
+    s.eq(s.cell_state(19), ("unsettled", "390"), "the mixed day after its month arrived under the lens")
+    adds_up("on months that arrived after the lens was chosen")
+    # Back on the whole fare, every figure and class is as it was.
+    s.tap('.lkey[data-lens="fare"]')
+    after = s.page.evaluate(STRIP_SNAP_JS)
+    s.eq({d: after.get(d) for d in before}, before, "the strip after going back to 本月車費")
+    s.eq((s.lit(), s.count("#grid .dim"), s.count("#grid .part")), ([], 0, 0), "lit, receded or part figures left behind")
+    s.eq([w for w in s.writes if w[0] != "PATCH"], [], "writes other than the check's own")
+
+
+@check("settle.unsettled-lens-and-focus-do-not-fight")
+def settle_unsettled_lens_focus(s: Session) -> None:
+    """The strip lights one set of days at a time: choosing 未結算 puts a
+    focus down, and a focus put down from a sheet takes the lens back to the
+    whole fare."""
+    s.open_settle()
+    relation = sorted(s.back(n).isoformat() for n in (27, 26, 25))
+    s.focus_on("short", ".sheet.show .up-sec")
+    s.eq((s.lit(), s.count(".foot .fline")), (relation, 1), "the focus and its line")
+    usual = 3
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq((s.pressed(), s.count(".foot .fline"), len(s.totals())), (["unsettled"], 0, usual), "the key and the foot after choosing 未結算 over a focus")
+    strip = lens_strip(s)
+    s.expect(not any(strip[d][0] for d in relation), "the statement's days are still lit under the lens")
+    s.eq([d for d, v in strip.items() if v[0] == v[1] or v[2] != v[0]], [], "days neither lit nor receded under the lens")
+    s.eq(s.cell_state(1), ("unsettled", "940"), "a day lit by the lens")
+    s.expect(strip[s.back(1).isoformat()][0], "a day with unclaimed money is not lit")
+    # A day still opens on one tap under the lens, and from its statement's
+    # sheet the focus wins.
+    s.focus_on("short", ".sheet.show .up-sec")
+    s.eq((s.pressed(), s.lit(), s.count("#grid .part"), s.count(".foot .fline")), (["fare"], relation, 0, 1),
+         "the key, the days lit and the figures after a focus over the lens")
+    s.eq(s.cell_state(26), ("short", "840"), "a focused day's figure")
+    # A tap on empty calendar under the lens leaves the lens as it is.
+    s.tap(".foot [data-unfocus]")
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.page.touchscreen.tap(*empty_day(s))
+    s.settle()
+    s.eq((s.pressed(), s.cell_state(1)), (["unsettled"], ("unsettled", "940")), "the lens after a tap on empty calendar")
+    s.expect(lens_strip(s)[s.back(1).isoformat()][0], "the lens's days went out on a tap on empty calendar")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.unsettled-lens-under-stress")
+def settle_unsettled_lens_stress(s: Session) -> None:
+    """A five-digit unclaimed figure with cents, lit: set smaller, whole,
+    inside its column at both phone widths."""
+    stress_strip(s.ctx, s.today)
+    s.open_settle()
+    s.reach(s.cell(27))
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq((s.cell_state(2), lens_strip(s)[s.back(2).isoformat()][:3]), (("unsettled", "12345.67"), (True, False, True)),
+         "a five-digit unclaimed figure with cents, lit")
+    for width in PHONE_WIDTHS:
+        s.resize(width)
+        cells_hold(s, f"under the lens and stress at {width}")
+        big = s.look(2)
+        s.expect(6 <= big["size"] < 13 and round(big["cents"], 2) == 0.7, f"the long lit figure at {width}: {big}")
+    s.eq(s.writes, [], "writes")
+
+
 @check("settle.total-keys-without-a-figure")
 def settle_total_keys_unknown(s: Session) -> None:
     """A month not loaded yet and a month whose totals the server withheld

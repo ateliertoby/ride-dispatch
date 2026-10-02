@@ -207,12 +207,16 @@
   }
   .cell:not(.none):active { --band: var(--surface-press); }
 
-  /* ---- focus ----
+  /* ---- lit days: focus, and the 未結算 lens ----
      One statement at a time: its days are lit, every other day recedes. The
      days can be weeks apart on the strip, so the link is drawn by opening a
      gap around them rather than by a connector that would have nothing to
      run along. The gap is opened from both sides: everything unrelated
      recedes, the statement's own days lift.
+
+     The 未結算 lens lights the days holding money no statement has claimed
+     by the same two classes, so a receded day looks the same whichever of
+     the two pushed it back.
 
      Receding is by colour, not opacity: a faded figure in amber cannot be
      read on the light ground, and a receded figure is still money the

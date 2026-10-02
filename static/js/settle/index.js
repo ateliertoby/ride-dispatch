@@ -508,7 +508,12 @@ function renderLens() {
 function setLens(name) {
   if (!LENSES.includes(name)) return;
   lens = name;
+  // The strip lights one set of days at a time. A statement's days and the
+  // days holding unsettled money are different sets, so asking for the
+  // second puts the first down.
+  if (name === 'unsettled' && focus) { focus = null; renderFoot(); }
   renderLens();
+  paintLit();
 }
 
 function renderTabs() {
@@ -541,8 +546,25 @@ function shortGot(orders) {
   return Math.min(15, Math.max(6, Math.round(21 * share)));
 }
 
+// A cell's money figure: its markup, and its length in cells of the dollars'
+// size, which the stylesheet sizes it by. The cents are set at .7 of that
+// size (.ct in the stylesheet).
+function figureOf(amount) {
+  const f = cellFigure(amount);
+  const dollars = tight(f.dollars), cts = f.cents ? tight('.' + f.cents) : '';
+  return {
+    html: dollars + (cts ? '<span class="ct">' + cts + '</span>' : ''),
+    n: (+cellsOf(dollars) + (cts ? +cellsOf(cts) * 0.7 : 0)).toFixed(2),
+  };
+}
+
 // A day says three things and no more: its date, what the whole day is worth,
 // and by a rule under that figure where its money has got to.
+//
+// The cell also carries, unseen, the two amounts it can be asked to print:
+// the whole day's fare, and the part of it no statement has claimed when
+// there is one. Whatever swaps the figure later reads them off the cell, so
+// both come from the one reading of the day's orders made here.
 function cellHtml(dateStr) {
   const day = +dateStr.slice(8);
   // The 1st carries its month, because a week row is not a month and there is
@@ -553,15 +575,12 @@ function cellHtml(dateStr) {
   const today = dateStr === TODAY ? ' today' : '';
   // Only an empty day is inert; every day holding work opens, past or future.
   if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + tight(num) + '</span></button>';
-  const f = cellFigure(info.total);
-  const dollars = tight(f.dollars), cts = f.cents ? tight('.' + f.cents) : '';
-  // The figure's length in cells of the dollars' size: the cents are set at
-  // .7 of it (.ct in the stylesheet).
-  const n = +cellsOf(dollars) + (cts ? +cellsOf(cts) * 0.7 : 0);
+  const f = figureOf(info.total);
   const got = info.state === 'short' ? ' style="--got:' + shortGot(orders) + 'px"' : '';
-  return '<button class="cell st-' + info.state + today + '" data-d="' + dateStr + '">' +
-    '<span class="d">' + tight(num) + '</span><span class="amt" style="--n:' + n.toFixed(2) + '">' +
-    dollars + (cts ? '<span class="ct">' + cts + '</span>' : '') + '</span><i class="mk"' + got + '></i></button>';
+  return '<button class="cell st-' + info.state + today + '" data-d="' + dateStr +
+    '" data-total="' + info.total + '"' + (info.loose > 0 ? ' data-loose="' + info.loose + '"' : '') + '>' +
+    '<span class="d">' + tight(num) + '</span><span class="amt" style="--n:' + f.n + '">' +
+    f.html + '</span><i class="mk"' + got + '></i></button>';
 }
 
 // Every week of the loaded run, end to end, with no month break in it: from the
@@ -613,8 +632,9 @@ function renderCalendar() {
   const mon = monthAtTop();
   if (mon) viewMonth = mon;
   // A month arriving under the scroll draws days of a statement the operator
-  // is already reading, so the paint ends by restating it.
-  paintFocus();
+  // is already reading, or days the chosen lens lights, so the paint ends by
+  // restating which days are lit.
+  paintLit();
   pokeEdges();
 }
 
@@ -780,19 +800,41 @@ function focusSets() {
   return s;
 }
 
-// Lit and dim are set on what the paint has already laid out rather than woven
-// into the markup, so a focus is taken and dropped without rebuilding every
-// week row, which would fight the scroll anchor. One place decides, so a month
-// painted later reads the same.
-function paintFocus() {
+// Which days are lit, and which recede. Two things light days and never both
+// at once: a focus lights one statement's days; with no focus, the 未結算 lens
+// lights every day holding money no statement has claimed. Only orders
+// already driven count towards that money, so a day still to come is never
+// lit by the lens, as the month's total counts it nowhere.
+//
+// Under the lens a lit day prints its unclaimed part in place of its whole
+// fare, so the lit figures of a month add up to the 未結算 key to the cent; a
+// day partly on a statement would otherwise overstate it. Every other day
+// keeps its whole fare.
+//
+// Lit, dim and the figure are set on what the paint has already laid out
+// rather than woven into the markup, so a focus or a lens is taken and
+// dropped without rebuilding every week row, which would fight the scroll
+// anchor. One place decides, so a month painted later reads the same.
+function paintLit() {
   const s = focus ? focusSets() : null;
+  const loose = !focus && lens === 'unsettled';
   // An empty day already reads as a calendar coordinate rather than money, so
   // it is left alone: dimming it again would only separate it from the other
   // empty days.
   byId('grid').querySelectorAll('.cell[data-d]').forEach(el => {
-    const held = !!s && s.dates.has(el.dataset.d);
+    const held = s ? s.dates.has(el.dataset.d) : loose && 'loose' in el.dataset;
     el.classList.toggle('lit', held);
-    el.classList.toggle('dim', !!s && !held);
+    el.classList.toggle('dim', (!!s || loose) && !held);
+    // `part` says which of its two amounts the cell is printing, so the
+    // figure is rewritten only when that changes. Its length changes with
+    // it, and the stylesheet sizes the figure to its column from --n.
+    const part = loose && held;
+    if (part === el.classList.contains('part')) return;
+    el.classList.toggle('part', part);
+    const f = figureOf(+(part ? el.dataset.loose : el.dataset.total));
+    const amt = el.querySelector('.amt');
+    amt.innerHTML = f.html;
+    amt.style.setProperty('--n', f.n);
   });
 }
 
@@ -800,13 +842,13 @@ function isFocus(t) { return !!focus && focus.kind === t.kind && focus.id === t.
 function setFocus(t) {
   if (isFocus(t)) return;
   focus = t;
-  paintFocus();
+  paintLit();
   renderFoot();
 }
 function clearFocus() {
   if (!focus) return;
   focus = null;
-  paintFocus();
+  paintLit();
   renderFoot();
 }
 // A focus is a claim that something exists. A batch undone or a credit archived

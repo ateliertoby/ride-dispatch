@@ -1000,11 +1000,13 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     'lens' is the
     month total a key stands for: choosing one changes what the page shows
     and writes nothing.  'focus' lights a statement's days on the calendar
-    and 'unfocus' puts that down again; neither writes."""
+    and 'unfocus' puts that down again; neither writes.  'total' and 'loose'
+    are not actions: a day's cell carries its whole fare and its unsettled
+    part, the two figures it can print."""
     page = settle_view(client)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bl", "close", "copy", "credit", "credits", "d", "f",
-        "focus", "fold", "k", "lens", "od", "s", "unfocus", "upbatch", "upguess", "uptick", "upsave",
+        "focus", "fold", "k", "lens", "loose", "od", "s", "total", "unfocus", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 
