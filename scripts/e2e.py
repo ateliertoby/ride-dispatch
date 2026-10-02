@@ -397,6 +397,26 @@ BANNER_JS = """
 
 POLLERS = ("wait", "never", "open")
 
+# Keeps, for the life of the tab, the words of every toast as it is put up.
+# The element is watched from the moment the parser makes it, before any of
+# the page's own scripts has run.
+TOASTS_KEY = "__e2e_toasts"
+TOASTS_JS = """
+(() => {
+  const put = el => new MutationObserver(() => {
+    if (!el.classList.contains('show')) return;
+    const all = JSON.parse(sessionStorage.getItem('%s') || '[]');
+    all.push(el.textContent.trim());
+    sessionStorage.setItem('%s', JSON.stringify(all));
+  }).observe(el, { childList: true, attributes: true, attributeFilter: ['class'] });
+  const made = new MutationObserver(() => {
+    const el = document.getElementById('toast');
+    if (el) { made.disconnect(); put(el); }
+  });
+  made.observe(document, { childList: true, subtree: true });
+})();
+""" % (TOASTS_KEY, TOASTS_KEY)
+
 
 class Session(Driver):
     """One page on one server, with everything it asked the server recorded."""
@@ -414,6 +434,7 @@ class Session(Driver):
         self.allowed = []
         self.held = {}         # path -> routes, oldest first, for requests a check is holding back
         self.spent = {"fixed": 0.0, "poll": 0.0, "settle": 0.0}    # seconds, for --timings
+        ctx.add_init_script(TOASTS_JS)
 
     # -- recording --
 
@@ -611,11 +632,27 @@ class Session(Driver):
         loc = self.page.locator(".toast.show")
         return loc.first.text_content().strip() if loc.count() else ""
 
-    def wait_toast(self, want) -> str:
-        """`want` is the whole text, or a compiled pattern it must match."""
+    def toasts(self) -> list:
+        """The words of every toast this tab has put up, oldest first: one
+        entry each time, whether or not an earlier one was still showing."""
+        return self.page.evaluate("key => JSON.parse(sessionStorage.getItem(key) || '[]')", TOASTS_KEY)
+
+    def wait_toast(self, want, since: int = None) -> str:
+        """`want` is the whole text, or a compiled pattern it must match.
+
+        A toast stays up for 2.4 s, and one in the same words as the last
+        cannot be told from it by looking. `since` is how many toasts there
+        had been (len(toasts())) at some earlier moment: only one put up
+        after that moment will do."""
+        def fits(t: str) -> bool:
+            return bool(want.fullmatch(t)) if hasattr(want, "fullmatch") else t == want
+
         def seen():
-            t = self.toast()
-            return t if (want.fullmatch(t) if hasattr(want, "fullmatch") else t == want) else None
+            if since is None:
+                t = self.toast()
+                return t if fits(t) else None
+            new = [t for t in self.toasts()[since:] if fits(t)]
+            return new[-1] if new else None
         return self.wait(seen, f"toast {getattr(want, 'pattern', want)!r} (showing {self.toast()!r})")
 
     def open_day(self, path: str = "/") -> None:
@@ -653,6 +690,10 @@ class Session(Driver):
 
     def panel_open(self) -> bool:
         return self.count(".drop.show") > 0
+
+    def panel_content(self) -> str:
+        """What the add panel holds; nothing, shortly after it has closed."""
+        return self.page.eval_on_selector(".drop", "e => e.innerHTML")
 
     def panel_title(self) -> str:
         return self.text(".drop.show .sheet-title")
@@ -752,7 +793,7 @@ class Session(Driver):
 
     def resize(self, width: int) -> None:
         self.page.set_viewport_size({"width": width, "height": 800})
-        self.page.wait_for_timeout(400)
+        self.page.wait_for_function("w => window.innerWidth === w", arg=width)
         self.settle()
 
     def colour(self, selector: str, prop: str = "color") -> str:
@@ -1143,8 +1184,8 @@ def day_timing(s: Session) -> None:
     s.open("/?perf=1", ".orders .row")
     s.expect("perf" not in s.page.url, "?perf= stays in the address")
     s.wait_toast(ms)
-    s.page.wait_for_timeout(2600)
-    s.eq(s.toast(), "", "the toast after its time")
+    # The toast's own timer takes it down 2.4 s after it was put up.
+    s.wait(lambda: not s.toast(), "the toast to go after its time", ms=3000)
     s.press('[aria-label="後一日"]')
     s.wait_toast(ms)
     s.settle()
@@ -1157,11 +1198,11 @@ def day_timing(s: Session) -> None:
     s.page.mouse.up()
     s.settle()
     s.expect(s.date_text().startswith(date_head(s.day(1))), "the hold's release went to today")
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     s.press('[aria-label="後一日"]')
     s.wait(lambda: s.date_text().startswith(date_head(s.day(2))), "the date to change")
     s.settle()
-    s.never(s.toast, "a timing toast with the readout off", ms=500)
+    s.never(lambda: s.toasts()[seen:], "a timing toast with the readout off", ms=500)
     s.page.mouse.down()
     s.wait_toast("計時 開")
     s.page.mouse.up()
@@ -1184,18 +1225,18 @@ def day_timing_failed(s: Session) -> None:
     s.wait_toast(ms)
     s.stub("GET", "**" + far, 500, "<html>boom</html>", "text/html")
     s.go_days(1)
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # A day nothing is held for, and its load fails.
     s.press('[aria-label="後一日"]')
-    s.wait_toast("載入失敗")
-    s.page.wait_for_timeout(2600)
+    s.wait_toast("載入失敗", since=seen)
+    seen = len(s.toasts())
     # The day is painted later, by a change made elsewhere.
     s.page.unroute("**" + far)
     answered = len(s.answers)
     s.api("PATCH", "/api/orders/" + s.t["order"]["dropoff"], {"price": 455})
     s.wait(lambda: (far, 200, False) in s.answers[answered:], "the day to be loaded by the change")
     s.wait(lambda: s.count(".orders .empty") or s.rows() == s.ids(2), "the day to be painted")
-    s.never(lambda: ms.fullmatch(s.toast()), "a readout timed from the tap whose load failed", ms=600)
+    s.never(lambda: [t for t in s.toasts()[seen:] if ms.fullmatch(t)], "a readout timed from the tap whose load failed", ms=600)
     s.settle()
 
 
@@ -1851,10 +1892,10 @@ def day_refused_edit(s: Session) -> None:
     s.eq(s.text(".sheet.show .sheet-title"), "改價錢", "the numpad stays up")
     s.eq(s.text(".sheet.show .numpad-display"), "$0", "the numpad is cleared for another try")
     s.tap(".sheet.show .sheet-x")
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
     s.tap(".sheet.show .cancel-link")
     s.press(".sheet.show .primary-btn.danger")
-    s.wait_toast("測試拒絕")
+    s.wait_toast("測試拒絕", since=seen)
     s.eq(s.text(".sheet.show .primary-btn.danger"), "確認取消", "the cancel button comes back")
     s.expect(s.on(".sheet.show .primary-btn.danger").first.is_enabled(), "the cancel button stays disabled")
     s.settle()
@@ -1946,8 +1987,8 @@ def day_add_didi(s: Session) -> None:
     s.eq(len(new), 1, "new rows")
     s.eq(s.text(s.row(new[0]) + " .time"), "15:30", "the new row's time")
     s.eq(s.text(s.row(new[0]) + " .price"), "$128", "the new row's price")
-    s.page.wait_for_timeout(400)
-    s.eq(s.page.eval_on_selector(".drop", "e => e.innerHTML"), "", "the closed panel's content")
+    # The panel empties itself on a timer of its own, 350 ms after it closes.
+    s.wait(lambda: s.panel_content() == "", "the closed panel's content to go", ms=1000)
     s.eq(len(s.writes), 1, "writes")
 
 
@@ -2073,7 +2114,7 @@ def day_add_back_text(s: Session) -> None:
     # An empty box stays empty, and closing the panel forgets the text.
     s.tap(".drop.show .sheet-x")
     s.wait(lambda: not s.panel_open(), "the panel to close")
-    s.page.wait_for_timeout(450)
+    s.wait(lambda: s.panel_content() == "", "the closed panel's content to go", ms=1000)
     s.tap('[aria-label="入單"]')
     s.eq(s.on(".drop.show .paste-box").first.input_value(), "", "the box of a panel opened afresh")
     s.tap(".drop.show .quick-type-btn.foodpanda")
@@ -2259,13 +2300,14 @@ def day_paste_resent(s: Session) -> None:
 
     # Another amendment, repriced on the way.
     flight = amended(**{"12:35:00": "13:05:00", "CX477": "CX479"})
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
+    s.wait(lambda: s.panel_content() == "", "the closed panel's content to go", ms=1000)
     s.tap('[aria-label="入單"]')
     paste(s, flight)
     s.stage("#000002 · 更新")
     s.press('.drop.show .step[data-s="10"]')
     s.press(".drop.show #npOk")
-    s.wait_toast("已更新 #000002")
+    s.wait_toast("已更新 #000002", since=seen)
     s.eq(s.last_write(), ("POST", "/api/orders", {"type": "paste", "text": flight.strip(), "price": 510}), "repriced amendment write")
     s.settle()
     s.eq(s.text(s.row(PASTE_ID) + " .price"), "$510", "the row's price")
@@ -2274,12 +2316,13 @@ def day_paste_resent(s: Session) -> None:
     # Cancelled, then pasted again: the order comes back.
     s.api("PATCH", "/api/orders/" + PASTE_ID, {"status": "cancelled"})
     s.wait(lambda: s.count(".empty"), "the cancelled row to go")
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
+    s.wait(lambda: s.panel_content() == "", "the closed panel's content to go", ms=1000)
     s.tap('[aria-label="入單"]')
     paste(s, flight)
     s.stage("#000002 · 入價")
     s.press(".drop.show #npSkip")
-    s.wait_toast("已重新入單 #000002")
+    s.wait_toast("已重新入單 #000002", since=seen)
     s.settle()
     s.eq(s.rows(), [PASTE_ID], "rows after the re-entry")
 
@@ -2353,9 +2396,10 @@ def day_live_sheet(s: Session) -> None:
     # A view stacked on the detail is left alone.
     s.tap(".sheet.show .field-row", has_text="價錢")
     s.keys(".sheet.show", "12")
+    heard = len(s.finished)
     s.api("PATCH", "/api/orders/" + oid, {"parking_fee": 12})
-    s.settle()
-    s.page.wait_for_timeout(2500)   # the server looks for changes every two seconds
+    s.wait(lambda: ("GET", "/api/orders?date=" + s.day()) in s.finished[heard:],
+           "the day to be loaded again on the change", ms=6000)
     s.settle()
     s.eq(s.text(".sheet.show .sheet-title"), "改價錢", "the stacked numpad")
     s.eq(s.text(".sheet.show .numpad-display"), "$12", "what was typed on it")
@@ -2453,7 +2497,7 @@ def settle_widths(s: Session) -> None:
 
     def resize(width: int) -> None:
         s.page.set_viewport_size({"width": width, "height": 800})
-        s.page.wait_for_timeout(400)
+        s.page.wait_for_function("w => window.innerWidth === w", arg=width)
         s.settle()
 
     s.open_settle()
@@ -2718,7 +2762,6 @@ def settle_fill_fails(s: Session) -> None:
              f"the strip reaches past a month that failed: it begins at {earliest}")
     # Nothing of the run was kept: asked for again, the month that had
     # answered is fetched again.
-    s.page.wait_for_timeout(2500)
     s.page.unroute("**" + run[1])
     asked = len(s.requests)
     s.tap(FAR_BATCH)
@@ -2740,10 +2783,10 @@ def settle_failed_load(s: Session) -> None:
     s.wait_toast("載入失敗")
     s.settle()
     s.eq(s.weeks(), weeks, "the strip after a failed month")
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # A reload of what is held fails the same way and leaves it as it was.
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
-    s.wait_toast("載入失敗")
+    s.wait_toast("載入失敗", since=seen)
     s.settle()
     s.eq((s.weeks(), s.month_text() != ""), (weeks, text != ""), "the strip after a failed reload")
     s.expect(s.count(".cell[data-d]") > 0, "the strip was emptied")
@@ -4545,12 +4588,12 @@ def settle_allocate(s: Session) -> None:
     s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the foot after 對")
     s.reach(s.cell(19))
     s.eq((s.cell_state(19), s.cell_state(18)), (("received", "900"), ("received", "390")), "the days of the batch just paid")
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
     # From the short-paid batch's own sheet, with money that does not cover it.
     s.open_batch("short")
     s.eq(s.text(".sheet.show .prop-head"), "等緊補數 · 差 $380", "what the batch is waiting for")
     s.press(".sheet.show .pbtn", has_text="對 $300（差 $80）")
-    s.wait_toast("已對 $300 · 仲差 $80")
+    s.wait_toast("已對 $300 · 仲差 $80", since=seen)
     s.eq(s.writes[-1], ("POST", f"/api/credits/{c['partial']}/allocate", json.dumps({"settlement_id": b["short"]}, separators=(",", ":"))),
          "allocate write from the batch")
     s.settle()
@@ -4725,9 +4768,9 @@ def settle_order_sheet(s: Session) -> None:
     s.wait_toast("已結算嘅單要先撤銷結算")
     s.eq(s.count(".sheet.show .numpad"), 0, "a numpad for a locked field")
     s.eq(s.text(".sheet.show .cancel-note"), "已結算嘅單要先撤銷結算先取消得", "cancel note")
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
     s.press(".sheet.show .info-row .oid")
-    s.wait_toast("已複製 " + o(203))
+    s.wait_toast("已複製 " + o(203), since=seen)
     s.eq(s.page.evaluate("() => window.__copied"), o(203), "what was copied")
     # A numpad stacked on it: ‹ goes back one level, and a save returns to the order.
     s.tap(".sheet.show .field-row", has_text="停車費")
@@ -5095,11 +5138,11 @@ def settle_statement_read(s: Session) -> None:
     s.eq((method, sent), ("POST", path), "read write")
     s.expect('name="file"; filename="statement.png"' in body and "Content-Type: image/png" in body, f"multipart body: {body!r}")
     # The same file again still triggers a read.
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
     s.pick_statement()
-    s.wait_toast(re.compile(r"讀唔到張圖.*— 再上載一次"))
+    s.wait_toast(re.compile(r"讀唔到張圖.*— 再上載一次"), since=seen)
     s.eq(len(s.writes), 2, "writes after picking the same file twice")
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
 
     # By dropping a file on the page.
     s.eq(s.drag("dragenter"), {"dragenter": True}, "a file dragged in is taken")
@@ -5116,7 +5159,7 @@ def settle_statement_read(s: Session) -> None:
     s.wait(lambda: len(s.writes) == 3, "the dropped file to be read")
     s.eq(s.writes[-1][:2], ("POST", path), "read write for a dropped file")
     s.eq(s.count(".drop.show"), 0, "the overlay after the drop")
-    s.wait(lambda: s.toast(), "the reader's answer")
+    s.wait(lambda: s.toasts()[seen:], "the reader's answer")
     s.settle()
 
 
@@ -5205,9 +5248,10 @@ def settle_live_order(s: Session) -> None:
     s.wait(lambda: s.field("隧道費") == "$30", "the open order to follow a change made elsewhere")
     # A numpad stacked on it is repainted, as any top sheet is, and stays a numpad.
     s.tap(".sheet.show .field-row", has_text="價錢")
+    heard = len(s.finished)
     s.api("PATCH", "/api/orders/" + o(12), {"parking_fee": 12})
-    s.settle()
-    s.page.wait_for_timeout(2500)   # the server looks for changes every two seconds
+    s.wait(lambda: any(path.startswith("/api/credits") for _, path in s.finished[heard:]),
+           "the view to be loaded again on the change", ms=6000)
     s.settle()
     s.eq(s.title(), "改價錢", "the stacked numpad")
     s.tap(".sheet.show .sheet-back")
@@ -5222,11 +5266,11 @@ def settle_timing(s: Session) -> None:
     s.open("/settle?perf=1", ".cell[data-d]")
     s.eq(s.page.url, s.base + "/settle", "the address once ?perf= is taken")
     s.wait_toast(ms)
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # Only the first paint after the document loaded says so.
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
     s.wait(lambda: s.cell_state(1)[1] == "941", "the change made elsewhere")
-    s.never(s.toast, "a timing toast for a live update", ms=500)
+    s.never(lambda: s.toasts()[seen:], "a timing toast for a live update", ms=500)
     s.allow("request failed: GET /api/events")     # the navigation cuts the event stream
     s.page.goto(s.base + "/settle?perf=0")
     s.on(".cell[data-d]").first.wait_for()
@@ -5245,17 +5289,17 @@ def settle_timing_failed(s: Session) -> None:
     s.allow("http 500", "status of 500")
     s.open("/?perf=1", ".orders .row")
     s.wait_toast(ms)
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     s.stub("GET", "**/api/credits?platform=*", 500, "<html>boom</html>", "text/html")
     s.press('[aria-label="埋數"]')
-    s.wait_toast("載入失敗")
-    s.page.wait_for_timeout(2600)
-    s.eq(s.count(".cell[data-d]"), 0, "a strip drawn from a load that failed")
+    s.wait_toast("載入失敗", since=seen)
+    seen = len(s.toasts())
+    s.never(lambda: s.count(".cell[data-d]"), "a strip drawn from a load that failed", ms=2600)
     # The strip is painted later, by a change made elsewhere.
     s.page.unroute("**/api/credits?platform=*")
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
     s.wait(lambda: s.count(".cell[data-d]"), "the strip to be painted by the change")
-    s.never(lambda: ms.fullmatch(s.toast()), "a readout timed from the tap whose load failed", ms=600)
+    s.never(lambda: [t for t in s.toasts()[seen:] if ms.fullmatch(t)], "a readout timed from the tap whose load failed", ms=600)
     s.settle()
 
 
@@ -5441,6 +5485,7 @@ def views_hidden_settle(s: Session) -> None:
     s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["awaiting"]})
     s.wait(lambda: s.asked(asked, "/api/orders?"), "the day view to hear of the change", ms=6000)
     s.settle()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(600)
     s.eq(s.asked(asked) + s.asked(asked, "/api/credits"), [], "requests made for the hidden settle view")
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
@@ -5479,6 +5524,7 @@ def views_late_settle(s: Session) -> None:
     s.release_all()
     s.wait(lambda: len(s.finished) >= done + len(held) + 1, "the held answers to land")
     s.settle()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when its reload landed")
     s.eq(s.scroll_y(), day_at, "the day view's scroll")
@@ -5500,6 +5546,7 @@ def views_late_settle(s: Session) -> None:
     s.release_all()
     s.wait(lambda: len(s.finished) > done, "the held month to land")
     s.settle()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when a month landed")
     s.eq(s.scroll_y(), day_at, "the day view's scroll")
@@ -5538,6 +5585,7 @@ def views_late_day(s: Session) -> None:
     s.release_all()
     s.wait(lambda: ("PATCH", path) in s.finished[done:], "the save to land")
     s.settle()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-day"), [], "changes to the hidden day view when its save landed")
     s.eq((s.title(), s.count(".sheet.show .orow")), (title, 2), "the settle view's own sheet")
@@ -5559,6 +5607,7 @@ def views_late_day(s: Session) -> None:
     s.release_all()
     s.wait(lambda: ("GET", far) in s.finished[done:] and ("GET", near) in s.finished[done:], "the held answers to land")
     s.settle()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-day"), [], "changes to the hidden day view when its day landed")
     s.go_day()
@@ -5638,6 +5687,7 @@ def views_late_order(s: Session) -> None:
     done = len(s.finished)
     s.release_all()
     s.wait(lambda: ("GET", path) in s.finished[done:], "the order to arrive")
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view when its order arrived")
     s.eq((s.title(), s.count(".sheet.show .field-row")), ("UO623 14:20", 5), "the day view's own sheet")
@@ -5649,9 +5699,10 @@ def views_late_order(s: Session) -> None:
     s.hold(path)
     s.press(".sheet.show .primary-btn.danger")
     s.wait(lambda: s.holding(path), "the cancel")
+    done = len(s.finished)
     s.page.go_back()
     s.on(".orders .row").first.wait_for()
-    s.page.wait_for_timeout(500)      # the day view's own load on being shown
+    s.wait(lambda: ("GET", "/api/orders?date=" + s.day()) in s.finished[done:], "the day view's own load on being shown")
     asked = len(s.requests)
     s.release_all()
     s.wait_toast("已取消 #000012")
@@ -5677,6 +5728,7 @@ def views_statement(s: Session) -> None:
     s.on(".orders .row").first.wait_for()
     s.answer(path, status=200, content_type="application/json", body=json.dumps(STATEMENT_READ))
     s.wait(lambda: ("POST", path) in s.finished, "the read to be answered")
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq((s.count(".sheet.show"), s.count(".scrim.show")), (0, 0), "a sheet or scrim over the day view")
     s.release_all()
@@ -5736,6 +5788,7 @@ def views_listeners(s: Session) -> None:
     # A resize and a scroll do not touch the hidden strip.
     s.page.set_viewport_size({"width": 430, "height": 700})
     s.page.evaluate("() => window.scrollTo(0, 40)")
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(500)
     s.settle()
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
@@ -5752,32 +5805,34 @@ def views_timing(s: Session) -> None:
     ms = re.compile(r"\d+ ms")
     s.open("/?perf=1", ".orders .row")
     s.wait_toast(ms)
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # To settle: from the tap to the paint of what the server answered.
     s.hold(CREDITS)
     s.press('[aria-label="埋數"]')
     s.wait(lambda: s.holding(CREDITS), "the settle view's load")
+    # Not a wait for the page: how long the answer is held back, which is
+    # what the readout must then say.
     s.page.wait_for_timeout(700)
-    s.eq(s.toast(), "", "a readout before the data is painted")
+    s.eq(s.toasts()[seen:], [], "a readout before the data is painted")
     s.release_all()
-    took = int(s.wait_toast(ms).split()[0])
+    took = int(s.wait_toast(ms, since=seen).split()[0])
     s.expect(700 <= took < 5000, f"day to settle reported {took} ms with the answer held for 700")
     s.settle()
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # A month scrolled in, or a change, is not a navigation.
     s.tap('[aria-label="前一個月"]')
-    s.never(s.toast, "a readout for scrolling the strip", ms=400)
+    s.never(lambda: s.toasts()[seen:], "a readout for scrolling the strip", ms=400)
     # Back to the day view, which paints what it holds at once.
     s.press('[aria-label="返日程"]')
-    took = int(s.wait_toast(ms).split()[0])
+    took = int(s.wait_toast(ms, since=seen).split()[0])
     s.expect(took < 500, f"settle to day reported {took} ms")
     s.settle()
-    s.page.wait_for_timeout(2600)
+    seen = len(s.toasts())
     # Back and forward are not taps: nothing to time from.
     s.page.go_back()
     s.on(".cell[data-d]").first.wait_for()
     s.settle()
-    s.never(s.toast, "a readout for back", ms=500)
+    s.never(lambda: s.toasts()[seen:], "a readout for back", ms=500)
 
 
 # ---- the service worker (plan review focus 1) ----
@@ -5798,6 +5853,7 @@ def worker_first_install(s: Session) -> None:
     s.open_day()
     s.mark()
     s.controlled()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(600)
     s.expect(s.marked(), "the page was reloaded when the first worker took control")
     s.eq(s.documents(), 1, "document requests")
@@ -6502,7 +6558,8 @@ def inventory_in_flight(s: Session) -> None:
     s.on(".scrim").first.tap(position={"x": 8, "y": height - 8})
     s.wait(lambda: not s.panel_open(), "the panel to close")
     # Parsing a pasted message.
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
+    s.wait(lambda: s.panel_content() == "", "the closed panel's content to go", ms=1000)
     s.tap('[aria-label="入單"]')
     s.on(".drop.show .paste-box").first.fill(paste_message())
     s.press(".drop.show .primary-btn", has_text="解析")
@@ -6515,15 +6572,15 @@ def inventory_in_flight(s: Session) -> None:
     s.wait(lambda: s.holding("/api/orders"), "the save without a price")
     s.eq(button(".drop.show #npSkip")[1], True, "the skip link in flight")
     s.answer("/api/orders", **refusal)
-    s.wait_toast("測試拒絕")
+    s.wait_toast("測試拒絕", since=seen)
     s.wait(lambda: button(".drop.show #npSkip") == ("先唔入價，直接儲存", False), "the skip link to come back")
     # Saving it at a price of its own, refused: back to the suggestion.
-    s.page.wait_for_timeout(2500)
+    seen = len(s.toasts())
     s.press('.drop.show .step[data-s="10"]')
     s.eq(s.text(".drop.show .numpad-display"), "$490", "after +$10")
     s.press(".drop.show #npOk")
     s.answer("/api/orders", **refusal)
-    s.wait_toast("測試拒絕")
+    s.wait_toast("測試拒絕", since=seen)
     s.wait(lambda: s.text(".drop.show .numpad-display") == "$480建議", "the amount to go back to the suggestion")
     # The steppers stop at nothing.
     for _ in range(50):
@@ -6598,6 +6655,7 @@ def inventory_pointer(s: Session) -> None:
         s.settle()
     s.eq(round(s.page.evaluate("() => document.body.getBoundingClientRect().width")), 640, "the column on a wide screen")
     s.on(cell).first.hover()
+    # Not a wait for the page: the time within which nothing may happen.
     s.page.wait_for_timeout(300)
     s.eq((s.lit(), s.count("#grid .dim"), s.count(".foot .fline")), ([], 0, 0), "what a resting pointer lights")
     s.expect(not s.sheet_open(), "resting on a day opened a sheet")
