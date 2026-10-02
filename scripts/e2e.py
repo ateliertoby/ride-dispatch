@@ -2463,6 +2463,43 @@ def day_live_sheet(s: Session) -> None:
     s.eq(s.writes, [], "writes by the page")
 
 
+# The stacked view's own elements, marked so that drawing the view again,
+# which makes new elements, can be told from leaving it alone.
+STACKED = ".sheet.show .sheet-title, .sheet.show .numpad-display, .sheet.show #npOk, .sheet.show .key"
+MARK_STACKED_JS = "sel => { const els = [...document.querySelectorAll(sel)]; els.forEach(e => { e.__kept = true; }); return els.length; }"
+KEPT_STACKED_JS = "sel => [...document.querySelectorAll(sel)].filter(e => e.__kept === true).length"
+
+
+@check("day.live-update-leaves-a-stacked-view-as-it-is")
+def day_live_stacked(s: Session) -> None:
+    """A view stacked on the order's sheet is the operator in the middle of
+    typing, and a live update for that very order must not draw it again.
+    The digits typed are held by the numpad's script and would come back on
+    a redraw, so what is typed cannot show one; the elements can, and they
+    have to be the ones that were there before the update."""
+    s.open_day()
+    oid = s.t["order"]["dropoff"]
+    s.open_order(oid)
+    s.tap(".sheet.show .field-row", has_text="價錢")
+    s.keys(".sheet.show", "12")
+    marked = s.page.evaluate(MARK_STACKED_JS, STACKED)
+    s.eq(marked, 15, "the elements of the stacked numpad: its title, display, 確認 and twelve keys")
+    s.api("PATCH", "/api/orders/" + oid, {"price": 455})
+    # The row behind is drawn by the same paint that would draw the sheet.
+    s.wait(lambda: s.text(s.row(oid) + " .price") == "$455", "the change made elsewhere to reach the list")
+    s.settle()
+    s.eq(s.page.evaluate(KEPT_STACKED_JS, STACKED), marked, "the numpad's own elements still standing after the live update")
+    s.eq((s.text(".sheet.show .sheet-title"), s.text(".sheet.show .numpad-display")), ("改價錢", "$12"),
+         "the stacked numpad and what was typed on it")
+    # Typing goes on where it stopped, and is saved as typed.
+    s.keys(".sheet.show", "5")
+    s.eq(s.text(".sheet.show .numpad-display"), "$125", "a digit typed after the live update")
+    s.tap(".sheet.show #npOk")
+    s.wait(lambda: s.count(".sheet.show .numpad") == 0, "the numpad to give way to the detail")
+    s.eq(s.last_write(), ("PATCH", "/api/orders/" + oid, {"price": 125}), "the write")
+    s.eq(s.field("價錢"), "$125", "the detail once back on it")
+
+
 @check("day.live-update-with-the-add-panel-open")
 def day_live_panel(s: Session) -> None:
     s.open_day()
