@@ -52,7 +52,7 @@
    the chosen one solid. A car park that is none of ours stands as one more
    segment, and is not a control. */
 .pp-row { border-bottom: 1px solid var(--line); padding: 11px 0 12px; }
-.pp-row .fk { display: block; font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); margin-bottom: 7px; }
+.pp-row .fk { display: block; font-size: 12px; line-height: 1.35; letter-spacing: .08em; color: var(--text-3); margin-bottom: 7px; }
 .pp-seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
 .pp-opt {
   display: block; border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
@@ -61,7 +61,7 @@
 }
 .pp-opt:active { background: var(--surface-press); }
 .pp-opt.on { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
-.pp-opt small { display: block; font-size: 11px; font-weight: 400; margin-top: 1px; }
+.pp-opt small { display: block; font-size: 12px; font-weight: 400; margin-top: 1px; }
 span.pp-opt { cursor: default; }
 
 /* Destructive: a red outline here, solid only on the step that confirms. */
@@ -105,7 +105,7 @@ span.pp-opt { cursor: default; }
 .field-row.locked .fk { flex: none; }
 .field-row.locked .chev {
   order: 1; margin-right: auto; align-self: center;
-  font-family: var(--han); font-size: 11.5px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
+  font-family: var(--han); font-size: 12px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
   box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2);
 }
 .field-row.locked .fv { order: 2; }
@@ -187,7 +187,7 @@ span.pp-opt { cursor: default; }
 .np-pad > div { overflow: hidden; }
 /* Says the amount showing is the suggested one: a mark, not a status. */
 .sug-tag {
-  font-family: var(--han); font-size: 11.5px; font-weight: 400; line-height: 1.35; letter-spacing: 0;
+  font-family: var(--han); font-size: 12px; font-weight: 400; line-height: 1.35; letter-spacing: 0;
   padding: 1px 5px 0; margin-left: 8px; border-radius: 2px; vertical-align: 6px;
   box-shadow: inset 0 0 0 1px var(--text-3); color: var(--text-2);
 }
