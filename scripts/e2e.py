@@ -7306,6 +7306,253 @@ def inventory_styles(s: Session) -> None:
     s.eq(s.page.eval_on_selector(".drop.show", "e => getComputedStyle(e).overflowY"), "hidden", "the panel does not scroll")
     s.settle()
 
+# ---- type sizes ----
+
+# The size no text meant to be read is set under, what may be set under it,
+# and the figures a shrink-to-fit rule may take under it. The list is the
+# one static/css/base.css states and no longer: a coordinate (the year
+# beside the masthead date, the date in a settle calendar cell), the cents
+# of a figure, and a figure while it is being held in its column.
+TYPE_FLOOR = 12
+TYPE_SMALL = ".date-btn .y, .cell .d, .ct"
+TYPE_SHRUNK = ".lkey .v, .fkey .v, .cell .amt"
+
+# What is wrong with the text on screen, if anything, and how many runs of
+# text were looked at. Every text node that is drawn is read: its size
+# against the floor, and where it lies against the screen and against the
+# column it stands in, which is the content box of the nearest element that
+# lays its text out as one. A figure set under the floor is let through
+# only while it fills its column (its day's cell, or the row of ruled cells
+# it shares one size with), which is when it could not be larger. The tabs
+# are the one row that scrolls sideways by design, so where they lie is not
+# judged.
+TYPE_JS = """
+([floor, small, shrunk]) => {
+  const columns = '.cell, .lkey, .fkey, .cols > *, .row > *, .now, .foot-in > *, .ft, .fnote, .brow > *, .orow > *, ' +
+    '.field-row, .info-row, .sum-row, .pp-opt, .key, .numpad-display, .numpad-hint, .qrow, .prow, .qprop, .blink, ' +
+    '.hero, .fold, .alloc, .up-foot, .up-chips, .header-row > *, .sheet, .drop, .slist, .orders, .foot-in';
+  const cs = e => getComputedStyle(e);
+  const px = v => parseFloat(v) || 0;
+  const drawn = e => {
+    if (!e.getClientRects().length || e.closest('.sheet:not(.show), .drop:not(.show), script, style')) return false;
+    for (let x = e; x && x !== document.body; x = x.parentElement) {
+      const c = cs(x);
+      if (c.visibility === 'hidden' || c.opacity === '0') return false;
+    }
+    return true;
+  };
+  const ink = e => { const r = document.createRange(); r.selectNodeContents(e); return r.getBoundingClientRect().width; };
+  const inner = e => {
+    const r = e.getBoundingClientRect(), c = cs(e);
+    return { left: r.left + px(c.borderLeftWidth) + px(c.paddingLeft), right: r.right - px(c.borderRightWidth) - px(c.paddingRight) };
+  };
+  const name = e => (e.parentElement.className ? '.' + String(e.parentElement.className).split(' ')[0] + ' ' : '') +
+    (e.className ? '.' + String(e.className).split(' ').join('.') : e.tagName.toLowerCase());
+  // Whether a figure set smaller could not have been larger.
+  const filled = fig => {
+    const cell = fig.closest('.cell');
+    const room = e => inner(e).right - inner(e).left;
+    if (cell) return room(cell) - ink(fig) < 6;
+    const cells = [...fig.closest('.lens, .foot-in').children];
+    const spare = cells.map(c => room(c) - Math.max(ink(c.querySelector('.k')), ink(c.querySelector('.v'))));
+    return Math.min(...spare) < 6 || spare.reduce((a, b) => a + b, 0) < 12;
+  };
+  const out = new Set();
+  let seen = 0;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node.nodeValue.trim(), e = node.parentElement;
+    if (!text || !drawn(e)) continue;
+    seen++;
+    const what = name(e) + ' "' + text.slice(0, 20) + '"';
+    const size = px(cs(e).fontSize);
+    if (size < floor - 0.005 && !e.closest(small) && !(e.closest(shrunk) && filled(e.closest(shrunk)))) {
+      out.add(size + 'px: ' + what);
+    }
+    if (e.closest('.tabs')) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const col = e.closest(columns), box = col && inner(col);
+    for (const r of range.getClientRects()) {
+      if (!r.width) continue;
+      if (r.left < -0.5 || r.right > innerWidth + 0.5) out.add('off the screen: ' + what);
+      else if (box && (r.left < box.left - 1.5 || r.right > box.right + 1.5)) out.add('out of its column (' + name(col) + '): ' + what);
+    }
+  }
+  for (const e of document.body.querySelectorAll('*')) {
+    if (e.matches('.tabs, .sheet, .drop') || !drawn(e)) continue;
+    const c = cs(e);
+    if (c.textOverflow === 'ellipsis' || (c.overflowX !== 'visible' && e.scrollWidth > e.clientWidth + 1)) out.add('cut: ' + name(e));
+  }
+  if (document.documentElement.scrollWidth > innerWidth) out.add('the page scrolls sideways');
+  return { seen, bad: [...out] };
+}
+"""
+
+
+def type_holds(s: Session, what: str, least: int = 8) -> None:
+    """The state on screen in both palettes: no text under the floor but what
+    the list lets through, nothing cut, off the screen or out of its column,
+    and the page not scrolling sideways."""
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        got = s.page.evaluate(TYPE_JS, [TYPE_FLOOR, TYPE_SMALL, TYPE_SHRUNK])
+        s.expect(got["seen"] >= least, f"only {got['seen']} runs of text were read in {what} ({scheme})")
+        s.eq(got["bad"], [], f"the text of {what} ({scheme})")
+    s.page.emulate_media(color_scheme="dark")
+
+
+def shut(s: Session) -> None:
+    """Close whatever sheet or panel of the day view is open, a level at a
+    time, by its own closing key."""
+    for _ in range(6):
+        if not s.sheet_open() and not s.panel_open():
+            return
+        s.tap(".sheet.show .sheet-x, .drop.show .sheet-x")
+    raise Failed("a sheet or the add panel would not close")
+
+
+@check("type.day-board-and-order-sheet")
+def type_day(s: Session) -> None:
+    """No text of the day board or of an order's sheet is under 12px, at
+    either phone width and in either palette: the board, the order's sheet
+    with its meeting point, a numpad, the cancel confirm and a batched order
+    with its locked fields."""
+    o = s.t["order"]
+    s.open_day()
+    for width in PHONE_WIDTHS:
+        if width != 390:
+            s.resize(width)
+        at = f" at {width}"
+        s.expect(s.count(".orders .gap") and s.count(".orders .st") and s.count(".orders .mk") and s.count(".now-t"),
+                 "the board shows no wait, status block, mark or clock to judge")
+        type_holds(s, "the day board" + at, 30)
+        s.open_order(o["landed_banner"])
+        s.expect(s.count(".sheet.show .pp-opt small"), "no meeting point on the order's sheet to judge")
+        type_holds(s, "an order's sheet" + at, 20)
+        s.tap(".sheet.show .field-row", has_text="隧道費")
+        s.keys(".sheet.show", "45")
+        type_holds(s, "a numpad" + at, 14)
+        s.tap(".sheet.show .sheet-x")
+        s.tap(".sheet.show .cancel-link")
+        s.on(".sheet.show .primary-btn.danger").wait_for()
+        type_holds(s, "the cancel confirm" + at, 4)
+        shut(s)
+        s.go_days(-5)
+        s.open_order(seed_demo_db._oid(503))
+        s.expect(s.count(".sheet.show .field-row.locked .chev"), "no locked field to judge")
+        type_holds(s, "a batched order's sheet" + at, 20)
+        shut(s)
+        s.go_days(5)
+    s.eq(s.writes, [], "writes")
+
+
+@check("type.day-add-panel")
+def type_day_add(s: Session) -> None:
+    """No text of the add panel is under 12px, at either phone width and in
+    either palette: the paste box, each stage of a quick order, a pasted
+    message's preview with its suggested price, and a message that cannot be
+    saved."""
+    s.open_day()
+    for width in PHONE_WIDTHS:
+        if width != 390:
+            s.resize(width)
+        at = f" at {width}"
+        s.tap('[aria-label="入單"]')
+        s.stage("入單")
+        type_holds(s, "the add panel" + at, 5)
+        s.tap(".drop.show .quick-type-btn.didi")
+        for title, digits in (("滴滴 · 時間", "1530"), ("滴滴 · 車費", "128"), ("滴滴 · 隧道費", "25")):
+            s.stage(title)
+            s.keys(".drop.show", digits)
+            type_holds(s, title + at, 14)
+            s.confirm_stage()
+        s.stage("滴滴 · 確認")
+        type_holds(s, "a quick order's summary" + at, 10)
+        shut(s)
+        s.tap('[aria-label="入單"]')
+        paste(s, paste_message())
+        s.on(".drop.show .paste-preview").first.wait_for()
+        s.expect(s.count(".drop.show .sug-tag"), "no suggested price to judge")
+        type_holds(s, "a pasted message's preview" + at, 20)
+        s.tap(".drop.show .sheet-x")
+        s.stage("入單")
+        paste(s, amended(**{PASTE_ID: seed_demo_db._oid(503)}))
+        s.on(".drop.show .dup-warn").wait_for()
+        type_holds(s, "a message that cannot be saved" + at, 3)
+        shut(s)
+    s.eq([w[1] for w in s.writes], ["/api/orders/parse"] * 4, "writes")
+
+
+@check("type.settle-calendar-lists-and-foot", long=True)
+def type_settle(s: Session) -> None:
+    """No text of the settle view's own page is under 12px but the dates of
+    the calendar, the cents and a figure held in its column, at either phone
+    width and in either palette: the calendar under both of its lenses, the
+    two statement lists, the focus line, and the foot with one, two and
+    three items and with none."""
+    month = foot_month(s.today)
+    first = date.fromisoformat(month + "-01")
+    case = {}
+
+    def book(body: dict, path: str) -> None:
+        if path != settle_path(first):
+            return
+        if not case["short"]:
+            foot_short(body, 0.0)
+        foot_earlier(body, 1320.0 if case["earlier"] else 0.0, month_before(month) if case["earlier"] else None)
+
+    def ledger(body: dict, path: str) -> None:
+        if not case["credits"]:
+            foot_credits(body, 0, 0.0)
+
+    def serve(n: int, short: bool, credits: bool, earlier: bool) -> None:
+        """Have the foot hold `n` items: the answers are rewritten and the
+        page asks again, since a change of platform throws its months away."""
+        case.update(short=short, credits=credits, earlier=earlier)
+        s.tap(".tab", has_text="滴滴")
+        s.tap(".tab", has_text="接送")
+        s.to_month(first)
+        s.eq((s.count(".foot .fkey"), s.count(".foot .fnote")), (n, int(not n)), f"the foot's cells for {n} items")
+
+    case.update(short=True, credits=True, earlier=True)
+    rewrite(s.ctx, book, ledger)
+    s.open_settle()
+    for width in PHONE_WIDTHS:
+        if width != 390:
+            s.resize(width)
+        at = f" at {width}"
+        for n, items in ((2, (True, True, False)), (1, (True, False, False)), (0, (False, False, False)), (3, (True, True, True))):
+            serve(n, *items)
+            type_holds(s, f"the calendar over a foot of {n}" + at, 40)
+        s.tap('.lkey[data-lens="unsettled"]')
+        type_holds(s, "the 未結算 calendar" + at, 40)
+        for lens in ("awaiting", "received"):
+            s.tap(f'.lkey[data-lens="{lens}"]')
+            s.to_month(s.back(BATCH_DAY["awaiting" if lens == "awaiting" else "short"]))
+            s.expect(s.count(".slist .brow .btag"), f"no statement under {lens} to judge")
+            type_holds(s, f"the {lens} list" + at, 12)
+        s.tap('.lkey[data-lens="fare"]')
+        s.focus_on("short", ".sheet.show .up-sec")
+        s.expect(s.count(".foot .fline"), "no focus line to judge")
+        type_holds(s, "the calendar with a statement in focus" + at, 40)
+        s.tap(".foot [data-unfocus]")
+    s.eq(s.writes, [], "writes")
+
+
+@check("type.settle-sheets", long=True)
+def type_settle_sheets(s: Session) -> None:
+    """No text of any sheet the settle view opens is under 12px but the
+    cents of a figure, at either phone width and in either palette."""
+    s.open_settle()
+    s.reach(s.cell(34))
+    for width in PHONE_WIDTHS:
+        if width != 390:
+            s.resize(width)
+        every_settle_sheet(s, lambda name: type_holds(s, f"the {name} sheet at {width}", 4))
+    s.eq(len(s.writes), 2, "writes (the two statement reads)")
+
+
 # ---- running ----
 
 def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tuple:
