@@ -340,6 +340,7 @@ class Driver:
         self.base = base_url
         self.page = None
         self.viewport = None    # a window size to open pages at, in place of the device's
+        self.errors = []        # the page's uncaught errors; none while there is no page
 
     # -- waiting --
 

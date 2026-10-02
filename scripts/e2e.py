@@ -7555,6 +7555,20 @@ def type_settle_sheets(s: Session) -> None:
 
 # ---- running ----
 
+def problem_of(s: Session, fn):
+    """Run one check's body on its session. Returns what went wrong in one
+    line, or None. A check can fail before it has opened a page, on what it
+    asks of the server first, and is then reported by that failure alone."""
+    try:
+        fn(s)
+        bad = s.unexpected()
+        return "; ".join(bad[:4]) if bad else None
+    except Exception as e:      # a check that cannot finish has failed
+        problem = f"{type(e).__name__}: {e}".splitlines()[0]
+        bad = s.unexpected()
+        return problem + (" | also: " + "; ".join(bad[:3]) if bad else "")
+
+
 def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tuple:
     """Run one check on a server of its own, on a port from `ports` if given.
     Returns the problem, or None, and where the time went, in seconds."""
@@ -7574,18 +7588,9 @@ def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tup
             ctx = new_context(playwright, browser, "dark", today, still=chk["still"],
                               workers=chk["workers"], desktop=chk["desktop"])
         s = Session(ctx, url, today, server)
-        problem = None
         ready = time.monotonic()
         try:
-            chk["fn"](s)
-            bad = s.unexpected()
-            if bad:
-                problem = "; ".join(bad[:4])
-        except Exception as e:      # a check that cannot finish has failed
-            problem = f"{type(e).__name__}: {e}".splitlines()[0]
-            bad = s.unexpected()
-            if bad:
-                problem += " | also: " + "; ".join(bad[:3])
+            problem = problem_of(s, chk["fn"])
         finally:
             ran = time.monotonic()
             # A request a failed check left waiting must not outlive its page.
