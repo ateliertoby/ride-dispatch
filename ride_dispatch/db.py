@@ -1480,8 +1480,9 @@ def get_settle_month(db_path: str, month: str, platform: str,
     Batches come back whole even when only part of them falls inside the
     month — a batch can straddle months and the day sheet labels it by its
     full date range.  A batch is in the month when one of its legs is, or
-    when it paid a 舉牌 ahead of a trip that is.  counts and totals deliberately span all time: the point
-    of the page is clearing old days, which the month on screen would hide.
+    when it paid a 舉牌 ahead of a trip that is.  counts deliberately span all
+    time: the point of the page is clearing old days, which the month on
+    screen would hide.
 
     month_totals is the month alone: its orders already driven, split by where
     their money has got to (month_totals.split_month).  earlier is what a view
@@ -1518,31 +1519,20 @@ def get_settle_month(db_path: str, month: str, platform: str,
                 "month totals withheld for %s %s: %s", month, platform, exc)
 
         counts = {p: 0 for p in PLATFORMS}
-        unsettled = 0.0
         for row in conn.execute(
-            f"SELECT {_SETTLE_ORDER_COLS} FROM orders WHERE {_SETTLEABLE_SQL}", (cutoff,)
+            f"SELECT service_type FROM orders WHERE {_SETTLEABLE_SQL}", (cutoff,)
         ):
-            p = platform_of(row["service_type"])
-            counts[p] += 1
-            if p == platform:
-                unsettled += owed_of(dict(row))
+            counts[platform_of(row["service_type"])] += 1
 
-        # Waiting for money is what a batch is still owed, not what it is
-        # worth: a batch paid short contributes only its shortfall.  paid_on is
-        # written from a completed allocation and would agree, but only one of
-        # the two can be the definition, and the allocations are it.
-        awaiting = 0.0
-        open_ids = []
-        for row in conn.execute(
+        # A batch is open while it is still owed money, by its allocations.
+        # paid_on is written from a completed allocation and would agree, but
+        # only one of the two can be the definition, and the allocations are it.
+        open_ids = [row["id"] for row in conn.execute(
             "SELECT s.id, s.confirmed_amount - coalesce(sum(a.amount), 0) AS outstanding "
             "FROM settlements s LEFT JOIN credit_allocations a ON a.settlement_id = s.id "
             "WHERE s.platform = ? GROUP BY s.id",
             (platform,),
-        ):
-            if row["outstanding"] > CENT:
-                awaiting += row["outstanding"]
-                open_ids.append(row["id"])
-        awaiting = round(awaiting, 2)
+        ) if row["outstanding"] > CENT]
         try:
             earlier = _earlier_open(conn, month, platform, open_ids, cutoff)
         except ValueError as exc:
@@ -1555,7 +1545,6 @@ def get_settle_month(db_path: str, month: str, platform: str,
     return {
         "now": cutoff,
         "counts": counts,
-        "totals": {"unsettled": unsettled, "awaiting": awaiting},
         "month_totals": month_totals,
         "earlier": earlier,
         "credits": {"unallocated": len(unallocated),

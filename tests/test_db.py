@@ -808,12 +808,15 @@ def test_get_settle_month_counts_all_platforms_all_time(db_path):
     seed_leg(db_path, "NOPRICE", price=0.0)
     data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
     assert data["counts"] == {"ride": 2, "didi": 1, "uber": 1, "foodpanda": 1}
-    assert data["totals"]["unsettled"] == 1000.0   # OLD + A1, both past and priced
+    # The month states its own, and what stands open before it apart.
+    assert data["month_totals"]["unsettled"] == 500.0   # A1; FUTURE is not driven yet
+    assert data["earlier"] == {"open": 500.0, "month": "2026-07"}   # OLD
     create_settlement(db_path, "ride", ["OLD"], 480.0, "2026-08-20", now=NOW)
     data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
     assert data["counts"]["ride"] == 1
-    assert data["totals"]["unsettled"] == 500.0
-    assert data["totals"]["awaiting"] == 480.0
+    assert data["month_totals"]["unsettled"] == 500.0
+    # On a statement still owed money, OLD is as open as it was.
+    assert data["earlier"] == {"open": 500.0, "month": "2026-07"}
 
 
 def test_get_settle_month_awaiting_drops_once_a_batch_is_paid(db_path):
@@ -824,7 +827,8 @@ def test_get_settle_month_awaiting_drops_once_a_batch_is_paid(db_path):
     assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["credits"]["unallocated"] == 1
     allocate(db_path, cid, sid)
     month = get_settle_month(db_path, "2026-08", "ride", now=NOW)
-    assert month["totals"]["awaiting"] == 0
+    assert month["month_totals"]["awaiting"] == 0
+    assert month["month_totals"]["received"] == 500.0
     assert month["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
 
 
@@ -857,7 +861,8 @@ def test_get_settle_month_empty(db_path):
     assert data["orders"] == []
     assert data["settlements"] == []
     assert data["counts"] == {"ride": 0, "didi": 0, "uber": 0, "foodpanda": 0}
-    assert data["totals"] == {"unsettled": 0, "awaiting": 0}
+    assert data["month_totals"] == {"fare": 0.0, "received": 0.0, "awaiting": 0.0, "unsettled": 0.0, "short": 0.0}
+    assert data["earlier"] == {"open": 0.0, "month": None}
 
 
 def test_entry_plans_the_pickup_point(db_path):

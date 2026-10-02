@@ -334,7 +334,7 @@ def test_a_banner_paid_ahead_is_recorded_and_its_trip_stays_owed(db_path):
     assert held["settlement_id"] is None
     assert held["paid_ahead"] == 40.0 and held["ahead_batch"] == sid
     # What is left to chase is the trip alone.
-    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["totals"]["unsettled"] == 300.0
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["month_totals"]["unsettled"] == 300.0
 
 
 def test_an_order_nothing_was_paid_ahead_of_carries_zero(db_path):
@@ -618,12 +618,11 @@ def test_a_short_statement_with_no_leg_ticked_is_still_short_by_what_it_is_owed(
                       "unsettled": 210.0, "short": 80.0}
 
 
-def test_month_totals_leave_the_all_time_totals_as_they_were(db_path):
-    """Other readers use them, and they answer a different question: what a
-    batch is still owed, not what its orders are worth."""
+def test_the_tabs_counts_are_the_legs_on_no_statement(db_path):
+    """They count legs that can still enter a statement, whatever the month's
+    split says about the ones already on one."""
     seed_every_state(db_path)
     data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
-    assert data["totals"] == {"unsettled": 210.0, "awaiting": 660.5}
     assert data["counts"] == {"ride": 1, "didi": 0, "uber": 0, "foodpanda": 0}
 
 
@@ -764,7 +763,7 @@ def test_a_month_that_cannot_be_split_withholds_its_totals_and_keeps_the_rest(db
     assert data["month_totals"] is None
     assert [o["order_id"] for o in data["orders"]] == ["AUG01", "LOOSE"]
     assert [b["id"] for b in data["settlements"]] == [short]
-    assert data["totals"] == {"unsettled": 210.0, "awaiting": 750.25}
+    assert data["counts"] == {"ride": 1, "didi": 0, "uber": 0, "foodpanda": 0}
     # July is not where the shortfall lands, so it can still be stated.
     assert data["earlier"] == {"open": 0.0, "month": None}
     said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]

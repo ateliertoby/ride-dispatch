@@ -622,7 +622,9 @@ def test_settle_shape(client):
     assert data["orders"][0]["settlement_id"] is None
     assert data["settlements"] == []
     assert data["counts"] == {"ride": 1, "didi": 1, "uber": 0, "foodpanda": 0}
-    assert data["totals"] == {"unsettled": 540.0, "awaiting": 0}
+    assert data["month_totals"] == {"fare": 540.0, "received": 0.0, "awaiting": 0.0,
+                                    "unsettled": 540.0, "short": 0.0}
+    assert data["earlier"] == {"open": 0.0, "month": None}
 
 
 def test_settle_carries_the_penalty_so_the_page_can_net_it(client):
@@ -665,7 +667,7 @@ def test_settle_carries_what_a_trip_was_paid_ahead_so_the_page_can_net_it(client
     r1, r2 = data["orders"]
     assert r1["paid_ahead"] == 40.0 and r1["ahead_batch"] == ahead
     assert r2["paid_ahead"] == 0 and r2["ahead_batch"] is None
-    assert data["totals"]["unsettled"] == 500.0
+    assert data["month_totals"]["unsettled"] == 500.0
     assert data["settlements"][0]["adjustments"] == [dict(R1_AHEAD[0], trip_date="2026-07-01")]
     assert data["settlements"][0]["expected_amount"] == 340.0
 
@@ -676,7 +678,8 @@ def test_settle_totals_follow_the_batch(client):
     create_batch(["R1"], confirmed=530)
     data = settle(client)
     assert data["counts"]["ride"] == 1
-    assert data["totals"] == {"unsettled": 300.0, "awaiting": 530.0}
+    assert data["month_totals"]["unsettled"] == 300.0
+    assert data["month_totals"]["awaiting"] == 540.0
     assert len(data["settlements"]) == 1
     batch = data["settlements"][0]
     assert batch["expected_amount"] == 540.0
@@ -796,8 +799,9 @@ def test_settle_carries_what_a_batch_has_received_and_still_owes(client):
     assert batch["allocations"] == [{"credit_id": cid, "amount": 540.0,
                                      "value_date": "2026-07-05"}]
     assert {o["order_id"]: o["unpaid"] for o in batch["orders"]} == {"R1": 0, "R2": 1}
-    # Waiting for money is the shortfall, not the whole batch.
-    assert data["totals"]["awaiting"] == 200.0
+    # Short is the leg ticked as unpaid, and nothing is left awaiting.
+    assert data["month_totals"]["short"] == 200.0
+    assert data["month_totals"]["awaiting"] == 0
     assert data["credits"] == {"unallocated": 0, "unallocated_sum": 0.0}
 
 
@@ -1041,7 +1045,8 @@ def test_allocating_the_whole_batch_pays_it(client):
     allocate(web.DB_PATH, seed_credit(amount=530.0), settlement_id)
     data = settle(client)
     assert data["settlements"][0]["paid_on"] == "2026-07-05"
-    assert data["totals"]["awaiting"] == 0
+    assert data["month_totals"]["awaiting"] == 0
+    assert data["month_totals"]["received"] == 540.0
 
 
 def test_a_credits_row_carries_what_it_paid_of_each_batch(client):

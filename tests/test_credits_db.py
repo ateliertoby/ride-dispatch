@@ -395,7 +395,7 @@ def test_settle_month_carries_what_each_batch_has_and_still_owes(db_path):
     m = get_settle_month(db_path, "2026-08", "ride", now=NOW)
     assert m["credits"] == {"unallocated": 2, "unallocated_sum": 3880.0}
     assert m["settlements"][0]["state"] == "awaiting"
-    assert m["totals"]["awaiting"] == 3460.0
+    assert m["month_totals"]["awaiting"] == 3460.0
     allocate(db_path, 1, sid)
     mark_unpaid(db_path, sid, ["A2"])
     m = get_settle_month(db_path, "2026-08", "ride", now=NOW)
@@ -403,8 +403,9 @@ def test_settle_month_carries_what_each_batch_has_and_still_owes(db_path):
     assert b["received"] == 2950.0 and b["outstanding"] == 510.0 and b["state"] == "partial"
     assert b["allocations"] == [{"credit_id": 1, "amount": 2950.0, "value_date": "2026-08-24"}]
     assert [o["order_id"] for o in b["orders"] if o["unpaid"]] == ["A2"]
-    # Waiting for money is the shortfall, not the whole batch.
-    assert m["totals"]["awaiting"] == 510.0
+    # Short is the leg ticked as unpaid, and nothing is left awaiting.
+    assert m["month_totals"]["short"] == 510.0
+    assert m["month_totals"]["awaiting"] == 0
     assert m["credits"] == {"unallocated": 1, "unallocated_sum": 930.0}
 
 
