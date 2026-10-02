@@ -507,6 +507,9 @@
   .qrow:active { background: var(--surface-press); }
   .qrow .t { flex: 1; min-width: 0; }
   .qrow .s { color: var(--blue); font-weight: 600; font-size: 13px; }
+  /* A credit put away is finished business, not bank money waiting to be
+     matched, so its word is not in that money's colour. */
+  .qrow .s.off { color: var(--text-2); font-weight: 400; }
   /* A queue row whose match is unambiguous answers itself, so the answer and
      the tap that takes it hang under the row, not inside its control. */
   .qitem { border-bottom: 1px solid var(--line); }

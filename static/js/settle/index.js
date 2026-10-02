@@ -98,6 +98,10 @@ function creditById(id) { return ledger.credits.find(c => c.id === +id) || null;
 // The work queue: the credits no statement accounts for yet. Oldest value date
 // first, the order list_credits returns -- those are the ones being chased.
 function openCredits() { return ledger.credits.filter(c => c.state === 'open' || c.state === 'partial'); }
+// The credits taken out of that queue with nothing matched to them, newest
+// first, as records are read. No batch leads to one, so the list of
+// statements with money in is the one way to them.
+function archivedCredits() { return ledger.credits.filter(c => c.state === 'archived').reverse(); }
 function batchOf(orderId) { return BATCH_OF.get(orderId) || null; }
 function reindex() {
   // A batch can straddle months, so its own member list is the only place legs
@@ -663,6 +667,14 @@ function renderList() {
   if (loaded) {
     html = rows.map(stmtRowHtml).join('') || '<div class="empty">' +
       (lens === 'awaiting' ? '今個月冇等過數嘅結算單' : '今個月未有入數') + '</div>';
+    // Bank money put away without a statement belongs to no month, so the
+    // way to it stands under whichever month's records are shown.
+    const put = lens === 'received' ? archivedCredits().length : 0;
+    if (put) {
+      html += '<button class="brow rec" data-archived="1"><span class="bl"><span class="bt">' +
+        figs('收埋咗嘅入數 ' + put + ' 筆') + '</span></span><span class="bend"></span>' +
+        '<span class="bc">&rsaquo;</span></button>';
+    }
   }
   byId('settle-list').innerHTML = html;
 }
@@ -1064,6 +1076,7 @@ function viewHtml(v) {
   if (v.kind === 'credit') return creditViewHtml(v);
   if (v.kind === 'order') return orderViewHtml(v);
   if (v.kind === 'queue') return queueViewHtml();
+  if (v.kind === 'archived') return archivedViewHtml();
   if (v.kind === 'stmt') return stmtViewHtml(v);
   return batchViewHtml(v);
 }
@@ -1593,14 +1606,32 @@ function queueViewHtml() {
     '<div class="sheet-acts"><button class="ghost-btn" data-back="1">收埋</button></div>';
 }
 
+// A credit as a row of a list of credits: its value date, its amount, a word
+// for where it stands, and the way into its own sheet.
+function creditRowHtml(c, state, cls) {
+  return '<button class="qrow" data-credit="' + c.id + '">' +
+    '<span class="t">' + figs(mdSlash(c.value_date) + ' · $' + $(c.amount)) + '</span>' +
+    '<span class="s' + cls + '">' + figs(state) + '</span>' +
+    '<span class="c">&rsaquo;</span></button>';
+}
+
+// The credits put away without a statement, in the queue's manner. They are
+// finished business, so nothing is offered against them here; each row opens
+// the credit's own sheet.
+function archivedViewHtml() {
+  const put = archivedCredits();
+  const sum = put.reduce((n, c) => n + Math.round(c.amount * 100), 0) / 100;
+  return sheetHead('收埋咗嘅入數', figs(platLabel(curPlat) + ' · ' + put.length + ' 筆 $' + $(sum))) +
+    (put.length ? '' : '<div class="empty">冇收埋咗嘅入數</div>') +
+    put.map(c => creditRowHtml(c, '收埋', ' off')).join('') +
+    '<div class="sheet-acts"><button class="ghost-btn" data-back="1">收埋</button></div>';
+}
+
 // A row whose match is not in question answers itself: the batch it agrees
 // with, and the tap that puts it there without leaving the queue. Anything
 // less certain stays a way into the credit's own sheet.
 function queueRowHtml(c) {
-  const row = '<button class="qrow" data-credit="' + c.id + '">' +
-    '<span class="t">' + figs(mdSlash(c.value_date) + ' · $' + $(c.amount)) + '</span>' +
-    '<span class="s">' + figs('未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : '')) + '</span>' +
-    '<span class="c">&rsaquo;</span></button>';
+  const row = creditRowHtml(c, '未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : ''), '');
   if (c.combo) {
     return '<div class="qitem">' + row +
       '<div class="qprop"><span class="t">&rarr; ' + comboHtml(c) + '</span>' +
@@ -1987,6 +2018,7 @@ export const settleView = {
       clearFocus();
     });
     byId('settle-list').addEventListener('click', e => {
+      if (e.target.closest('[data-archived]')) { openView({ kind: 'archived' }); return; }
       const row = e.target.closest('[data-bl]');
       if (row) openBatch(+row.dataset.bl);
     });

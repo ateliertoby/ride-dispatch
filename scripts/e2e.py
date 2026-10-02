@@ -3473,6 +3473,7 @@ def row_text(b: dict, lens: str, month: str, batches: list, today: date) -> dict
 
 LIST_HEAD = {"awaiting": "未過數", "received": "已過數"}
 LIST_EMPTY = {"awaiting": "今個月冇等過數嘅結算單", "received": "今個月未有入數"}
+ARCHIVED_ROW = '#settle-list [data-archived]'
 
 
 def statements(rows: list) -> list:
@@ -3584,6 +3585,24 @@ def settle_lists(s: Session) -> None:
     s.eq((by[b["group"]]["name"], by[b["group"]]["gap"]), (f"{md_slash(s.back(2))} 結算 (2)", ""),
          "the second statement confirmed on one date")
 
+    # Bank money put away without a statement: no row under 等過數, one under
+    # 已收 after the statements, leading to a list of those credits and from
+    # there to the credit's own sheet.
+    s.eq(s.count(ARCHIVED_ROW), 0, "the way to archived credits under 等過數")
+    s.tap('.lkey[data-lens="received"]')
+    last = s.list_rows()[-1]
+    s.eq((last["id"], last["name"], last["mark"], last["tag"]), (None, "收埋咗嘅入數 1 筆", "›", "BUTTON"), "the last row under 已收")
+    s.tap(ARCHIVED_ROW)
+    s.eq((s.title(), s.sub()), ("收埋咗嘅入數", "接送 · 1 筆 $215.50"), "the sheet of archived credits")
+    s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => [e.dataset.credit, e.textContent])"),
+         [[str(c["archived"]), f"{md_slash(s.back(36))} · $215.50收埋›"]], "its rows")
+    s.eq(s.colour(".sheet.show .qrow .s"), s.token("--text-2"), "the word on an archived credit is not in the unmatched colour")
+    s.tap(".sheet.show .qrow")
+    s.eq((s.title(), s.texts(".sheet.show .hero > div")), ("入數 " + md_label(s.back(36)), ["到帳", "$215.50", "收埋（no-orders）"]),
+         "the archived credit's own sheet")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "收埋咗嘅入數", "back on the archived credits")
+    s.close_sheets()
     s.eq(s.writes, [], "writes")
 
 
@@ -3762,7 +3781,8 @@ def settle_list_follows(s: Session) -> None:
     paid = [r for r in s.list_rows() if r["id"] == b["awaiting"]]
     s.eq((paid[0]["tags"], paid[0]["sub"][-1]), (["已收齊"], f"入數 {md_slash(s.back(14))} · $1,270.00"), "the statement, collected, under 已收")
     # Another platform: the lens stays, the list is that platform's and names
-    # the current month; with no statements it says so in words.
+    # the current month; with no statements and no credits put away it says
+    # so in words and offers no way to archived credits.
     s.tap(".tab", has_text="滴滴")
     s.eq((s.pressed(), s.count(".cal"), s.count("#settle-list"), s.month_text()),
          (["received"], 0, 1, month_label(cur, now=True)), "the lens and the month after changing platform")
