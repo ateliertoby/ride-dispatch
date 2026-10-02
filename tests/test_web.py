@@ -718,6 +718,29 @@ def test_settle_carries_the_month_totals_and_what_earlier_months_hold(client):
     assert settle(client, month="2999-07")["month_totals"]["fare"] == 0.0
 
 
+def test_settle_still_loads_when_a_month_cannot_be_split(client, caplog):
+    """A statement short by more than its latest month's orders are worth has
+    no exact split.  The figures are withheld; the page's data is not."""
+    from ride_dispatch.db import allocate
+    seed_ride("JUN30", scheduled="2026-06-30 20:00:00", price=600.0, banner=0.0)
+    seed_ride("JUL01", scheduled="2026-07-01 09:00:00", price=250.25, banner=0.0)
+    seed_ride("AUG", scheduled="2026-08-02 09:00:00", price=300.0, banner=0.0)
+    short = create_batch(["JUN30", "JUL01"], confirmed=850.25)
+    allocate(web.DB_PATH, seed_credit(amount=100.0), short)
+    with caplog.at_level("WARNING", logger="db"):
+        july = settle(client)
+        august = settle(client, month="2026-08")
+    assert july["month_totals"] is None
+    assert july["earlier"] == {"open": 0.0, "month": None}
+    assert [o["order_id"] for o in july["orders"]] == ["JUL01"]
+    assert [b["id"] for b in july["settlements"]] == [short]
+    assert august["earlier"] is None
+    assert august["month_totals"]["unsettled"] == 300.0
+    assert [o["order_id"] for o in august["orders"]] == ["AUG"]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(said) == 2 and all("2026-07" in m and f"batch {short}" in m for m in said)
+
+
 def test_settle_rejects_bad_query(client):
     assert client.get("/api/settle?month=2026-13&platform=ride").status_code == 400
     assert client.get("/api/settle?month=2026-07-01&platform=ride").status_code == 400

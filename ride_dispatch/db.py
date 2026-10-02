@@ -1427,6 +1427,9 @@ def _earlier_open(conn, month: str, platform: str, open_ids: list[int], cutoff: 
     at cannot disagree.  Only orders that can hold open money are read: those
     on no batch, those on a batch still owed money, and those a batch still
     owed money paid ahead of.  Everything else is received and adds nothing.
+
+    Raises ValueError, naming the month, when one of those months has no exact
+    split: a sum that left it out would be stated as the whole of what is open.
     """
     marks = ", ".join("?" * len(open_ids))
     rows = conn.execute(
@@ -1444,7 +1447,10 @@ def _earlier_open(conn, month: str, platform: str, open_ids: list[int], cutoff: 
     batches = _batches_for(conn, [o for orders in by_month.values() for o in orders], [])
     total, earliest = 0.0, None
     for key in sorted(by_month):
-        split = split_month(by_month[key], batches, cutoff)
+        try:
+            split = split_month(by_month[key], batches, cutoff)
+        except ValueError as exc:
+            raise ValueError(f"{key}: {exc}") from exc
         held = split["unsettled"] + split["awaiting"] + split["short"]
         if held > CENT:
             total += held
@@ -1465,6 +1471,11 @@ def get_settle_month(db_path: str, month: str, platform: str,
     their money has got to (month_totals.split_month).  earlier is what a view
     by month would otherwise hide — the money still open in every month before
     this one, and the earliest month holding any.
+
+    Either figure is None when it cannot be stated exactly (split_month refuses
+    a statement whose shortfall its orders' fares cannot hold).  The rest of
+    the payload does not depend on them, so the page still loads and the
+    statement at fault can still be opened and corrected from it.
     """
     cutoff = _now_str(now)
     with _conn(db_path) as conn:
@@ -1478,7 +1489,13 @@ def get_settle_month(db_path: str, month: str, platform: str,
 
         settlement_ids = sorted({o["settlement_id"] for o in orders if o["settlement_id"]})
         settlements = _derived_batches(conn, settlement_ids)
-        month_totals = split_month(orders, _batches_for(conn, orders, settlements), cutoff)
+        month_batches = _batches_for(conn, orders, settlements)
+        try:
+            month_totals = split_month(orders, month_batches, cutoff)
+        except ValueError as exc:
+            month_totals = None
+            logging.getLogger("db").warning(
+                "month totals withheld for %s %s: %s", month, platform, exc)
 
         counts = {p: 0 for p in PLATFORMS}
         unsettled = 0.0
@@ -1506,7 +1523,12 @@ def get_settle_month(db_path: str, month: str, platform: str,
                 awaiting += row["outstanding"]
                 open_ids.append(row["id"])
         awaiting = round(awaiting, 2)
-        earlier = _earlier_open(conn, month, platform, open_ids, cutoff)
+        try:
+            earlier = _earlier_open(conn, month, platform, open_ids, cutoff)
+        except ValueError as exc:
+            earlier = None
+            logging.getLogger("db").warning(
+                "earlier open money withheld before %s %s: %s", month, platform, exc)
 
     unallocated = unallocated_credits(db_path, platform)
 

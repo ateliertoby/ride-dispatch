@@ -682,3 +682,57 @@ def test_the_part_paid_ahead_follows_its_own_batch_across_months(db_path):
     allocate(db_path, credit(db_path, "R-TRIP", 300.0), trip)
     assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["earlier"] == {
         "open": banner, "month": "2026-07"}
+
+
+# ---- a month whose split cannot be stated ----
+
+def seed_unsplittable_august(db_path):
+    """A statement short by more than its latest month's orders are worth:
+    nothing is ticked, so the whole shortfall falls on August, which holds
+    only 250.25 of it."""
+    seed(db_path, "JUL31", "2026-07-31 20:00:00", 600.0)
+    seed(db_path, "AUG01", "2026-08-01 09:00:00", 250.25)
+    short = create_settlement(db_path, "ride", ["JUL31", "AUG01"], 850.25, "2026-08-03", now=NOW)
+    allocate(db_path, credit(db_path, "R-ODD", 100.0), short)
+    return short
+
+
+def test_a_month_that_cannot_be_split_withholds_its_totals_and_keeps_the_rest(db_path, caplog):
+    short = seed_unsplittable_august(db_path)
+    seed(db_path, "LOOSE", "2026-08-20 09:00:00", 210.0)
+    with caplog.at_level("WARNING", logger="db"):
+        data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["month_totals"] is None
+    assert [o["order_id"] for o in data["orders"]] == ["AUG01", "LOOSE"]
+    assert [b["id"] for b in data["settlements"]] == [short]
+    assert data["totals"] == {"unsettled": 210.0, "awaiting": 750.25}
+    # July is not where the shortfall lands, so it can still be stated.
+    assert data["earlier"] == {"open": 0.0, "month": None}
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(said) == 1
+    assert "2026-08" in said[0] and "ride" in said[0] and f"batch {short}" in said[0]
+
+
+def test_an_earlier_month_that_cannot_be_split_withholds_only_the_earlier_figure(db_path, caplog):
+    short = seed_unsplittable_august(db_path)
+    seed(db_path, "SEP", "2026-09-02 09:00:00", 300.0)
+    later = datetime(2026, 9, 20, 12, 0)
+    with caplog.at_level("WARNING", logger="db"):
+        data = get_settle_month(db_path, "2026-09", "ride", now=later)
+    assert data["earlier"] is None
+    assert data["month_totals"] == {"fare": 300.0, "received": 0.0, "awaiting": 0.0,
+                                    "unsettled": 300.0, "short": 0.0}
+    assert [o["order_id"] for o in data["orders"]] == ["SEP"]
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(said) == 1
+    assert "2026-08" in said[0] and "ride" in said[0] and f"batch {short}" in said[0]
+
+
+def test_errors_other_than_an_unsplittable_month_are_not_swallowed(db_path, monkeypatch):
+    seed(db_path, "A1", "2026-08-20 09:00:00", 210.0)
+
+    def broken(*args, **kwargs):
+        raise KeyError("scheduled_time")
+    monkeypatch.setattr(db_module, "split_month", broken)
+    with pytest.raises(KeyError):
+        get_settle_month(db_path, "2026-08", "ride", now=NOW)
