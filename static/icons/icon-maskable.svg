@@ -2,7 +2,7 @@
   <!-- Maskable twin of icon.svg: same mark, scaled to 0.8 about the centre so
        every vertex stays inside the safe circle (radius 40% of the canvas)
        that Android may crop to. Any change to icon.svg must be mirrored here. -->
-  <rect width="512" height="512" fill="#0c0f14"/>
+  <rect width="512" height="512" fill="#17181b"/>
   <g transform="translate(256 256) scale(0.8) translate(-256 -256)">
     <path d="M256 88 L410 428 L256 336 L102 428 Z"
           fill="#6ab2ff" stroke="#6ab2ff" stroke-width="28" stroke-linejoin="round"/>

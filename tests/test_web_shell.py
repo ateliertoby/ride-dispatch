@@ -351,3 +351,21 @@ def test_the_order_sheet_names_each_pickup_point_at_the_servers_charge():
     twin = {name: float(fee) for name, fee in re.findall(r"'([^']+)':\s*([\d.]+)", table)}
     assert twin == PICKUP_POINTS
     assert list(twin) == list(PICKUP_POINTS)
+
+
+def test_the_icons_stand_on_the_launch_screens_ground():
+    """The launch screen paints the manifest's background_color and sets the
+    icon on it: a ground of any other colour shows as a square."""
+    from PIL import Image
+    static = web.app.static_folder
+    with open(os.path.join(static, "manifest.webmanifest")) as f:
+        manifest = json.load(f)
+    ground = tuple(bytes.fromhex(manifest["background_color"].lstrip("#")))
+    names = [posixpath.basename(icon["src"]) for icon in manifest["icons"]] + ["apple-touch-icon.png"]
+    assert len(names) == 4
+    for name in names:
+        with Image.open(os.path.join(static, "icons", name)) as im:
+            rgb = im.convert("RGB")
+            w, h = rgb.size
+            corners = {rgb.getpixel(p) for p in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))}
+        assert corners == {ground}, name
