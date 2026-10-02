@@ -128,3 +128,30 @@ def test_one_month_has_nothing_left_to_do(seeded):
     assert month["earlier"] == {"open": 0.0, "month": None}
     assert not [c for c in db.list_credits(seeded.path, clean["platform"]) if c["state"] in ("open", "partial")]
     assert len(month["orders"]) == 3 and len(month["settlements"]) == 1
+
+
+def test_every_statement_prints_due_dates_and_no_two_print_the_same(seeded):
+    for platform in PLATFORMS:
+        batches = seeded.batches(platform)
+        due = [tuple(b["due_dates"]) for b in batches.values()]
+        assert all(due) and len(set(due)) == len(due)
+        for b in batches.values():
+            # One value per service day, and a figure the statement adds up to.
+            for day in b["statement"]["days"]:
+                assert len({r["settle_date"] for r in day["rows"]}) == 1
+            assert b["statement"]["total"] == b["confirmed_amount"]
+    # Two statements confirmed on one day are still told apart.
+    batches = seeded.batches()
+    ahead, group = batches[seed_demo_db.BATCH["ahead"]], batches[seed_demo_db.BATCH["group"]]
+    assert ahead["settled_on"] == group["settled_on"] and ahead["due_dates"] != group["due_dates"]
+
+
+def test_a_statement_due_on_two_days_running_and_one_due_on_two_days_apart(seeded):
+    batches = seeded.batches()
+
+    def gaps(key):
+        days = [date.fromisoformat(d) for d in batches[seed_demo_db.BATCH[key]]["due_dates"]]
+        return [(b - a).days for a, b in zip(days, days[1:])]
+
+    assert gaps("short") == [1]
+    assert gaps("held_back") == [3]

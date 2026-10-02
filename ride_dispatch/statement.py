@@ -69,6 +69,33 @@ def dates_of(stmt: Statement) -> list[str]:
     return sorted({d.date for d in stmt.days})
 
 
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def due_dates(stored: dict | None) -> list[str]:
+    """The 應結算日期 values a stored statement prints, each once, in order.
+
+    `stored` is a batch's statement JSON, or None when it has none.  The set
+    is what tells one statement from another: the platform prints one value
+    per service day, and no single value of it, earliest or latest, is unique
+    to a statement.  A row that carries no value, or one that is not a real
+    YYYY-MM-DD date, is left out, and nothing is worked out from the service
+    day in its place: the name has to be what the platform printed.
+    """
+    found = set()
+    for day in (stored or {}).get("days", []):
+        for row in day.get("rows", []):
+            value = row.get("settle_date")
+            if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
+                continue
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                continue
+            found.add(value)
+    return sorted(found)
+
+
 # ---- the verdict ----
 
 @dataclass

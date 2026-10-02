@@ -8,7 +8,7 @@ from .parser import Order
 from .ingest import banner_fee, pickup_point
 from .month_totals import split_month
 from .service import PLATFORMS, needs_departure_reminder, owed_of, platform_of
-from .statement import leg_amount
+from .statement import due_dates, leg_amount
 
 COARSE_WINDOW_HOURS = 24
 
@@ -990,8 +990,10 @@ def _derive_batch(batch: dict, allocations: list[dict], adjustments: list[dict])
     pays a statement short when it failed to submit legs of its own.
 
     The adjustments ride along here rather than at each caller so no batch can
-    reach a reader without the lines that are part of what it is owed.
+    reach a reader without the lines that are part of what it is owed.  So do
+    the due dates its statement prints, which are what the batch is named by.
     """
+    batch["due_dates"] = due_dates(batch.get("statement"))
     batch["allocations"] = allocations
     batch["adjustments"] = adjustments
     received = round(sum(a["amount"] for a in allocations), 2)

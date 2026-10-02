@@ -579,7 +579,7 @@ def foot_short(body: dict, amount: float) -> None:
 
 def foot_second_short(body: dict, settled_on: str) -> None:
     """Give the month a second statement paid short: a copy of the seeded
-    one under another id and another statement date."""
+    one under another id, confirmed on another date."""
     first = next(b for b in body["settlements"] if b["id"] == seed_demo_db.BATCH["short"])
     body["settlements"].append(dict(first, id=902, settled_on=settled_on))
 
@@ -611,8 +611,8 @@ FOOT_LONG = 12345.67
 def stress_foot(ctx, today: date) -> None:
     """From now on, every page of this context is served a foot of three
     items at their longest in the month foot_month names: five-digit amounts
-    with cents, a two-digit count of credits, and a statement named by a
-    two-digit month and day."""
+    with cents, a two-digit count of credits, and a statement named by two
+    due dates apart in a two-digit month."""
     month = foot_month(today)
 
     def settle(body: dict, path: str) -> None:
@@ -622,7 +622,7 @@ def stress_foot(ctx, today: date) -> None:
         foot_earlier(body, FOOT_LONG, month_before(month))
         for b in body["settlements"]:
             if b["id"] == seed_demo_db.BATCH["short"]:
-                b["settled_on"] = month[:4] + "-12-29"
+                b["due_dates"] = [month[:4] + "-12-28", month[:4] + "-12-30"]
 
     rewrite(ctx, settle, lambda body, path: foot_credits(body, 12, FOOT_LONG))
 

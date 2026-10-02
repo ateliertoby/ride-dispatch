@@ -61,16 +61,36 @@ export function keyFigure(amount) {
   };
 }
 
-// A statement is named by its own date, `settled_on`: the day it was
-// confirmed. `paid_on` is the bank's value date and names the transfer, not
-// the statement. `sameDayIndex` is the statement's place among those of one
-// platform sharing that date, from 0; a later one is numbered so a name never
-// stands for two statements. A batch stored without a date gets no date
-// rather than a borrowed one.
-export function statementName(batch, sameDayIndex = 0) {
-  const on = batch.settled_on;
-  return (on ? mdSlash(on) + ' ' : '') + '結算' +
-    (sameDayIndex > 0 ? ' (' + (sameDayIndex + 1) + ')' : '');
+// A set of dates as runs of consecutive days, as short as it can be read
+// without a doubt: a date carries its month when that month is not the one
+// the date written just before it carried, so a bare number is always a day
+// of the last month written. '9/12–13', '9/13、15', '9/30–10/1', '9/29、10/2',
+// '9/30–10/1、3'.
+function runsLabel(dates) {
+  let month = '';
+  const write = d => {
+    const named = d.slice(0, 7) === month;
+    month = d.slice(0, 7);
+    return named ? String(+d.slice(8)) : mdSlash(d);
+  };
+  return runsOf([...new Set(dates)]).map(run =>
+    write(run[0]) + (run.length > 1 ? '–' + write(run[run.length - 1]) : '')).join('、');
+}
+
+// A statement is named by the 應結算日期 values the platform prints on it,
+// `due_dates`: the set of them is what the platform's own statement is told
+// apart by, where the day it was confirmed in the app, `settled_on`, is shared
+// by every statement confirmed that day. A batch whose stored statement
+// carries none falls back on `settled_on`, and one with neither gets no date
+// rather than a borrowed one; `paid_on` is the bank's value date and names
+// the transfer, not the statement. `sameNameIndex` is the statement's place
+// among those that would otherwise be given the same name, from 0; a later
+// one is numbered so a name never stands for two statements.
+export function statementName(batch, sameNameIndex = 0) {
+  const due = batch.due_dates || [];
+  const on = due.length ? runsLabel(due) : batch.settled_on ? mdSlash(batch.settled_on) : '';
+  return (on ? on + ' ' : '') + '結算' +
+    (sameNameIndex > 0 ? ' (' + (sameNameIndex + 1) + ')' : '');
 }
 
 // The service days a statement covers, as runs of consecutive days. Inside

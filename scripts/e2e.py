@@ -182,6 +182,27 @@ def day_runs(days: list, month: str) -> str:
         return md_slash(a) + "–" + (str(z.day) if month_key(a) == month_key(z) else md_slash(z))
     return "、".join(word(r) for r in runs)
 
+def due_runs(due: list) -> str:
+    """How a statement's name writes its due dates ('YYYY-MM-DD'): runs of
+    consecutive days, a date carrying its month whenever that is not the
+    month of the date written just before it."""
+    days = sorted({date.fromisoformat(d) for d in due})
+    runs = []
+    for d in days:
+        if runs and d - runs[-1][-1] == timedelta(days=1):
+            runs[-1].append(d)
+        else:
+            runs.append([d])
+    out, month = [], None
+    for run in runs:
+        words = []
+        for d in ([run[0]] if len(run) == 1 else [run[0], run[-1]]):
+            words.append(str(d.day) if month_key(d) == month else md_slash(d))
+            month = month_key(d)
+        out.append("–".join(words))
+    return "、".join(out)
+
+
 # The month's total keys, in the order they stand: the payload's name for
 # each figure and the key's label.
 TOTAL_KEYS = (("fare", "本月車費"), ("received", "已收"), ("awaiting", "等過數"), ("unsettled", "未結算"))
@@ -744,6 +765,10 @@ class Session(Driver):
 
     def back(self, n: int) -> date:
         return self.today - timedelta(days=n)
+
+    def named(self, key: str) -> str:
+        """The name of a seeded statement, from the due dates it prints."""
+        return due_runs(self.t["due"][key]) + " 結算"
 
     def open_settle(self) -> None:
         self.open("/settle", ".cell[data-d]")
@@ -3001,7 +3026,7 @@ def settle_focus(s: Session) -> None:
     s.eq((s.count("#grid .cell[data-d].dim"), s.count("#grid .cell.none.dim")), (held - 3, 0), "every other day recedes, bar the empty ones")
 
     def line() -> str:
-        return (f"{md_slash(s.back(23))} 結算 · {day_runs(days, s.view_month())} · 5 程 · $2,310.00 · 差 $380✕")
+        return (f"{s.named('short')} · {day_runs(days, s.view_month())} · 5 程 · $2,310.00 · 差 $380✕")
 
     s.eq(s.totals(), [line()], "the foot while a statement is lit")
     close = s.on(".foot [data-unfocus]").first.bounding_box()
@@ -3072,7 +3097,7 @@ def settle_focus_reveal(s: Session) -> None:
     s.wait(lambda: not s.sheet_open(), "the sheet to close")
     s.eq(s.lit(), sorted(d.isoformat() for d in days), "the days lit")
     s.expect(s.page.evaluate(LIT_ON_SCREEN_JS), "none of the statement's days was brought on screen")
-    s.eq(s.totals(), [f"{md_slash(s.back(9))} 結算 · {day_runs(days, s.view_month())} · 4 程 · $1,780.00 · 已收 {md_slash(s.back(7))}✕"],
+    s.eq(s.totals(), [f"{s.named('held_back')} · {day_runs(days, s.view_month())} · 4 程 · $1,780.00 · 已收 {md_slash(s.back(7))}✕"],
          "the foot's line for a collected statement")
     s.eq(s.colour(".foot .fline .bs"), s.token("--green"), "collected, in the line")
     # Already on screen: the strip stays where it is. The statement's days
@@ -3142,7 +3167,7 @@ def settle_cells_stress(s: Session) -> None:
         cells_hold(s, f"under stress at {width}")
         foot_holds(s, 3, f"under stress at {width}")
     long = money2(LONG_AMOUNT)
-    s.eq(s.totals(), [f"收少咗 · {md_slash(s.back(23))} 結算{long}", f"入數未對 8 筆{long}", "之前月份未清$1,048,576.50"],
+    s.eq(s.totals(), [f"收少咗 · {s.named('short')}{long}", f"入數未對 8 筆{long}", "之前月份未清$1,048,576.50"],
          "the foot under stress")
     s.eq(s.writes, [], "writes")
 
@@ -3159,7 +3184,10 @@ def foot_holds(s: Session, n: int, what: str) -> dict:
     s.eq([c["cls"].split()[0] for c in cells], ["fkey"] * n, f"the foot's cells {what}")
     s.expect(all(c["inside"] for c in cells), f"a label or a figure runs out of its cell {what}: {[c['text'] for c in cells if not c['inside']]}")
     s.eq(len({c["figTop"] for c in cells}), 1, f"lines the foot's figures stand on {what}")
-    s.eq(({c["figHeight"] for c in cells}, {c["labelHeight"] for c in cells}), ({20}, {14}), f"a figure or a label wrapped {what}")
+    # To the pixel: a line box is laid out in sixty-fourths, and one set at a
+    # fractional size can come out a sixty-fourth short of its line height.
+    s.eq(({round(c["figHeight"]) for c in cells}, {round(c["labelHeight"]) for c in cells}), ({20}, {14}),
+         f"a figure or a label wrapped {what}")
     s.eq((len({c["size"] for c in cells}), len({c["labelSize"] for c in cells})), (1, 1), f"sizes the figures and the labels are set in {what}")
     s.expect(cells[0]["left"] >= f["left"] - 0.5 and cells[-1]["right"] <= f["right"] + 0.5
              and all(c["left"] >= cells[i]["right"] - 0.5 for i, c in enumerate(cells[1:])),
@@ -3248,7 +3276,7 @@ def settle_foot_items(s: Session) -> None:
     case.update(short=1, credits=True, earlier=True)
     rewrite(s.ctx, book, ledger)
     s.open_settle()
-    named = f"收少咗 · {md_slash(s.back(23))} 結算$380.00"
+    named = f"收少咗 · {s.named('short')}$380.00"
     queue, prior = "入數未對 3 筆$4,440.00", "之前月份未清$1,320.00"
     heights = set()
     for short, credits, earlier, want in (
@@ -3342,7 +3370,7 @@ def settle_foot_narrow(s: Session) -> None:
     s.open_settle()
     s.to_month(date.fromisoformat(foot_month(s.today) + "-01"))
     long = money2(FOOT_LONG)
-    s.eq(s.totals(), [f"收少咗 · 12/29 結算{long}", f"入數未對 12 筆{long}", f"之前月份未清{long}"], "the foot's items")
+    s.eq(s.totals(), [f"收少咗 · 12/28、30 結算{long}", f"入數未對 12 筆{long}", f"之前月份未清{long}"], "the foot's items")
     sizes = {}
     for scheme in SCHEMES:
         s.page.emulate_media(color_scheme=scheme)
@@ -3464,7 +3492,7 @@ def settle_foot_unknown(s: Session) -> None:
     dash = f["cells"][0]
     s.eq((dash["tag"], dash["ink"], dash["rule"][2:], f["height"]), ("DIV", s.token("--text-2"), [CLEAR, "none"], height), "the item with no figure")
     serve(earlier=False, short=True, credits=True)
-    s.eq(s.totals(), [f"收少咗 · {md_slash(s.back(23))} 結算$380.00", "入數未對 3 筆$4,440.00", "之前月份未清—"], "the dash beside two stated items")
+    s.eq(s.totals(), [f"收少咗 · {s.named('short')}$380.00", "入數未對 3 筆$4,440.00", "之前月份未清—"], "the dash beside two stated items")
     foot_holds(s, 3, "with the earlier months withheld")
     s.eq([c["tag"] for c in s.foot_look()["cells"]], ["BUTTON", "BUTTON", "DIV"], "which of them are controls")
     s.eq(s.writes, [], "writes")
@@ -3932,11 +3960,14 @@ def money2(n: float) -> str:
 
 
 def statement_name(b: dict, batches: list) -> str:
-    """A statement's name: its date, numbered when an earlier one among
-    `batches` shares it."""
-    same = sorted(x["id"] for x in batches if x["settled_on"] == b["settled_on"])
-    name = (md_slash(date.fromisoformat(b["settled_on"])) + " " if b["settled_on"] else "") + "結算"
-    return name + (f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else "")
+    """A statement's name: the due dates it prints, or the day it was
+    confirmed when it prints none, numbered when an earlier one among
+    `batches` would be named the same."""
+    def plain(x: dict) -> str:
+        on = due_runs(x["due_dates"]) if x["due_dates"] else md_slash(date.fromisoformat(x["settled_on"])) if x["settled_on"] else ""
+        return (on + " " if on else "") + "結算"
+    same = sorted(x["id"] for x in batches if plain(x) == plain(b))
+    return plain(b) + (f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else "")
 
 
 def foot_texts(book: dict, ledger: dict, month: str) -> list:
@@ -4133,17 +4164,18 @@ def settle_lists(s: Session) -> None:
     # The month of the statement confirmed for 20 less than its fares: it says
     # so, in the ink of a note. The statement beside it carries a 舉牌 line of
     # its own on top of its legs and agrees with the book, so it says nothing;
-    # the two confirmed on one date are told apart by a number.
+    # the two confirmed on one date are told apart by the due dates they print.
     s.to_month(s.back(19))
     by = {r["id"]: r for r in s.list_rows()}
     s.eq((by[b["awaiting"]]["amount"], by[b["awaiting"]]["gap"], by[b["awaiting"]]["gapInk"]),
          ("$1,270.00", "同車費差 −$20.00", s.token("--text-2")), "a statement confirmed for less than its fares")
     s.to_month(s.back(6))
     by = {r["id"]: r for r in s.list_rows()}
-    s.eq((by[b["ahead"]]["amount"], by[b["ahead"]]["gap"]), ("$1,425.00", ""), "a statement that is its legs and its own line")
+    s.eq((by[b["ahead"]]["name"], by[b["ahead"]]["amount"], by[b["ahead"]]["gap"]),
+         (f"{md_slash(s.back(1))} 結算", "$1,425.00", ""), "a statement that is its legs and its own line")
     s.to_month(s.back(8))
     by = {r["id"]: r for r in s.list_rows()}
-    s.eq((by[b["group"]]["name"], by[b["group"]]["gap"]), (f"{md_slash(s.back(2))} 結算 (2)", ""),
+    s.eq((by[b["group"]]["name"], by[b["group"]]["gap"]), (f"{md_slash(s.back(3))} 結算", ""),
          "the second statement confirmed on one date")
 
     # Bank money put away without a statement: no row under 等過數, one under
@@ -4164,6 +4196,84 @@ def settle_lists(s: Session) -> None:
     s.tap(".sheet.show .sheet-back")
     s.eq(s.title(), "收埋咗嘅入數", "back on the archived credits")
     s.close_sheets()
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-statement-is-named-by-the-due-dates-it-prints")
+def settle_list_names(s: Session) -> None:
+    """A statement's name is the due dates its own rows print, in the list,
+    in the foot and in the focus line alike: one date, two days running, two
+    days apart. The day it was confirmed is said on its sheet and nowhere in
+    the list. A statement that prints none falls back on that day, and only
+    two that would still share a name are numbered."""
+    b = s.t["batch"]
+    due = {key: [date.fromisoformat(d) for d in s.t["due"][key]] for key in s.t["due"]}
+    a, z = due["short"]
+    run = f"{md_slash(a)}–{z.day if month_key(a) == month_key(z) else md_slash(z)} 結算"
+    a, z = due["held_back"]
+    apart = f"{md_slash(a)}、{z.day if month_key(a) == month_key(z) else md_slash(z)} 結算"
+    s.eq((s.named("short"), s.named("held_back"), s.named("awaiting")), (run, apart, f"{md_slash(s.back(17))} 結算"),
+         "the three forms a name takes")
+    s.open_settle()
+    s.tap('.lkey[data-lens="received"]')
+    s.to_month(s.back(26))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq((by[b["short"]]["name"], by[b["short"]]["sub"][0]),
+         (run, f"{day_runs([s.back(n) for n in (27, 26, 25)], s.view_month())} · 5 程"), "a statement due on two days running, over its service days")
+    s.eq(s.totals()[0], f"收少咗 · {run}$380.00", "the same name in the foot")
+    s.to_month(s.back(12))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq(by[b["held_back"]]["name"], apart, "a statement due on two days apart")
+    # The day a statement was confirmed is not in its row; its sheet says it.
+    confirmed = md_slash(s.back(9))
+    row = s.text(f'#settle-list .brow[data-bl="{b["held_back"]}"]')
+    s.expect(confirmed not in {md_slash(d) for d in due["held_back"]} | {md_slash(s.back(n)) for n in (15, 12, 11, 7)},
+             "the seed's confirm date is one the row would print anyway")
+    s.expect(confirmed not in row, f"the confirm date is in the row: {row}")
+    s.tap(f'#settle-list .brow[data-bl="{b["held_back"]}"]')
+    s.on(".sheet.show .hero").first.wait_for()
+    s.expect(f" · 確認 {confirmed}" in s.sub(), f"the sheet does not say when the statement was confirmed: {s.sub()}")
+    s.tap(".sheet.show [data-focus]")
+    s.wait(lambda: not s.sheet_open(), "the sheet to close")
+    s.expect(s.totals()[0].startswith(apart + " · "), f"the same name in the focus line: {s.totals()}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-name-falls-back-on-the-confirm-date-and-is-numbered-only-when-shared")
+def settle_list_name_guard(s: Session) -> None:
+    """A statement whose stored rows print no due date is named by the day
+    it was confirmed. Two statements confirmed on one day keep their own
+    names; only two that print the same due dates are told apart by a
+    number, the later one taking it."""
+    b = s.t["batch"]
+    case = {"same": False}
+
+    def change(body: dict, path: str) -> None:
+        by = {x["id"]: x for x in body["settlements"]}
+        if b["awaiting"] in by:
+            by[b["awaiting"]]["due_dates"] = []
+        if case["same"] and b["group"] in by:
+            by[b["group"]]["due_dates"] = s.t["due"]["ahead"]
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.to_month(s.back(19))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq(by[b["awaiting"]]["name"], f"{md_slash(s.back(16))} 結算", "a statement that prints no due date")
+
+    def names() -> dict:
+        out = {}
+        for back, key in ((6, "ahead"), (8, "group")):
+            s.to_month(s.back(back))
+            out[key] = {r["id"]: r for r in s.list_rows()}[b[key]]["name"]
+        return out
+
+    s.eq(names(), {"ahead": s.named("ahead"), "group": s.named("group")}, "two statements confirmed on one day")
+    case["same"] = True
+    s.tap(".tab", has_text="滴滴")
+    s.tap(".tab", has_text="接送")
+    s.eq(names(), {"ahead": s.named("ahead"), "group": s.named("ahead") + " (2)"}, "two statements printing the same due dates")
     s.eq(s.writes, [], "writes")
 
 
@@ -4234,8 +4344,9 @@ def settle_list_straddle(s: Session) -> None:
 
 @check("settle.a-statement-without-its-date-waits-last")
 def settle_list_undated(s: Session) -> None:
-    """A statement stored without its date has waited an unknown time: its
-    row says nothing of a wait and stands after every row that does."""
+    """A statement stored without the day it was confirmed has waited an
+    unknown time: its row says nothing of a wait and stands after every row
+    that does. Printing no due date either, it is named by no date."""
     # A month holding two waiting statements or more, and of those the one
     # that has waited longest, which its date would have put first. The
     # seeded statements lie close enough together that some month always
@@ -4251,6 +4362,7 @@ def settle_list_undated(s: Session) -> None:
         for x in body["settlements"]:
             if x["id"] == undated:
                 x["settled_on"] = None
+                x["due_dates"] = []
 
     rewrite_settle(s, change)
     s.open_settle()
@@ -4509,7 +4621,7 @@ def settle_batch_sheets(s: Session) -> None:
          "the link to the batch that paid it")
     s.tap(".sheet.show .blink")
     s.eq(s.title(), "結算 " + span_label(s.back(6), s.back(5)), "batch opened from the link")
-    s.eq(s.sub(), f"接送 · 3 程 · 結算日 {md_slash(s.back(2))} · 連 {s.back(3).day}日 舉牌 $40", "batch subtitle")
+    s.eq(s.sub(), f"接送 · 3 程 · 確認 {md_slash(s.back(2))} · 連 {s.back(3).day}日 舉牌 $40", "batch subtitle")
     s.eq(s.text(".sheet.show .prop-head"), "帳項 · $40", "the batch's own lines")
     s.eq(s.sum_pairs(".sheet.show .prop-sec .sum-row"), [[f"舉牌先結 …0601 · {md_slash(s.back(3))}", "+$40"]], "the line paid ahead")
     s.close_sheets()
@@ -4517,7 +4629,7 @@ def settle_batch_sheets(s: Session) -> None:
     # A collected batch with a statement, a fined leg and a screenshot.
     s.open_batch("paid")
     s.eq(s.title(), "結算 " + span_label(s.back(34), s.back(33)), "batch title")
-    s.eq(s.sub(), f"接送 · 3 程 · 結算日 {md_slash(s.back(31))}", "batch subtitle")
+    s.eq(s.sub(), f"接送 · 3 程 · 確認 {md_slash(s.back(31))}", "batch subtitle")
     s.eq(s.texts(".sheet.show .hero > div"), ["平台確認", "$1376.55", "已收齊 · " + md_slash(s.back(29))], "hero")
     pairs = s.sum_pairs(".sheet.show .sum-rows .sum-row")
     s.eq(pairs, [["應收", "$1376.55"], ["入數 " + md_slash(s.back(29)), "$1376.55›"], ["結算單", "睇圖"]], "summary rows")
@@ -6651,11 +6763,10 @@ def inventory_settle(s: Session) -> None:
     s.open_cell(26)
     s.eq(s.texts(f'.sheet.show .orow[data-od="{seed_demo_db._oid(204)}"] .otag'), [f"補收 {md_slash(made_up)}"], "the leg on its day")
     s.close_sheets()
-    # A focus is dropped when what it names is gone. The batch shares its
-    # statement date with an earlier one, so its name is numbered.
+    # A focus is dropped when what it names is gone.
     s.focus_on("group")
     s.eq(s.lit(), sorted(s.back(n).isoformat() for n in (9, 8)), "the focus on a batch")
-    s.expect(s.totals()[0].startswith(f"{md_slash(s.back(2))} 結算 (2) · "), f"the second statement of a day: {s.totals()}")
+    s.expect(s.totals()[0].startswith(s.named("group") + " · "), f"the statement the line names: {s.totals()}")
     s.api("DELETE", f"/api/settlements/{b['group']}")
     s.wait(lambda: s.lit() == [] and s.count("#grid .dim") == 0 and s.count(".foot .fline") == 0,
            "the focus on a batch that is gone to be dropped")

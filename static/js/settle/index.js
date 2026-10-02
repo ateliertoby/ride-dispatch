@@ -540,10 +540,12 @@ function renderFoot() {
   }).join('');
 }
 
-// A statement's name. Its place among the loaded statements confirmed on the
-// same date decides whether the name is numbered.
+// A statement's name. Its place among the loaded statements that would be
+// given the same name decides whether it is numbered. The payload is one
+// platform's, so those are statements of one platform.
 function nameOf(b) {
-  const same = data.settlements.filter(x => x.settled_on === b.settled_on)
+  const plain = statementName(b);
+  const same = data.settlements.filter(x => statementName(x) === plain)
     .map(x => x.id).sort((a, z) => a - z);
   return statementName(b, same.indexOf(b.id));
 }
@@ -1597,8 +1599,8 @@ function batchViewHtml(v) {
 
   const held = heldLabel(b);
   return sheetHead('結算 ' + figs(batchLabel(b)),
-      figs(platLabel(b.platform) + ' · ' + b.orders.length + ' 程 · 結算日 ' + mdSlash(b.settled_on) +
-      (held ? ' · ' + held : ''))) +
+      figs(platLabel(b.platform) + ' · ' + b.orders.length + ' 程' +
+      (b.settled_on ? ' · 確認 ' + mdSlash(b.settled_on) : '') + (held ? ' · ' + held : ''))) +
     '<div class="hero"><div class="hero-k">平台確認</div>' +
     '<div class="hero-v">' + num('$' + $(b.confirmed_amount)) + '</div>' + state + '</div>' +
     '<div class="sum-rows">' + sums.join('') + '</div>' +

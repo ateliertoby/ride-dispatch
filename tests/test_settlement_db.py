@@ -84,6 +84,22 @@ def test_settle_month_carries_statement(db_path):
     assert batch["statement_image"] == f"{sid}.jpg"
 
 
+def test_a_batch_carries_the_due_dates_its_statement_prints(db_path):
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "A2", "2026-08-24 12:30:00", 210.0)
+    seed(db_path, "A3", "2026-08-24 18:00:00", 300.0)
+    stored = {"days": [
+        {"date": "2026-08-23", "rows": [{"order_id": "A1", "amount": 280.0, "settle_date": "2026-08-27"}]},
+        {"date": "2026-08-24", "rows": [{"order_id": "A2", "amount": 210.0, "settle_date": "2026-08-25"}]}]}
+    with_dates = create_settlement(db_path, "ride", ["A1", "A2"], 490.0, "2026-08-26", now=NOW, statement=stored)
+    without = create_settlement(db_path, "ride", ["A3"], 300.0, "2026-08-26", now=NOW)
+    assert get_settlement(db_path, with_dates)["due_dates"] == ["2026-08-25", "2026-08-27"]
+    assert get_settlement(db_path, without)["due_dates"] == []
+    listed = {b["id"]: b["due_dates"] for b in get_settle_month(db_path, "2026-08", "ride", now=NOW)["settlements"]}
+    assert listed == {with_dates: ["2026-08-25", "2026-08-27"], without: []}
+    assert {b["id"]: b["due_dates"] for b in open_batches(db_path, "ride")} == listed
+
+
 def test_delete_removes_image_file(db_path):
     seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
     sid = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-26", now=NOW,

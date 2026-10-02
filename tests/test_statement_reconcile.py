@@ -1,8 +1,10 @@
 from datetime import datetime
 
+import pytest
+
 from ride_dispatch.statement import (
     Statement, StatementDay, StatementRow, reconcile, levenshtein, dates_of, corrected_json,
-    penalties_of, format_report, confirm_label,
+    penalties_of, format_report, confirm_label, due_dates,
 )
 
 NOW = datetime(2026, 8, 26, 12, 0)
@@ -621,3 +623,41 @@ def test_corrected_json_rewrites_fuzzy_ids():
     # the extra key rather than reject the whole statement.
     back = Statement.from_json(d)
     assert [r.order_id for r in back.days[0].rows] == ["9012345678901234", "A1"]
+
+
+# ---- the due dates a stored statement prints ----
+
+def _stored(*days):
+    return {"days": [{"date": d, "rows": [{"order_id": f"X{i}", "amount": 100.0, **row}
+                                          for i, row in enumerate(rows)]} for d, rows in days]}
+
+
+def test_due_dates_are_the_distinct_values_in_order():
+    stored = _stored(("2026-09-12", [{"settle_date": "2026-09-15"}, {"settle_date": "2026-09-15"}]),
+                     ("2026-09-10", [{"settle_date": "2026-09-13"}]),
+                     ("2026-09-30", [{"settle_date": "2026-10-02"}]))
+    assert due_dates(stored) == ["2026-09-13", "2026-09-15", "2026-10-02"]
+
+
+def test_due_dates_of_a_batch_without_a_statement_are_none():
+    assert due_dates(None) == []
+    assert due_dates({}) == []
+    assert due_dates({"days": []}) == []
+    assert due_dates({"days": [{"date": "2026-09-12"}]}) == []
+
+
+def test_due_dates_skip_a_row_that_carries_none():
+    stored = _stored(("2026-09-12", [{}, {"settle_date": None}, {"settle_date": ""},
+                                     {"settle_date": "2026-09-15"}]))
+    assert due_dates(stored) == ["2026-09-15"]
+    # Nothing is worked out from the service day of a statement that prints none.
+    assert due_dates(_stored(("2026-09-12", [{}, {"settle_date": None}]))) == []
+
+
+@pytest.mark.parametrize("value", [
+    "2026/09/15", "9/15", "2026-9-15", "20260915", "2026-09-15 00:00", " 2026-09-15", "2026-13-01",
+    "2026-02-30", "二零二六", 20260915, ["2026-09-15"],
+])
+def test_due_dates_skip_a_value_that_is_not_a_date(value):
+    stored = _stored(("2026-09-12", [{"settle_date": value}, {"settle_date": "2026-09-16"}]))
+    assert due_dates(stored) == ["2026-09-16"]

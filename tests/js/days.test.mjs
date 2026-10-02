@@ -134,16 +134,63 @@ test('keyFigure puts the minus sign outside the symbol', () => {
   assert.deepEqual(keyFigure(-1097.38), { dollars: '−$1,097', cents: '38' });
 });
 
-test('statementName is the statement date, numbered when a date is shared', () => {
-  const b = { id: 41, settled_on: '2026-10-09', paid_on: '2026-10-12' };
-  assert.equal(statementName(b, 0), '10/9 結算');
-  assert.equal(statementName(b), '10/9 結算');
-  assert.equal(statementName(b, 1), '10/9 結算 (2)');
-  assert.equal(statementName(b, 2), '10/9 結算 (3)');
+// A statement as the payload carries it: the due dates its rows print, and
+// the day it was confirmed.
+function stmt(due, extra = {}) {
+  return { id: 41, settled_on: '2026-10-20', paid_on: '2026-10-22', due_dates: due, ...extra };
+}
+
+test('statementName is the one due date a statement prints', () => {
+  assert.equal(statementName(stmt(['2026-09-14'])), '9/14 結算');
+  assert.equal(statementName(stmt(['2026-10-01'])), '10/1 結算');
+  // Not the day it was confirmed, and not the day the bank paid it.
+  assert.equal(statementName(stmt(['2026-09-14'], { settled_on: '2026-09-16', paid_on: '2026-09-18' })), '9/14 結算');
 });
 
-test('statementName of a batch with no statement date has no date in it', () => {
-  assert.equal(statementName({ id: 42, settled_on: null, paid_on: '2026-10-12' }, 0), '結算');
+test('statementName writes consecutive due dates as a run, the month once', () => {
+  assert.equal(statementName(stmt(['2026-09-12', '2026-09-13'])), '9/12–13 結算');
+  assert.equal(statementName(stmt(['2026-09-12', '2026-09-13', '2026-09-14'])), '9/12–14 結算');
+});
+
+test('statementName lists due dates apart, the month once while it stays the same', () => {
+  assert.equal(statementName(stmt(['2026-09-13', '2026-09-15'])), '9/13、15 結算');
+  assert.equal(statementName(stmt(['2026-09-08', '2026-09-12', '2026-09-13', '2026-09-20'])), '9/8、12–13、20 結算');
+});
+
+test('statementName names a month again each time the month changes', () => {
+  assert.equal(statementName(stmt(['2026-09-30', '2026-10-01'])), '9/30–10/1 結算');
+  assert.equal(statementName(stmt(['2026-09-29', '2026-10-02'])), '9/29、10/2 結算');
+  // A bare number is a day of the last month written, here October.
+  assert.equal(statementName(stmt(['2026-09-30', '2026-10-01', '2026-10-03'])), '9/30–10/1、3 結算');
+  assert.equal(statementName(stmt(['2026-09-28', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05'])),
+    '9/28、30–10/2、5 結算');
+  assert.equal(statementName(stmt(['2026-09-29', '2026-09-30', '2026-10-02', '2026-10-03'])), '9/29–30、10/2–3 結算');
+  // Across a year's end the month changes as anywhere else.
+  assert.equal(statementName(stmt(['2026-12-31', '2027-01-01'])), '12/31–1/1 結算');
+  // The same month of another year is another month.
+  assert.equal(statementName(stmt(['2026-01-31', '2027-01-31'])), '1/31、1/31 結算');
+});
+
+test('statementName sorts the due dates and takes each once', () => {
+  assert.equal(statementName(stmt(['2026-09-15', '2026-09-13', '2026-09-15'])), '9/13、15 結算');
+});
+
+test('statementName is numbered only by its place among statements of one name', () => {
+  const b = stmt(['2026-09-12', '2026-09-13']);
+  assert.equal(statementName(b, 0), '9/12–13 結算');
+  assert.equal(statementName(b, 1), '9/12–13 結算 (2)');
+  assert.equal(statementName(b, 2), '9/12–13 結算 (3)');
+});
+
+test('statementName falls back on the confirm date when the statement prints no due date', () => {
+  const b = { id: 41, settled_on: '2026-10-09', paid_on: '2026-10-12' };
+  assert.equal(statementName(b), '10/9 結算');
+  assert.equal(statementName({ ...b, due_dates: [] }, 0), '10/9 結算');
+  assert.equal(statementName(b, 1), '10/9 結算 (2)');
+});
+
+test('statementName of a batch with neither date has no date in it', () => {
+  assert.equal(statementName({ id: 42, settled_on: null, paid_on: '2026-10-12', due_dates: [] }, 0), '結算');
   assert.equal(statementName({ id: 43 }, 1), '結算 (2)');
 });
 
