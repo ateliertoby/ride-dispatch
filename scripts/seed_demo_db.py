@@ -12,7 +12,8 @@ pixel for pixel.
 Most rows are placed by offset, so which month a statement falls in depends
 on the date. What has to be true of a month whatever the date is placed by
 the calendar instead (_months_back): a statement whose legs lie either side of
-a month's first day, and a month of one platform with nothing left to do.
+a month's first day, a second statement collected in full in the month it
+reaches into, and a month of one platform with nothing left to do.
 
 PATH must not exist yet. The script never opens a database it did not create.
 """
@@ -51,9 +52,9 @@ def _oid(n: int) -> str:
 # What the screenshot and end-to-end scripts aim at. Ids are AUTOINCREMENT on a
 # fresh database, so creation order fixes them; seed() checks that it did.
 BATCH = {"paid": 1, "short": 2, "awaiting": 3, "held_back": 4, "ahead": 5, "group": 6,
-         "straddle": 7, "clean": 8}
+         "straddle": 7, "clean": 8, "pair": 9}
 CREDIT = {"paid": 1, "short": 2, "exact": 3, "partial": 4, "archived": 5, "group": 6,
-          "straddle": 7, "clean": 8}
+          "straddle": 7, "clean": 8, "pair": 9}
 # The 應結算日期 each statement placed by offset prints, in days before today:
 # one for the whole statement, or one per service day, keyed by that day's own
 # days before today. Between them the names take every form a name has: one
@@ -118,6 +119,10 @@ def targets(today: date) -> dict:
         "mixed_day": day(today, 5),
         # The month a statement reaches into from the month before it.
         "straddle_month": month_start(today, STRADDLE_MONTHS_BACK).isoformat()[:7],
+        # A month holding at least two statements collected in full, and two
+        # that are always among them, the later confirmed first.
+        "collected_pair": {"month": month_start(today, STRADDLE_MONTHS_BACK).isoformat()[:7],
+                           "batches": [BATCH["pair"], BATCH["straddle"]]},
         # A month of a platform with every fare collected, nothing unmatched
         # and nothing open before it.
         "clean": {"platform": PLATFORM["clean"],
@@ -287,12 +292,17 @@ def _months_back(s: _Seeder) -> dict:
                 s.ride(902, "送机", b, "16:20", 400, place=WANCHAI),
                 s.ride(903, "接机", c, "10:30", 480, flight="UO623", place=MONGKOK),
                 s.ride(904, "接站", d, "14:00", 360, place=TST)]
+    # Two more legs in the month that statement reaches into, on a statement
+    # of their own: whatever the date, one month holds two collected in full.
+    first = month_start(s.today, STRADDLE_MONTHS_BACK)
+    pair = [s.ride(911, "接机", s.back(first + timedelta(days=8)), "11:15", 450, flight="HX237", place=SHATIN),
+            s.ride(912, "送机", s.back(first + timedelta(days=9)), "07:50", 400, place=TST)]
     # One month of another platform, every trip of it on one statement.
     first = month_start(s.today, CLEAN_MONTHS_BACK)
     clean = [s.quick("uber", s.back(first + timedelta(days=5)), "09:30", 180, 20),
              s.quick("uber", s.back(first + timedelta(days=12)), "21:10", 152.5),
              s.quick("uber", s.back(first + timedelta(days=19)), "13:40", 240, 25)]
-    return {"straddle": straddle, "clean": clean}
+    return {"straddle": straddle, "clean": clean, "pair": pair}
 
 
 def _months_back_settled(s: _Seeder, legs: dict) -> None:
@@ -313,6 +323,10 @@ def _months_back_settled(s: _Seeder, legs: dict) -> None:
     s.batch("clean", legs["clean"], 617.5, s.back(first + timedelta(days=23)),
             statement=s.statement(legs["clean"], s.back(first + timedelta(days=22))))
     db.allocate(s.path, s.credit("clean", 617.5, s.back(first + timedelta(days=25))), BATCH["clean"])
+    first = month_start(s.today, STRADDLE_MONTHS_BACK)
+    s.batch("pair", legs["pair"], 850, s.back(first + timedelta(days=11)),
+            statement=s.statement(legs["pair"], s.back(first + timedelta(days=10))))
+    db.allocate(s.path, s.credit("pair", 850, s.back(first + timedelta(days=12))), BATCH["pair"])
 
 
 def _ledger(s: _Seeder) -> None:

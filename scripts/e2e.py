@@ -4448,7 +4448,7 @@ def settle_lists(s: Session) -> None:
     # to: the one paid short is with the money that came, not with the waiting.
     s.eq((sorted(set(seen["awaiting"])), sorted(set(seen["received"]))),
          (sorted([b["awaiting"], b["ahead"], b["group"]]),
-          sorted([b["paid"], b["short"], b["held_back"], b["straddle"]])),
+          sorted([b["paid"], b["short"], b["held_back"], b["straddle"], b["pair"]])),
          "the seeded statements under each key")
 
     # The month of the statement paid short, under 已收: it leads, it is not
@@ -4596,17 +4596,16 @@ def settle_list_by_due(s: Session) -> None:
     first by the latest due date a statement prints, not by the day it was
     confirmed, which stands in only for a statement that prints none. A
     statement paid short still leads."""
-    # A month holding two statements collected in full or more, newest
-    # confirmed first, which is the order the due dates are set against.
-    cur = s.today.replace(day=1)
-    held = {}
-    for m in (cur, add_months(cur, -1), add_months(cur, -2)):
-        rows = [b for b in s.api("GET", settle_path(m))["settlements"]
-                if b["state"] == "paid" and any(month_key(d) == month_key(m) for d in batch_days(b))]
-        held[m] = sorted(rows, key=lambda b: (b["settled_on"], b["id"]), reverse=True)
-    found = [m for m in held if len(held[m]) >= 2]
-    s.expect(found, "the seed has no month with two collected statements")
-    month = found[0]
+    # The month the seed keeps two statements collected in full in, whatever
+    # the date; on some dates one placed by offset falls there too. Newest
+    # confirmed first: the order the due dates are set against.
+    pair = s.t["collected_pair"]
+    month = date.fromisoformat(pair["month"] + "-01")
+    rows = [b for b in s.api("GET", settle_path(month))["settlements"]
+            if b["state"] == "paid" and any(month_key(d) == month_key(month) for d in batch_days(b))]
+    held = {month: sorted(rows, key=lambda b: (b["settled_on"], b["id"]), reverse=True)}
+    s.eq([b["id"] for b in held[month] if b["id"] in pair["batches"]], pair["batches"],
+         f"the two statements the seed keeps collected in full in {pair['month']}")
     # The later a statement was confirmed, the earlier the dates it prints;
     # the one confirmed first prints none and is placed by that day, which is
     # later than any date given here.

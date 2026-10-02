@@ -99,6 +99,17 @@ def test_a_statement_straddles_two_months(seeded):
         "fare": 870.0, "received": 870.0, "awaiting": 0.0, "unsettled": 0.0, "short": 0.0}
 
 
+def test_one_month_holds_two_statements_collected_in_full(seeded):
+    pair = seeded.t["collected_pair"]
+    month = db.get_settle_month(seeded.path, pair["month"], "ride", now=seeded.now)
+    full = [b for b in month["settlements"]
+            if b["state"] == "paid" and any(o["scheduled_time"][:7] == pair["month"] for o in b["orders"])]
+    # Listed as the target names them, the later confirmed first. A statement
+    # placed by offset can fall in the month as well.
+    newest_first = [b["id"] for b in sorted(full, key=lambda b: b["settled_on"], reverse=True)]
+    assert [i for i in newest_first if i in pair["batches"]] == pair["batches"]
+
+
 def test_a_statement_carries_a_line_that_is_no_orders_fare(seeded):
     from ride_dispatch.service import owed_of
     straddle = seeded.batches()[seed_demo_db.BATCH["straddle"]]
