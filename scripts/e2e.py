@@ -583,7 +583,11 @@ class Session(Driver):
         for routes in self.held.values():
             while routes:
                 routes.pop(0).continue_()
-        self.page.unroute_all()
+        # A request can be passing through the handler at this very moment.
+        # Taking the handler away under it makes the browser let the request
+        # go by itself, and the handler's own word then comes as a second
+        # answer, which is an error. Waiting lets it finish first.
+        self.page.unroute_all(behavior="wait")
 
     def stub(self, method, glob: str, status: int, body: str, content_type: str) -> None:
         """Answer every matching request with this instead of the server's.
