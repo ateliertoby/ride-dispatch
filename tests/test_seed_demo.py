@@ -99,6 +99,17 @@ def test_a_statement_straddles_two_months(seeded):
         "fare": 870.0, "received": 870.0, "awaiting": 0.0, "unsettled": 0.0, "short": 0.0}
 
 
+def test_a_statement_carries_a_line_that_is_no_orders_fare(seeded):
+    from ride_dispatch.service import owed_of
+    straddle = seeded.batches()[seed_demo_db.BATCH["straddle"]]
+    assert straddle["adjustments"] == [
+        {"order_ref": seed_demo_db.ORDER["unknown_fined"], "date": straddle["adjustments"][0]["date"], "amount": -30.0}]
+    assert db.get_order_by_id(seeded.path, seed_demo_db.ORDER["unknown_fined"]) is None
+    # The line is the whole of the difference between its figure and its fares.
+    assert round(straddle["confirmed_amount"] - sum(owed_of(o) for o in straddle["orders"]), 2) == -30.0
+    assert straddle["confirmed_amount"] == straddle["expected_amount"] == 1680.0
+
+
 def test_a_statement_with_days_apart_and_one_that_differs_from_its_fares(seeded):
     from ride_dispatch.service import owed_of
     batches = seeded.batches()

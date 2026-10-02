@@ -263,9 +263,10 @@
   .btag.warn { color: var(--amber); }
   .btag.paid { color: var(--green); font-weight: 400; }
   /* The part of a month-straddling statement that this month's total counts,
-     and how far the statement's figure is from its fares. Both explain the
-     figure above them and are not states, so neither takes a state colour. */
-  .bmon, .bgap { font-size: 11.5px; line-height: 1.35; color: var(--text-2); white-space: nowrap; }
+     the lines it carries that are no order's fare, and how far its figure
+     is from its fares otherwise. Each explains the figure above it and is
+     not a state, so none takes a state colour. */
+  .bmon, .badj, .bgap { font-size: 11.5px; line-height: 1.35; color: var(--text-2); white-space: nowrap; }
   .bmon .num { color: var(--text); font-weight: 700; }
   .bc { font-family: var(--mono); font-size: 14px; color: var(--text-3); }
   /* A collected statement is a record: regular weight, quieter ink. */

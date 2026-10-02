@@ -3940,12 +3940,14 @@ LIST_JS = """
   const name = r.querySelector('.bt'), fig = r.querySelector('.ba'), tag = r.querySelector('.btag');
   return {
     id: r.dataset.bl ? +r.dataset.bl : null, tag: r.tagName, name: name.textContent, sub: t('.bsub'),
-    amount: fig ? fig.textContent : '', month: t('.bmon')[0] || '', gap: t('.bgap')[0] || '', tags: t('.btag'),
+    amount: fig ? fig.textContent : '', month: t('.bmon')[0] || '', other: t('.badj')[0] || '',
+    gap: t('.bgap')[0] || '', tags: t('.btag'),
     mark: t('.bc')[0], receded: r.classList.contains('rec'), height: box.height,
     ink: [cs(name).color, cs(name).fontWeight], figure: fig ? [cs(fig).color, cs(fig).fontWeight] : null,
     tagInk: tag ? cs(tag).color : null, gapInk: r.querySelector('.bgap') ? cs(r.querySelector('.bgap')).color : null,
+    otherInk: r.querySelector('.badj') ? cs(r.querySelector('.badj')).color : null,
     lined: [r, ...r.querySelectorAll('*')].some(e => cs(e).textDecorationLine !== 'none'),
-    inside: [...r.querySelectorAll('.pt, .bt, .ba, .bmon, .bgap, .btag, .bc')].every(e => {
+    inside: [...r.querySelectorAll('.pt, .bt, .ba, .bmon, .badj, .bgap, .btag, .bc')].every(e => {
       const b = e.getBoundingClientRect();
       return b.left >= box.left - 0.5 && b.right <= box.right + 0.5;
     }),
@@ -4027,6 +4029,12 @@ def fare_gap(b: dict) -> int:
     return round(b["confirmed_amount"] * 100) - held
 
 
+def other_lines(b: dict) -> int:
+    """The lines a statement carries that the month's totals count under no
+    order, in cents: every line but a 舉牌 paid ahead of a held-back trip."""
+    return sum(round(a["amount"] * 100) for a in b["adjustments"] if not a.get("ahead"))
+
+
 def listed(batches: list, lens: str, month: str) -> list:
     """The statements a list shows for a month, in the order it shows them."""
     states = ("awaiting",) if lens == "awaiting" else ("paid", "partial")
@@ -4053,10 +4061,11 @@ def row_text(b: dict, lens: str, month: str, batches: list, today: date) -> dict
             sub.append("應收 " + money2(b["confirmed_amount"]))
         sub += [f"入數 {md_slash(date.fromisoformat(a['value_date']))} · {money2(a['amount'])}" for a in b["allocations"]]
         tags = ["仲差 " + money2(b["outstanding"])] if b["state"] == "partial" else ["已收齊"]
-    gap = fare_gap(b)
+    gap, other = fare_gap(b), other_lines(b)
     return {
         "id": b["id"], "name": name, "sub": sub, "amount": money2(amount), "tags": tags,
         "month": "其中本月 " + money2(month_part(b, month) / 100) if any(month_key(d) != month for d in days) else "",
+        "other": "另有帳項 " + money2(other / 100) if other else "",
         "gap": "同車費差 " + money2(gap / 100) if gap else "",
         "receded": b["state"] == "paid",
     }
@@ -4069,7 +4078,7 @@ ARCHIVED_ROW = '#settle-list [data-archived]'
 
 def statements(rows: list) -> list:
     """The rows of the list that are statements, as row_text words them."""
-    keep = ("id", "name", "sub", "amount", "tags", "month", "gap", "receded")
+    keep = ("id", "name", "sub", "amount", "tags", "month", "other", "gap", "receded")
     return [{k: r[k] for k in keep} for r in rows if r["id"] is not None]
 
 
@@ -4330,7 +4339,20 @@ def settle_list_straddle(s: Session) -> None:
         s.eq(statements(row), [want], f"the statement's row in {month}")
         s.eq(want["sub"][0], f"{md_slash(days[0])}–{md_slash(days[-1])} · 4 程", "its days, each end with its month")
         s.eq((row[0]["amount"], cents(row[0]["month"].replace("其中本月 ", "")), month_part(batch, month)),
-             ("$1,710.00", part, part), f"the statement's own figure and its part of {month}, in cents")
+             ("$1,680.00", part, part), f"the statement's own figure and its part of {month}, in cents")
+        # The statement carries a 判罰 under a number the book never had. The
+        # keys count no order for it, so the row says it, quietly, and the
+        # row's figure is then the fares of both months and that line.
+        s.eq((row[0]["other"], row[0]["otherInk"], row[0]["gap"]), ("另有帳項 −$30.00", s.token("--text-2"), ""),
+             f"the line that is no order's fare, in {month}")
+        s.eq(cents(row[0]["amount"]), 84000 + 87000 + cents(row[0]["other"].replace("另有帳項 ", "")),
+             f"the row's figure against the keys' part and its other lines, in cents, in {month}")
+    # The row then has three notes under its figure; none runs past the row.
+    for width in PHONE_WIDTHS:
+        s.resize(width)
+        row = [r for r in s.list_rows() if r["id"] == batch["id"]][0]
+        s.expect(row["inside"] and (row["month"], row["other"]) != ("", ""), f"the straddling statement's row at {width}: {row}")
+    s.resize(390)
     # The earlier month holds nothing else, so the part is the whole of its key.
     s.eq(cents(s.text('.lkey[data-lens="received"] .v')), 87000, "the 已收 key of the month holding two of its legs alone")
     # On the calendar each month's days carry their own fares, collected.

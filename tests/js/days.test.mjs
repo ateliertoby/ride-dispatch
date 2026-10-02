@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, fareGap, waitedDays,
+  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, fareGap, otherLines,
+  waitedDays,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -297,6 +298,68 @@ test('fareGap counts a leg net of the 舉牌 an earlier statement paid', () => {
   const batch = { id: 18, confirmed_amount: 480,
                   orders: [leg('r1', '2026-10-05 09:00', 480, { banner_fee: 40, paid_ahead: 40 })] };
   assert.equal(fareGap(batch), 0);
+});
+
+test('otherLines is the signed sum of the lines that are no order\'s fare', () => {
+  const orders = [leg('s1', '2026-10-05 09:00', 500)];
+  assert.equal(otherLines({ id: 20, orders }), 0);
+  assert.equal(otherLines({ id: 21, orders, adjustments: [] }), 0);
+  // A 判罰 against a trip another statement holds.
+  assert.equal(otherLines({ id: 22, orders, adjustments: [{ order_ref: 's8', date: '2026-09-20', amount: -63.45 }] }), -63.45);
+  // The 免責 line that cancels it: the pair is nothing.
+  assert.equal(otherLines({ id: 23, orders, adjustments: [
+    { order_ref: 's8', date: '2026-09-20', amount: -63.45 }, { order_ref: 's8', date: '2026-09-20', amount: 63.45 },
+  ] }), 0);
+  assert.equal(otherLines({ id: 24, orders, adjustments: [
+    { order_ref: 's8', date: '2026-09-20', amount: -0.1 }, { order_ref: 's7', date: '2026-09-21', amount: -0.2 },
+    { order_ref: 's6', date: '2026-09-22', amount: 25.5 },
+  ] }), 25.2);
+});
+
+test('otherLines leaves out a 舉牌 paid ahead, which the totals count under its trip', () => {
+  const batch = { id: 25, orders: [leg('t1', '2026-10-05 09:00', 500)], adjustments: [
+    { order_ref: 't9', date: '2026-10-08', amount: 40, ahead: true },
+    { order_ref: 't8', date: '2026-09-20', amount: -30 },
+  ] };
+  assert.equal(otherLines(batch), -30);
+});
+
+test('a statement figure is what the keys count of it, its other lines and its gap', () => {
+  // What the keys count of a statement: its part of every month it touches.
+  const inKeys = b => {
+    const months = new Set([...b.orders.map(o => o.scheduled_time.slice(0, 7)),
+                            ...(b.adjustments || []).map(a => a.date.slice(0, 7))]);
+    return [...months].reduce((sum, m) => sum + Math.round(inMonthPart(b, m) * 100), 0);
+  };
+  const c = n => Math.round(n * 100);
+  const legs = [leg('u1', '2026-09-29 09:00', 500.5), leg('u2', '2026-09-30 21:00', 400.05, { penalty_fee: 20 }),
+                leg('u3', '2026-10-01 08:00', 480, { banner_fee: 40, paid_ahead: 40 })];
+  const ahead = { order_ref: 'u9', date: '2026-10-02', amount: 40, ahead: true };
+  const fine = { order_ref: 'u8', date: '2026-08-20', amount: -63.45 };
+  const waiver = { order_ref: 'u8', date: '2026-08-20', amount: 63.45 };
+  const unknown = { order_ref: 'u7', date: '2026-09-28', amount: -25.1 };
+  const held = 500.5 + 380.05 + 480;
+  const cases = [
+    // Its legs to the cent, and nothing else.
+    { id: 30, confirmed_amount: held, orders: legs },
+    // A line of its own, agreed with: the row differs from the keys by it alone.
+    { id: 31, confirmed_amount: held - 63.45, orders: legs, adjustments: [fine] },
+    // A pair that nets to nothing, beside a 舉牌 paid ahead.
+    { id: 32, confirmed_amount: held + 40, orders: legs, adjustments: [ahead, fine, waiver] },
+    // Lines of its own and a figure the platform put 12.3 under the book's.
+    { id: 33, confirmed_amount: held + 40 - 63.45 - 25.1 - 12.3, orders: legs, adjustments: [ahead, fine, unknown] },
+    // Confirmed above the book, with no line at all.
+    { id: 34, confirmed_amount: held + 0.01, orders: legs },
+    // Nothing but lines.
+    { id: 35, confirmed_amount: 40 - 25.1, orders: [], adjustments: [ahead, unknown] },
+  ];
+  for (const b of cases) {
+    assert.equal(c(b.confirmed_amount), inKeys(b) + c(otherLines(b)) + c(fareGap(b)), 'statement ' + b.id);
+  }
+  // Each part is the one meant, not only their sum.
+  assert.deepEqual([inKeys(cases[3]) / 100, otherLines(cases[3]), fareGap(cases[3])], [1400.55, -88.55, -12.3]);
+  assert.deepEqual([otherLines(cases[1]), fareGap(cases[1])], [-63.45, 0]);
+  assert.deepEqual([otherLines(cases[2]), fareGap(cases[2])], [0, 0]);
 });
 
 test('waitedDays counts whole calendar days since the statement date', () => {

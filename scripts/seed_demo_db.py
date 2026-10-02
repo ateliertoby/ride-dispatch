@@ -72,6 +72,8 @@ ORDER = {
     "cancelled": _oid(6),
     "short_unpaid_leg": _oid(204),
     "held_trip": _oid(601),
+    # A number a statement prints that no order carries.
+    "unknown_fined": _oid(990),
 }
 
 
@@ -296,9 +298,15 @@ def _months_back(s: _Seeder) -> dict:
 def _months_back_settled(s: _Seeder, legs: dict) -> None:
     """The statements over those orders, each collected in full."""
     first = month_start(s.today, STRADDLE_MONTHS_BACK)
-    s.batch("straddle", legs["straddle"], 1710, s.back(first + timedelta(days=4)),
-            statement=s.statement(legs["straddle"], s.back(first + timedelta(days=3))))
-    db.allocate(s.path, s.credit("straddle", 1710, s.back(first + timedelta(days=6))), BATCH["straddle"])
+    # The statement also carries a 判罰 under a number the book never had: a
+    # line of its own, which is no order's fare, so the transfer is smaller
+    # than the fares the month's totals count for it.
+    fined_day = s.back(first - timedelta(days=1))
+    s.batch("straddle", legs["straddle"], 1680, s.back(first + timedelta(days=4)),
+            statement=s.statement(legs["straddle"], s.back(first + timedelta(days=3)),
+                                  lines=((ORDER["unknown_fined"], fined_day, -30.0),)),
+            adjustments=[{"order_ref": ORDER["unknown_fined"], "date": day(s.today, fined_day), "amount": -30.0}])
+    db.allocate(s.path, s.credit("straddle", 1680, s.back(first + timedelta(days=6))), BATCH["straddle"])
     # Nothing of this platform is open before this month and no credit of it
     # is unmatched, so the month has nothing left to do.
     first = month_start(s.today, CLEAN_MONTHS_BACK)

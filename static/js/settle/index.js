@@ -15,8 +15,8 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure, statementName,
-         waitedDays } from './days.js';
+import { cellFigure, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure, otherLines,
+         statementName, waitedDays } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -715,7 +715,12 @@ function stmtRowHtml(b) {
   }
   // The total counts fares; the row states the statement's figure. Where the
   // two differ the row says by how much, so the rows can be added up against
-  // the total. It is information, not a state: no colour.
+  // the total: first by the lines the statement carries that are no order's
+  // fare, then by what is left, a figure the platform put on a leg or on the
+  // statement that is not the book's. Both are information, not a state: no
+  // colour.
+  const other = otherLines(b);
+  if (other) end.push('<span class="badj">另有帳項 ' + figs(fullMoney(other)) + '</span>');
   const gap = fareGap(b);
   if (gap) end.push('<span class="bgap">同車費差 ' + figs(fullMoney(gap)) + '</span>');
   if (lens === 'awaiting') {

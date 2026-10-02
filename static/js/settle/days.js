@@ -125,6 +125,25 @@ export function inMonthPart(batch, monthKey) {
   return sum / 100;
 }
 
+// The lines of a statement that the month's totals count under no order, as
+// one signed sum. The totals are split order by order (split_month): a leg
+// is counted at what its statement is owed for it, and a 舉牌 paid ahead of a
+// held-back trip is counted under that trip, so both are in a key. Every
+// other line the statement carries itself is money on the transfer and on no
+// order the totals read: a 判罰 against a trip another statement holds, one
+// that was cancelled or one the book never had, the 免責 line that cancels
+// one. A row's figure therefore differs from what the keys count of its
+// statement by this sum and by fareGap, and by nothing else:
+//
+//   confirmed figure = inMonthPart over every month + otherLines + fareGap
+export function otherLines(batch) {
+  let sum = 0;
+  for (const a of batch.adjustments || []) {
+    if (!a.ahead) sum += cents(a.amount);
+  }
+  return sum / 100;
+}
+
 // By how much a statement's figure differs from what the book holds for it:
 // the figure the platform confirmed, less its legs and the lines it carries
 // itself. Zero when they agree to the cent.
