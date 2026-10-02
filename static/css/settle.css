@@ -44,10 +44,16 @@
    keys are the legend of. */
 :where(.view-settle) {
   /* The four figures share one line, exact to the cent: when they are too
-     long for it they are set smaller together, never wrapped or cut. --n is
-     their summed length in character cells, written on the element; a cell
-     of the figure face is .65em wide, and 80px is the keys' padding and the
-     rules between them. */
+     long for it they are set smaller together, never wrapped or cut. A key
+     is as wide as the wider of its label and its figure, and a label keeps
+     its size, so how much room the figures have depends on which keys their
+     labels hold open. The script orders the keys from the one whose figure
+     is longest against its label, and writes for each count of them from
+     the front, 1 to 4: --nN, those figures' summed length in character
+     cells, and --lN, the summed width of the other keys' labels. The size
+     is the largest that fits every one of the four cases. A cell of the
+     figure face is .65em wide, and 80px is the keys' padding and the rules
+     between them. */
   .lens { display: flex; border-top: 1px solid var(--line); container-type: inline-size; }
   .lkey {
     flex: 1 1 auto; min-width: 0; min-height: 52px; padding: 8px 7px 7px;
@@ -57,12 +63,16 @@
   .lkey:first-child { padding-left: var(--gutter); border-left: none; }
   .lkey:last-child { padding-right: var(--gutter); }
   .lkey .k {
-    display: block; font-size: 10.5px; line-height: 14px; letter-spacing: .14em;
+    display: block; font-size: 12px; line-height: 14px; letter-spacing: .08em;
     color: var(--text-3); white-space: nowrap;
   }
   .lkey .v {
     display: block; font-family: var(--mono); font-weight: 700; line-height: 20px; white-space: nowrap;
-    font-size: min(15px, calc((100cqi - 80px) / (var(--n, 1) * .65)));
+    font-size: min(15px,
+      calc((100cqi - 80px - var(--l1, 0px)) / (var(--n1, 1) * .65)),
+      calc((100cqi - 80px - var(--l2, 0px)) / (var(--n2, 1) * .65)),
+      calc((100cqi - 80px - var(--l3, 0px)) / (var(--n3, 1) * .65)),
+      calc((100cqi - 80px - var(--l4, 0px)) / (var(--n4, 1) * .65)));
   }
   /* The cents are part of the figure and never dropped, but they are not
      what it is read by. No line height of their own: a smaller box on the
@@ -259,14 +269,14 @@
   .bsub { display: block; margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--text-2); }
   .bend { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; text-align: right; }
   .ba { font-size: 15px; line-height: 1.35; font-weight: 700; white-space: nowrap; }
-  .btag { font-size: 11.5px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
+  .btag { font-size: 12px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
   .btag.warn { color: var(--amber); }
   .btag.paid { color: var(--green); font-weight: 400; }
   /* The part of a month-straddling statement that this month's total counts,
      the lines it carries that are no order's fare, and how far its figure
      is from its fares otherwise. Each explains the figure above it and is
      not a state, so none takes a state colour. */
-  .bmon, .badj, .bgap { font-size: 11.5px; line-height: 1.35; color: var(--text-2); white-space: nowrap; }
+  .bmon, .badj, .bgap { font-size: 12px; line-height: 1.35; color: var(--text-2); white-space: nowrap; }
   .bmon .num { color: var(--text); font-weight: 700; }
   .bc { font-family: var(--mono); font-size: 14px; color: var(--text-3); }
   /* A collected statement is a record: regular weight, quieter ink. */
@@ -281,13 +291,7 @@
      cell is known as a control by that shape; nothing in the foot is
      underlined. The foot is one height whatever it holds, the height of a
      key, so it covers the same part of the calendar in every state. */
-  .foot-in {
-    padding: 0; gap: 0; align-items: stretch; min-height: 52px; container-type: inline-size;
-    /* What the cells' padding and the rules between them take of the width. */
-    --pad: calc(2 * var(--gutter));
-  }
-  .foot-in[data-n="2"] { --pad: calc(2 * var(--gutter) + 15px); }
-  .foot-in[data-n="3"] { --pad: calc(2 * var(--gutter) + 30px); }
+  .foot-in { padding: 0; gap: 0; align-items: stretch; min-height: 52px; }
   /* One or two cells share the width equally; three take the width each
      one's content needs, since equal thirds would cut the longest. */
   .fkey {
@@ -300,19 +304,24 @@
   .fkey:first-child { padding-left: var(--gutter); border-left: none; }
   .fkey:last-child { padding-right: var(--gutter); }
   .foot-in[data-n="3"] .fkey { flex: 1 1 auto; }
-  /* Labels and figures stay on one line, exact to the cent: when they are
-     too long for it, all of them are set smaller together, never wrapped or
-     cut. --w is the width the cells need at full size, in px, written on the
-     element; the room left after --pad, less 2px of slack, over that width
-     is how much smaller. Where the figures are what is too long this is the
-     total keys' rule. */
-  .foot .fkey .k {
-    margin: 0; line-height: 14px; white-space: nowrap;
-    font-size: min(10.5px, calc((100cqi - var(--pad) - 2px) * 10.5 / var(--w, 1)));
-  }
+  /* Labels and figures stay on one line, exact to the cent, and a label
+     keeps the size it is read at. When the cells are too long for the foot
+     the script makes room in this order and stops at the first step that is
+     enough: the labels give up their letter-spacing (data-fit 1), the cells
+     the padding either side of the rules between them, part of it and then
+     all but enough to keep a label off the rule (data-fit 2 and 3), and
+     last the figures are set smaller, all together (--fig). The foot keeps
+     its gutters, so its first label stays under the first total key's.
+     Nothing is wrapped or cut. */
+  .foot .fkey .k { margin: 0; line-height: 14px; white-space: nowrap; }
+  .foot-in:not([data-fit="0"]) .fkey .k { letter-spacing: 0; }
+  .foot-in:is([data-fit="2"], [data-fit="3"]) { --between: 4px; }
+  .foot-in[data-fit="3"] { --between: 2px; }
+  .foot-in:is([data-fit="2"], [data-fit="3"]) .fkey:not(:first-child) { padding-left: var(--between); }
+  .foot-in:is([data-fit="2"], [data-fit="3"]) .fkey:not(:last-child) { padding-right: var(--between); }
   .foot .fkey .v {
     display: block; line-height: 20px; white-space: nowrap;
-    font-size: min(15px, calc((100cqi - var(--pad) - 2px) * 15 / var(--w, 1)));
+    font-size: var(--fig, 15px);
   }
   /* The cents, and a figure inside a label, are in another size or face
      than the line they stand on. No line height of their own, or their box
@@ -339,8 +348,11 @@
      parts, and the key that puts the focus down, a thumb's size. The line
      never wraps, so the foot is as tall as it is without a focus. --fs is
      the size the script sets the line in when it is too long for its room
-     at the full one; a part that has given way is no longer in the line. */
-  .fline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 4px var(--gutter); }
+     at the full one; a part that has given way is no longer in the line.
+     No gap before the key: its mark stands in the middle of a thumb's width,
+     which is space enough, and the line needs the room to stay at a size
+     that can be read. */
+  .fline { flex: 1; min-width: 0; display: flex; align-items: center; padding: 4px var(--gutter); }
   .fline .ft { flex: 1; min-width: 0; font-size: var(--fs, 13px); line-height: 1.5; white-space: nowrap; }
   .fx {
     flex-shrink: 0; width: 44px; height: 44px; margin: 0 -12px 0 0; padding: 0;
@@ -378,7 +390,7 @@
      sits behind a count. Under the figure, where its money has got to, in
      the colour of that state. */
   .hero { padding: 4px 0 13px; border-bottom: 1px solid var(--line); }
-  .hero-k { font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3); }
+  .hero-k { font-size: 12px; line-height: 1.35; letter-spacing: .08em; color: var(--text-3); }
   .hero-v {
     font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1.25; letter-spacing: -.03em;
     overflow-wrap: anywhere;
@@ -466,7 +478,7 @@
   /* Days of a batch, each a page of the statement it was read from. */
   .oday {
     padding: 14px 0 6px; border-bottom: 1px solid var(--line);
-    font-size: 10.5px; line-height: 1.35; letter-spacing: .14em; color: var(--text-3);
+    font-size: 12px; line-height: 1.35; letter-spacing: .08em; color: var(--text-3);
   }
   .oday .num { letter-spacing: .04em; }
   /* In the day sheet the row is the way into the order it stands for, so the
@@ -507,7 +519,7 @@
      stands under it, a line each, in the colours the calendar uses. */
   .oend { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; text-align: right; }
   .oa { font-size: 15px; line-height: 1.35; font-weight: 700; }
-  .otag { font-size: 11.5px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
+  .otag { font-size: 12px; line-height: 1.35; font-weight: 600; white-space: nowrap; }
   .otag.unsettled, .otag.warn, .otag.plat { color: var(--amber); }
   .otag.awaiting { color: var(--text); }
   .otag.paid { color: var(--green); }
@@ -582,7 +594,7 @@
   .ptag {
     flex-shrink: 0; padding: 2px 6px 1px; border-radius: 2px;
     background: var(--green); color: var(--on-solid);
-    font-size: 11.5px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
+    font-size: 12px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
   }
   /* The tap that moves money: an outlined key, tall enough for a thumb. */
   .pbtn {

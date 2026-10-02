@@ -15,7 +15,7 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, fitLine, inMonthPart,
+import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, figureScale, fitLine, inMonthPart,
          keyFigure, otherLines, statementName, waitedDays, collectedOrder } from './days.js';
 
 let root = null;              // the view's element, set by mount
@@ -503,25 +503,52 @@ function footRestHtml() {
   return '<div class="fnote">今個月計唔到準數</div>';
 }
 
-// A foot figure's markup and its length in cells of the dollars' size, as a
-// total key's is counted. A withheld figure is a dash.
+// A foot figure's markup, as a total key's is written. A withheld figure is
+// a dash.
 function footFigure(amount) {
-  if (amount === null) return { html: '—', n: 1 };
+  if (amount === null) return '—';
   const f = keyFigure(amount);
-  const dollars = tight(f.dollars), cts = tight('.' + f.cents);
-  return { html: dollars + '<span class="ct">' + cts + '</span>',
-           n: +cellsOf(dollars) + +cellsOf(cts) * 0.7 };
+  return tight(f.dollars) + '<span class="ct">' + tight('.' + f.cents) + '</span>';
 }
 
-// How wide a foot label sets at its full size, in px, counted rather than
-// measured so the stylesheet can size the foot before it is laid out. An
-// upper bound: an ideograph and the middle dot at 1em, a space at .3em, and
-// anything else at the figure face's .65em cell, each with the label's
-// .14em of letter-spacing, at 10.5px.
-function labelWidth(text) {
-  let em = 0;
-  for (const ch of text) em += (ch === ' ' ? 0.3 : ch === '·' || ch > '⹿' ? 1 : 0.65) + 0.14;
-  return em * 10.5;
+// Makes the foot's cells fit the foot. A label keeps the size it is read at
+// and nothing is wrapped or cut, so room is made in steps, and no step is
+// taken that is not needed: the labels give up their letter-spacing, then
+// the cells the padding between them, in two steps (data-fit, which the
+// stylesheet reads), and last the figures are set smaller, all together
+// (--fig), by as little as fits them under labels that stay as they are.
+//
+// The cells are measured where they stand, as the focus line is: a label
+// mixes the text face, the figure face and marks pulled in by tight(), and
+// a width counted from its characters would be an upper bound that gives
+// room up while there still is some. 2px of the foot is kept back, because
+// each glyph's advance is rounded and a figure set smaller can come out a
+// fraction wider than its share of the full width.
+const FOOT_FIGURE = 15;
+function fitFoot(foot) {
+  foot.style.removeProperty('--fig');
+  foot.dataset.fit = '0';
+  const room = foot.clientWidth - 2;
+  // A hidden view has no width; the foot is drawn again when it has one.
+  if (!(room > 0)) return;
+  const widthOf = el => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    return range.getBoundingClientRect().width;
+  };
+  const cells = [...foot.children];
+  let scale = 1;
+  for (const fit of ['0', '1', '2', '3']) {
+    foot.dataset.fit = fit;
+    scale = figureScale(room, cells.map(cell => {
+      const cs = getComputedStyle(cell);
+      return { pad: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth),
+               label: widthOf(cell.querySelector('.k')), figure: widthOf(cell.querySelector('.v')) };
+    }), cells.length < 3);
+    if (scale === 1) return;
+  }
+  // Labels too long for the foot even so are past what a figure can mend.
+  if (scale) foot.style.setProperty('--fig', Math.floor(FOOT_FIGURE * scale * 20) / 20 + 'px');
 }
 
 function renderFoot() {
@@ -531,22 +558,14 @@ function renderFoot() {
   const items = footItems();
   foot.dataset.n = String(items.length);
   if (!items.length) { foot.innerHTML = footRestHtml(); return; }
-  const figures = items.map(it => footFigure(it.amount));
-  // What each cell needs at full size: the wider of its label and its figure
-  // (15px, in cells of .65em). --w is the width the stylesheet sets against
-  // the room there is, to shrink every label and figure together when they
-  // do not fit. Three cells take what each needs, so they need the sum; one
-  // or two share the width equally, so each needs as much as the widest.
-  const need = items.map((it, i) => Math.max(labelWidth(it.label), figures[i].n * 0.65 * 15));
-  const w = items.length > 2 ? need.reduce((a, b) => a + b, 0) : items.length * Math.max(...need);
-  foot.style.setProperty('--w', w.toFixed(1));
-  foot.innerHTML = items.map((it, i) => {
+  foot.innerHTML = items.map(it => {
     // A cell that leads nowhere is not a control.
     const tag = it.attr ? 'button' : 'div';
     return '<' + tag + ' class="fkey ' + it.kind + (it.kind === 'short' ? ' st-short' : '') +
       (it.amount === null ? ' unknown' : '') + '"' + it.attr + '><span class="k">' + figs(it.label) +
-      '</span><span class="v">' + figures[i].html + '</span><i class="mk"></i></' + tag + '>';
+      '</span><span class="v">' + footFigure(it.amount) + '</span><i class="mk"></i></' + tag + '>';
   }).join('');
+  fitFoot(foot);
 }
 
 // A statement's name. Its place among the loaded statements that would be
@@ -598,7 +617,7 @@ function focusLineHtml() {
 // the text face, the figure face and punctuation pulled in by tight(), and
 // a width counted from the characters would be an upper bound that gives
 // parts up while they still fit.
-const FOCUS_FLOOR = 11;
+const FOCUS_FLOOR = 12;
 function fitFocusLine() {
   const ft = byId('settle-foot').querySelector('.ft');
   if (!ft) return;
@@ -653,7 +672,7 @@ function fitFocusLine() {
 function renderLens() {
   const box = byId('settle-lens');
   const t = data.monthTotals[viewMonth] || null;
-  let cells = 0;
+  const parts = [];
   for (const key of box.querySelectorAll('.lkey')) {
     const name = key.dataset.lens;
     let html = '—', n = 1;
@@ -664,7 +683,8 @@ function renderLens() {
       // The cents are set at .7 of the figure's size (.ct in the stylesheet).
       n = +cellsOf(dollars) + +cellsOf(cts) * 0.7;
     }
-    cells += n;
+    // A label is ideographs, each 12px wide and tracked .08em (.lkey .k).
+    parts.push({ n, label: key.querySelector('.k').textContent.length * 12 * 1.08 });
     key.querySelector('.v').innerHTML = html;
     // The rule and the colour of a state are worn only by a figure that has
     // money in that state: amber on nothing owed would be a false alarm.
@@ -673,8 +693,16 @@ function renderLens() {
       (name === lens ? ' on' : '');
     key.setAttribute('aria-pressed', String(name === lens));
   }
-  // The stylesheet sizes the four figures so that they share the one line.
-  box.style.setProperty('--n', cells.toFixed(2));
+  // The stylesheet sizes the four figures so that they share the one line
+  // (.lkey .v): the keys from the figure longest against its label, and for
+  // each count of them from the front, those figures' cells and the width of
+  // the other keys' labels.
+  parts.sort((a, b) => a.label / a.n - b.label / b.n);
+  parts.forEach((p, i) => {
+    const sum = (list, of) => list.reduce((total, x) => total + x[of], 0);
+    box.style.setProperty('--n' + (i + 1), sum(parts.slice(0, i + 1), 'n').toFixed(2));
+    box.style.setProperty('--l' + (i + 1), sum(parts.slice(i + 1), 'label').toFixed(1) + 'px');
+  });
 }
 
 // The one place the lens changes, so whatever the body shows for a lens is
@@ -2188,18 +2216,18 @@ export const settleView = {
       const prior = e.target.closest('[data-earlier]');
       if (prior) { setLens('fare'); goMonth(prior.dataset.earlier, false); }
     });
-    // Which parts of the focus line stay, and at what size, depends on the
-    // room the foot gives it, so the line is drawn again when the foot's
-    // width changes: a window resized or turned, or the view shown after
-    // being hidden, when it had no width at all. Only on a change of width:
-    // drawing the line does not change it, so one draw cannot call for
-    // another.
+    // Which parts of the focus line stay and at what size, and what the
+    // foot's cells give up to fit, depend on the room the foot has, so the
+    // foot is drawn again when its width changes: a window resized or
+    // turned, or the view shown after being hidden, when it had no width at
+    // all. Only on a change of width: drawing the foot does not change it,
+    // so one draw cannot call for another.
     let footWidth = -1;
     new ResizeObserver(entries => {
       const width = entries[0].contentRect.width;
       if (width === footWidth) return;
       footWidth = width;
-      if (showing && focus) renderFoot();
+      if (showing) renderFoot();
     }).observe(byId('settle-foot'));
     // The whole calendar area, not just the week rows: an empty day and the
     // padding around the strip answer nothing else, so a tap there is the way

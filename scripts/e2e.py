@@ -3283,7 +3283,7 @@ floor => {
 }
 """
 
-FOCUS_FLOOR = 11
+FOCUS_FLOOR = 12
 
 
 @check("settle.the-focus-line-holds-on-one-line")
@@ -3291,9 +3291,9 @@ def settle_focus_line(s: Session) -> None:
     """The line that names a focused statement stays on one line, so the
     foot is as tall with a focus as without. At its longest (a name of two
     runs across two months, a five-digit amount with cents, a shortfall) it
-    is set smaller, every part together, down to 11px and no further; past
+    is set smaller, every part together, down to 12px and no further; past
     that the leg count gives way, then the days, and only when the line set
-    at 11px would not fit with them. The name, the amount and the state are
+    at 12px would not fit with them. The name, the amount and the state are
     always there, whole."""
     year = s.back(23).year
 
@@ -3638,27 +3638,44 @@ def settle_identity(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
+# What the foot's cells have given up to fit: the step the script stopped at,
+# the first label's letter-spacing and the padding between two cells.
+FOOT_ROOM_JS = """
+() => {
+  const box = [...document.querySelectorAll('.foot .foot-in')].find(e => e.getClientRects().length);
+  const first = box.querySelector('.fkey');
+  return [box.dataset.fit, getComputedStyle(first.querySelector('.k')).letterSpacing,
+          parseFloat(getComputedStyle(first).paddingRight)];
+}
+"""
+
+
 @check("settle.three-foot-items-hold-on-one-line")
 def settle_foot_narrow(s: Session) -> None:
     """Three items at their longest (five-digit amounts with cents, twelve
     credits, a statement named by a two-digit month and day): whole on one
-    line at both phone widths, set smaller together where they must be."""
+    line at both phone widths. The labels stay at the size they are read at
+    and give up their letter-spacing and the padding between the cells
+    where they must; only the figures are set smaller, and only after
+    that."""
     stress_foot(s.ctx, s.today)
     s.open_settle()
     s.to_month(date.fromisoformat(foot_month(s.today) + "-01"))
     long = money2(FOOT_LONG)
     s.eq(s.totals(), [f"收少咗 · 12/28、30 結算{long}", f"入數未對 12 筆{long}", f"之前月份未清{long}"], "the foot's items")
-    sizes = {}
+    sizes, made = {}, {}
     for scheme in SCHEMES:
         s.page.emulate_media(color_scheme=scheme)
         for width in PHONE_WIDTHS:
             s.resize(width)
             f = foot_holds(s, 3, f"at their longest at {width} ({scheme})")
             sizes[width] = (f["cells"][0]["size"], f["cells"][0]["labelSize"])
-            s.eq(round(f["cells"][0]["size"] / f["cells"][0]["labelSize"], 2), round(15 / 10.5, 2),
-                 f"the figures and the labels are not set smaller together at {width}")
-    s.eq(sizes[390], (15, 10.5), "the sizes at 390, where there is room")
-    s.expect(12 <= sizes[340][0] <= 15, f"the figures' size at 340: {sizes[340]}")
+            made[width] = s.page.evaluate(FOOT_ROOM_JS)
+    s.eq(sizes[390], (15, 12), "the sizes at 390, where there is room")
+    s.eq(made[390], ["0", "0.96px", 7], "the letter-spacing and the padding at 390, where there is room")
+    s.eq(sizes[340][1], 12, "the labels' size at 340")
+    s.eq(made[340], ["3", "normal", 2], "what the labels and the cells gave up at 340")
+    s.expect(12 <= sizes[340][0] < 15, f"the figures' size at 340: {sizes[340]}")
     s.eq(s.writes, [], "writes")
 
 

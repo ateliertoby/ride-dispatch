@@ -209,6 +209,39 @@ export function fitLine(room, atFull, atFloor, full, floor) {
   return { form, size: fits < 0 ? size : Math.max(floor, size) };
 }
 
+// How much smaller the figures of a row of ruled cells, each a label over a
+// figure, have to be set for the row to fit `room`: a share of their full
+// size, 1 when they fit as they are. Each cell is { pad, label, figure }: its
+// padding and rule, and the widths of its label and of its figure at full
+// size, in px. A cell is as wide as the wider of the two and a label keeps
+// its size, so only the figures give way, all by the same share. With
+// `equal` the cells share the room equally and each has to fit its own
+// share; otherwise each takes what it needs and their sum has to fit.
+// Null when the labels alone are too long for the room, which no size of
+// figure can mend.
+export function figureScale(room, cells, equal) {
+  if (equal) {
+    const share = room / cells.length;
+    if (cells.some(c => c.pad + c.label > share)) return null;
+    return Math.min(1, ...cells.map(c => (share - c.pad) / c.figure));
+  }
+  const left = room - cells.reduce((sum, c) => sum + c.pad, 0);
+  if (cells.reduce((sum, c) => sum + c.label, 0) > left) return null;
+  // The cells whose figures are wider than their labels at a given share
+  // are the first few in this order, whatever the share. The row's width
+  // is at least what any such few would make it (their figures, the other
+  // cells' labels), and exactly what the true few make it, so the share
+  // that fits is the smallest any count of them allows.
+  const led = [...cells].sort((a, b) => a.label / a.figure - b.label / b.figure);
+  let scale = 1, figures = 0, labels = led.reduce((sum, c) => sum + c.label, 0);
+  for (const c of led) {
+    figures += c.figure;
+    labels -= c.label;
+    scale = Math.min(scale, (left - labels) / figures);
+  }
+  return scale;
+}
+
 // Whole calendar days from the statement date to `today`, never negative.
 // null when the batch has no statement date: how long it has waited is then
 // unknown, which is not the same as no wait. Counted in UTC so a clock change

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   dayState, cellFigure, keyFigure, statementName, dayRunsLabel, countedDay, inMonthPart, fareGap,
-  otherLines, fitLine, waitedDays, collectedOrder,
+  otherLines, figureScale, fitLine, waitedDays, collectedOrder,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -511,4 +511,44 @@ test('waitedDays is never negative', () => {
 test('waitedDays of a batch with no statement date is unknown, not zero', () => {
   assert.equal(waitedDays({ settled_on: null }, '2026-10-22'), null);
   assert.equal(waitedDays({}, '2026-10-22'), null);
+});
+
+// A row of cells, each [pad, label, figure] in px.
+const row = cells => cells.map(([pad, label, figure]) => ({ pad, label, figure }));
+// How wide the row comes out with its figures set at `scale`.
+const rowWidth = (cells, scale) => cells.reduce((w, c) => w + c.pad + Math.max(c.label, c.figure * scale), 0);
+
+test('figureScale leaves the figures as they are when the row fits', () => {
+  assert.equal(figureScale(338, row([[23, 110, 77], [15, 88, 77], [23, 77, 77]]), false), 1);
+  assert.equal(figureScale(338, row([[23, 110, 77], [24, 88, 120]]), true), 1);
+});
+
+test('figureScale sets the figures smaller by exactly what the row is over', () => {
+  // Every figure wider than its label: the figures alone give way.
+  const figures = row([[20, 40, 100], [20, 40, 100], [20, 40, 100]]);
+  assert.equal(figureScale(300, figures, false), 0.8);
+  // A cell held open by its label gives nothing, so the others give more.
+  const mixed = row([[20, 90, 60], [20, 40, 100], [20, 40, 100]]);
+  const scale = figureScale(300, mixed, false);
+  assert.equal(scale, 0.75);
+  assert.equal(rowWidth(mixed, scale), 300);
+});
+
+test('figureScale counts a cell whose label takes over as the figures shrink', () => {
+  // At full size the second figure is the wider; set at the share the row
+  // needs it is narrower than its label, and the label is what counts.
+  const cells = row([[10, 20, 200], [10, 90, 100], [10, 20, 30]]);
+  const scale = figureScale(270, cells, false);
+  assert.ok(Math.abs(rowWidth(cells, scale) - 270) < 1e-9, String(rowWidth(cells, scale)));
+  assert.ok(100 * scale < 90, String(scale));
+});
+
+test('figureScale fits each cell to its own share when the cells share the room equally', () => {
+  // Shares of 150: the second figure has 126 of it for its 140.
+  assert.equal(figureScale(300, row([[23, 110, 77], [24, 88, 140]]), true), 0.9);
+});
+
+test('figureScale says when the labels alone are too long', () => {
+  assert.equal(figureScale(300, row([[20, 100, 50], [20, 100, 50], [20, 100, 50]]), false), null);
+  assert.equal(figureScale(300, row([[23, 130, 77], [24, 88, 77]]), true), null);
 });
