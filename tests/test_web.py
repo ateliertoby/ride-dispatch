@@ -998,11 +998,13 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     reconciliation view, the sheet behind it carries the order.  'k' and 's'
     are the keys and steppers of that sheet's numpad, the day view's too.
     'lw' is no action: the width a calendar label was reserved at, which the
-    browser checks compare with the width it was drawn at."""
+    browser checks compare with the width it was drawn at.  'lens' is the
+    month total a key stands for: choosing one changes what the page shows
+    and writes nothing."""
     page = settle_view(client)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "back", "bar", "bl", "chip", "close", "copy", "credit", "credits", "d", "f",
-        "fold", "k", "lw", "od", "s", "upbatch", "upguess", "uptick", "upsave",
+        "fold", "k", "lens", "lw", "od", "s", "upbatch", "upguess", "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 

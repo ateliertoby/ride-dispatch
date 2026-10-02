@@ -139,6 +139,38 @@ def settle_path(d: date, platform: str = "ride") -> str:
 
 CREDITS = "/api/credits?platform=ride"
 
+# The month's total keys, in the order they stand: the payload's name for
+# each figure and the key's label.
+TOTAL_KEYS = (("fare", "本月車費"), ("received", "已收"), ("awaiting", "等過數"), ("unsettled", "未結算"))
+
+
+def key_texts(totals) -> list:
+    """What the four total keys say for one month's `month_totals`: label and
+    figure run together, the figure with $, thousands comma and cents. A
+    month with no totals to state shows a dash in each."""
+    return [label + ("—" if totals is None else f"${totals[name]:,.2f}") for name, label in TOTAL_KEYS]
+
+
+# How each total key is drawn, in order: what the checks compare against the
+# palette and against each other.
+KEYS_JS = """
+() => [...document.querySelectorAll('#settle-lens .lkey')].map(key => {
+  const cs = e => getComputedStyle(e);
+  const v = key.querySelector('.v'), ct = key.querySelector('.ct'), mk = key.querySelector('.mk');
+  const box = key.getBoundingClientRect(), fig = v.getBoundingClientRect();
+  return {
+    lens: key.dataset.lens, tag: key.tagName, pressed: key.getAttribute('aria-pressed'),
+    height: box.height, ground: cs(key).backgroundColor,
+    ink: cs(v).color, face: cs(v).fontFamily, size: parseFloat(cs(v).fontSize),
+    cents: ct ? parseFloat(cs(ct).fontSize) / parseFloat(cs(v).fontSize) : null,
+    rule: [mk.getBoundingClientRect().height, cs(mk).backgroundColor],
+    lined: [key, ...key.querySelectorAll('*')].some(e => cs(e).textDecorationLine !== 'none'),
+    figTop: Math.round(fig.top), figHeight: fig.height,
+    inside: fig.left >= box.left - 0.5 && fig.right <= box.right - parseFloat(cs(key).paddingRight) + 0.5,
+  };
+})
+"""
+
 # The week row at the top of the strip, read the way the page reads it: the
 # first row whose end is below the sticky header.
 TOP_WEEK_JS = """
@@ -602,6 +634,20 @@ class Session(Driver):
     def totals(self) -> list:
         """The settle view's foot, cell by cell: label and figure run together."""
         return self.texts(".foot .foot-in > *")
+
+    def keys_text(self) -> list:
+        """The month's total keys, key by key: label and figure run together."""
+        return self.texts("#settle-lens .lkey")
+
+    def pressed(self) -> list:
+        """The lens of every total key that says it is the chosen one."""
+        return self.page.eval_on_selector_all(
+            '#settle-lens .lkey[aria-pressed="true"]', "els => els.map(e => e.dataset.lens)")
+
+    def header_height(self) -> float:
+        return self.page.evaluate(
+            "() => [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)"
+            ".getBoundingClientRect().height")
 
     def top_week(self) -> str:
         return self.page.evaluate(TOP_WEEK_JS)[0]
@@ -2500,13 +2546,16 @@ def settle_refound(s: Session) -> None:
     far = doctored_ledger(s, 7)
     chip = s.chip("exact")
     s.reach(chip)
+    # Clear of the sticky header before the requests are counted: a tap on a
+    # chip the header covers first scrolls it out, and how many months above
+    # the strip that brings into reach depends on the header's height. That
+    # is the strip's own growth, not what the jump pays for.
+    s.to_top(chip)
     asked = len(s.requests)
     s.tap(chip)
     got = s.asked(asked)
     s.eq(got.count(settle_path(far)), 1, "requests for the month jumped to")
-    # Not the month just above the old strip: bringing the chip under the
-    # finger can scroll that one into reach, which is the strip's own growth.
-    # Nor the three after the month jumped to, which the new strip grows into
+    # Not the three after the month jumped to, which the new strip grows into
     # to fill the screen.
     between = [settle_path(add_months(first, -n)) for n in (2, 3)]
     s.eq([p for p in got if p in between], [], "months between were paid for")
@@ -2891,6 +2940,230 @@ def settle_month_figure(s: Session) -> None:
     s.tap('[aria-label="前一個月"]')
     prev = add_months(s.today, -1)
     s.eq(head(), [f"{prev.year}·{prev.month:02d}", "", 1, narrow[3]], "another month on a narrow screen, and the header's height")
+    s.eq(s.writes, [], "writes")
+
+
+# ---- settle view: the month's total keys and the lens ----
+
+CLEAR = "rgba(0, 0, 0, 0)"
+
+
+def rewrite_settle(s: Session, change) -> None:
+    """From now on every answer from /api/settle reaches the page as `change`
+    leaves it: change(body, path) rewrites the answer in place."""
+    def handler(route):
+        body = route.fetch().json()
+        change(body, route.request.url[len(s.base):])
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+    s.ctx.route("**/api/settle?*", handler)
+
+
+def keys_drawn(s: Session, totals: dict, what: str) -> None:
+    """The four keys against one month's totals: the figures, and the ink
+    and rule each state is drawn in. A key with no money in its state recedes
+    and has no rule."""
+    s.eq(s.keys_text(), key_texts(totals), f"the keys' figures, {what}")
+    text, text2, amber = s.token("--text"), s.token("--text-2"), s.token("--amber")
+    want = {
+        "fare": (text, CLEAR),
+        "received": (text2, CLEAR),
+        "awaiting": (text, text2) if totals["awaiting"] > 0 else (text2, CLEAR),
+        "unsettled": (amber, amber) if totals["unsettled"] > 0 else (text2, CLEAR),
+    }
+    heights = {"awaiting": 1, "unsettled": 3}
+    for key in s.page.evaluate(KEYS_JS):
+        ink, rule = want[key["lens"]]
+        s.eq((key["ink"], key["rule"][1]), (ink, rule), f"ink and rule of {key['lens']}, {what}")
+        if rule != CLEAR:
+            s.eq(key["rule"][0], heights[key["lens"]], f"thickness of the rule under {key['lens']}, {what}")
+
+
+@check("settle.total-keys")
+def settle_total_keys(s: Session) -> None:
+    s.open_settle()
+    cur = s.today.replace(day=1)
+    totals = s.api("GET", settle_path(cur))["month_totals"]
+    keys_drawn(s, totals, "the current month")
+    keys = s.page.evaluate(KEYS_JS)
+    s.eq([k["lens"] for k in keys], [name for name, _ in TOTAL_KEYS], "the keys' order")
+    s.eq(s.texts("#settle-lens .lkey .k"), [label for _, label in TOTAL_KEYS], "the keys' labels")
+    s.eq({k["tag"] for k in keys}, {"BUTTON"}, "the keys are buttons")
+    s.expect(all(k["height"] >= 44 for k in keys), f"a key under 44px: {[k['height'] for k in keys]}")
+    s.expect(all("B612 Mono" in k["face"] for k in keys), "a figure is not in the figure face")
+    s.eq({round(k["cents"], 2) for k in keys}, {0.7}, "the cents against the dollars")
+    s.expect(not any(k["lined"] for k in keys), "something in a key is underlined")
+    # The row rides in the sticky header, between the tabs and the column head.
+    s.eq(s.page.evaluate("() => { const h = document.querySelector('#view-settle .header');"
+                         " return [getComputedStyle(h).position, [...h.children].map(e => e.className.split(' ')[0])]; }"),
+         ["sticky", ["header-row", "tabs", "lens", "cols"]], "what the header holds")
+    # Two kinds of control: a tab is chosen by a rule under it, a key by its ground.
+    s.eq((s.colour(".tab.on", "borderBottomWidth"), s.colour(".tab.on", "borderBottomColor")),
+         ("2px", s.token("--text")), "the chosen tab's rule")
+    s.eq((s.colour(".lkey.on", "borderBottomWidth"), s.colour(".lkey.on", "backgroundColor"),
+          s.colour(".header .wk", "backgroundColor")),
+         ("0px", s.token("--surface"), s.token("--surface")), "the chosen key's ground, and the column head's")
+    s.eq([k["ground"] for k in keys[1:]], [CLEAR] * 3, "the grounds of the keys not chosen")
+    # The month before has other money in other states, drawn by the same rule.
+    s.tap('[aria-label="前一個月"]')
+    keys_drawn(s, s.api("GET", settle_path(add_months(cur, -1)))["month_totals"], "the month before")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.total-keys-follow-the-month-and-the-platform")
+def settle_total_keys_follow(s: Session) -> None:
+    s.open_settle()
+    cur = s.today.replace(day=1)
+    prev, after = add_months(cur, -1), add_months(cur, 1)
+
+    def totals(d: date, platform: str = "ride") -> dict:
+        return s.api("GET", settle_path(d, platform))["month_totals"]
+
+    s.expect(key_texts(totals(prev)) != key_texts(totals(cur)), "the seed gives two months the same totals")
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.month_text(), s.keys_text()), (month_label(prev), key_texts(totals(prev))), "the keys after ←")
+    s.tap('[aria-label="後一個月"]')
+    s.eq((s.month_text(), s.keys_text()), (month_label(cur, now=True), key_texts(totals(cur))), "the keys after →")
+    # The keys follow the scroll, as the month button does. The strip grows as
+    # its end comes into reach, so the row may take more than one scroll.
+    for _ in range(4):
+        s.page.evaluate("""id => {
+          const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+            .getBoundingClientRect().bottom;
+          window.scrollBy(0, document.getElementById(id).getBoundingClientRect().top - header + 8);
+        }""", week_id(after + timedelta(days=7)))
+        s.settle()
+    s.eq((s.month_text(), s.keys_text()), (month_label(after), key_texts(totals(after))), "the keys after scrolling into the next month")
+    s.tap(".date-btn")
+    s.eq((s.month_text(), s.keys_text()), (month_label(cur, now=True), key_texts(totals(cur))), "the keys after the month button")
+    # Another platform's month is another set of figures; the chosen key stays.
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.tap(".tab", has_text="滴滴")
+    s.expect(key_texts(totals(cur, "didi")) != key_texts(totals(cur)), "the seed gives two platforms the same totals")
+    s.eq(s.keys_text(), key_texts(totals(cur, "didi")), "the keys after changing platform")
+    s.eq(s.pressed(), ["awaiting"], "the chosen key after changing platform")
+    s.tap('[aria-label="前一個月"]')
+    s.eq(s.keys_text(), key_texts(totals(prev, "didi")), "the other platform's keys after ←")
+    s.eq(s.pressed(), ["awaiting"], "the chosen key after changing month")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.lens")
+def settle_lens(s: Session) -> None:
+    s.open_day()
+    s.go_settle()
+    s.eq(s.pressed(), ["fare"], "the chosen key on arrival")
+    figures, asked = s.keys_text(), len(s.requests)
+    for name, _ in TOTAL_KEYS[1:]:
+        s.tap(f'.lkey[data-lens="{name}"]')
+        s.eq(s.pressed(), [name], f"the chosen key after tapping {name}")
+        s.eq(s.page.eval_on_selector_all("#settle-lens .lkey.on", "els => els.map(e => e.dataset.lens)"),
+             [name], f"the key drawn as chosen after tapping {name}")
+    s.eq(s.keys_text(), figures, "the figures after choosing keys")
+    s.eq(s.asked(asked, "/api/"), [], "requests made by choosing a key")
+    # The lens is where the operator was looking, not a setting: leaving the
+    # view and coming back starts from the month's fare again.
+    s.go_day()
+    s.go_settle()
+    s.eq(s.pressed(), ["fare"], "the chosen key on coming back")
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.to_day()
+    s.to_settle()
+    s.eq(s.pressed(), ["fare"], "the chosen key on coming back through history")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.total-keys-without-a-figure")
+def settle_total_keys_unknown(s: Session) -> None:
+    """A month not loaded yet and a month whose totals the server withheld
+    both show a dash in every key, never a zero, and the header keeps its
+    height."""
+    cur = s.today.replace(day=1)
+    prev = add_months(cur, -1)
+
+    def withhold(body: dict, path: str) -> None:
+        if path == settle_path(prev):
+            body["month_totals"] = None
+
+    rewrite_settle(s, withhold)
+    dashes = key_texts(None)
+    # Before the first answer: the keys are there, each holding a dash.
+    s.page = s.ctx.new_page()
+    s.page.set_default_timeout(TIMEOUT_MS)
+    s._watch(s.page)
+    s.hold(settle_path(cur))
+    s.page.goto(s.base + "/settle")
+    s.wait(lambda: s.holding(settle_path(cur)), "the first request for the month")
+    s.eq(s.keys_text(), dashes, "the keys before the month has loaded")
+    s.eq(s.pressed(), ["fare"], "the chosen key before the month has loaded")
+    height = s.header_height()
+    s.release_all()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(cur))["month_totals"]), "the keys once the month has loaded")
+    s.eq(s.header_height(), height, "the header's height, loaded against not loaded")
+    # A month whose split the server could not state exactly.
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.month_text(), s.keys_text()), (month_label(prev), dashes), "the keys of a month with no totals")
+    s.eq(s.header_height(), height, "the header's height on a month with no totals")
+    keys = s.page.evaluate(KEYS_JS)
+    s.eq({k["rule"][1] for k in keys}, {CLEAR}, "state rules under a dash")
+    s.expect(s.token("--amber") not in [k["ink"] for k in keys], "a dash in amber")
+    # The keys can still be chosen.
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq(s.pressed(), ["unsettled"], "the chosen key on a month with no totals")
+    s.tap('[aria-label="後一個月"]')
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(cur))["month_totals"]), "the keys back on a month with totals")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.total-keys-hold-on-a-narrow-screen")
+def settle_total_keys_narrow(s: Session) -> None:
+    """Five-digit figures with cents in all four keys: they are set smaller
+    together and stay whole on one line, and the header is no wider than the
+    screen."""
+    big = {name: 19103.5 for name, _ in TOTAL_KEYS}
+
+    def swell(body: dict, path: str) -> None:
+        if body.get("month_totals") is not None:
+            body["month_totals"].update(big)
+
+    rewrite_settle(s, swell)
+    s.open_settle()
+    for width in (390, 340):
+        s.resize(width)
+        s.eq(s.keys_text(), key_texts(big), f"the figures at {width}")
+        keys = s.page.evaluate(KEYS_JS)
+        wide = s.page.evaluate("""() => {
+          const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+          const h = seen('.header'), l = seen('.lens');
+          const last = l.lastElementChild.getBoundingClientRect();
+          return [h.scrollWidth > h.clientWidth, l.scrollWidth > l.clientWidth,
+                  document.documentElement.scrollWidth > window.innerWidth, last.right > window.innerWidth + 0.5];
+        }""")
+        s.eq(wide, [False, False, False, False], f"header, key row, document or last key wider than the screen at {width}")
+        s.expect(all(k["inside"] for k in keys), f"a figure runs out of its key at {width}")
+        s.eq(len({k["figTop"] for k in keys}), 1, f"lines the figures stand on at {width}")
+        s.eq({k["figHeight"] for k in keys}, {20}, f"a figure wrapped at {width}")
+        s.eq(len({k["size"] for k in keys}), 1, f"sizes the figures are set in at {width}")
+        s.expect(all(k["height"] >= 44 for k in keys), f"a key under 44px at {width}")
+    s.expect(keys[0]["size"] < 15, f"the figures were not set smaller at 340: {keys[0]['size']}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.upload-key-is-the-primary-key")
+def settle_upload_key(s: Session) -> None:
+    def key(selector: str) -> list:
+        return [s.colour(selector, prop) for prop in ("backgroundColor", "color", "borderTopColor")]
+
+    s.open_settle()
+    solid = [s.token("--text"), s.token("--bg"), s.token("--text")]
+    s.eq(key("#stmtBtn"), solid, "the upload key: ground, ink, edge")
+    s.eq(s.text("#stmtBtn"), "圖", "the upload key's face")
+    s.eq(s.count(".header .stmt-btn"), 1, "solid keys in the settle header")
+    s.eq(key('[aria-label="前一個月"]')[0], CLEAR, "the ground of a key beside it")
+    # The same reversal the day board gives its own primary key.
+    s.go_day()
+    s.eq(key(".add-btn"), solid, "the day board's + key")
     s.eq(s.writes, [], "writes")
 
 
