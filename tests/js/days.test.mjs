@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, waitedDays,
+  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, fareGap, waitedDays,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -213,6 +213,43 @@ test('inMonthPart counts a 舉牌 the statement paid ahead in the month of its t
   };
   assert.equal(inMonthPart(batch, '2026-09'), 900);
   assert.equal(inMonthPart(batch, '2026-10'), 40);
+});
+
+test('fareGap is nothing when the statement is its legs to the cent', () => {
+  const batch = { id: 12, confirmed_amount: 700.55, orders: [
+    leg('n1', '2026-10-02 09:00', 420.5), leg('n2', '2026-10-02 21:00', 300.05, { penalty_fee: 20 }),
+  ] };
+  assert.equal(fareGap(batch), 0);
+  // Float noise in the stored figure is not a difference.
+  assert.equal(fareGap({ id: 13, confirmed_amount: 0.1 + 0.2, orders: [leg('n3', '2026-10-02 09:00', 0.3)] }), 0);
+});
+
+test('fareGap is the statement figure less the legs, signed', () => {
+  const orders = [leg('p1', '2026-10-05 09:00', 470, { banner_fee: 40 }), leg('p2', '2026-10-05 18:00', 780)];
+  assert.equal(fareGap({ id: 14, confirmed_amount: 1270, orders }), -20);
+  assert.equal(fareGap({ id: 15, confirmed_amount: 1310.5, orders }), 20.5);
+  assert.equal(fareGap({ id: 16, confirmed_amount: 1290.01, orders }), 0.01);
+});
+
+test('fareGap does not count the lines a statement carries itself', () => {
+  const batch = {
+    id: 17, confirmed_amount: 1385 + 40 - 63.45 + 63.45,
+    orders: [leg('q1', '2026-10-05 09:00', 515), leg('q2', '2026-10-05 17:00', 395),
+             leg('q3', '2026-10-06 12:00', 475)],
+    adjustments: [
+      { order_ref: 'q9', date: '2026-10-08', amount: 40, ahead: true },
+      { order_ref: 'q8', date: '2026-09-20', amount: -63.45 },
+      { order_ref: 'q8', date: '2026-09-20', amount: 63.45 },
+    ],
+  };
+  assert.equal(fareGap(batch), 0);
+  assert.equal(fareGap({ ...batch, confirmed_amount: 1400 }), -25);
+});
+
+test('fareGap counts a leg net of the 舉牌 an earlier statement paid', () => {
+  const batch = { id: 18, confirmed_amount: 480,
+                  orders: [leg('r1', '2026-10-05 09:00', 480, { banner_fee: 40, paid_ahead: 40 })] };
+  assert.equal(fareGap(batch), 0);
 });
 
 test('waitedDays counts whole calendar days since the statement date', () => {

@@ -105,6 +105,26 @@ export function inMonthPart(batch, monthKey) {
   return sum / 100;
 }
 
+// By how much a statement's figure differs from what the book holds for it:
+// the figure the platform confirmed, less its legs and the lines it carries
+// itself. Zero when they agree to the cent.
+//
+// The book's side is everything the statement is legitimately the sum of. A
+// leg counts at what this statement is owed for it, so a 舉牌 an earlier
+// statement paid ahead is not asked of this one. The statement's own lines
+// count as printed: a 舉牌 it paid ahead of a trip it held back, a 判罰 against
+// a trip another statement holds, the 免責 line that cancels one. They are
+// money on the transfer that no leg carries, and leaving them out would
+// report every such statement as disagreeing by exactly those lines. What is
+// left is a figure the platform put on a leg, or on the whole statement, that
+// is not the one the book has.
+export function fareGap(batch) {
+  let held = 0;
+  for (const o of batch.orders) held += cents(owedOf(o));
+  for (const a of batch.adjustments || []) held += cents(a.amount);
+  return (cents(batch.confirmed_amount || 0) - held) / 100;
+}
+
 // Whole calendar days from the statement date to `today`, never negative.
 // null when the batch has no statement date: how long it has waited is then
 // unknown, which is not the same as no wait. Counted in UTC so a clock change
