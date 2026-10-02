@@ -15,8 +15,8 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure, otherLines,
-         statementName, waitedDays } from './days.js';
+import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure,
+         otherLines, statementName, waitedDays } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -197,8 +197,13 @@ function batchDates(b) {
 // day, which none of the batch's own legs may reach; the calendar still has to
 // show that part of the day's money went into the batch.
 function aheadLines(b) { return (b.adjustments || []).filter(a => a.ahead); }
+// That day is where the trip is now, which is where the month's totals count
+// the money: a statement has to be listed in the month whose key counts it.
+// A trip cancelled since is counted nowhere and keeps the day it was printed
+// under.
+function aheadDay(a) { return countedDay(a) || a.date; }
 function batchSpan(b) {
-  return [...new Set([...batchDates(b), ...aheadLines(b).map(a => a.date)])].sort();
+  return [...new Set([...batchDates(b), ...aheadLines(b).map(aheadDay)])].sort();
 }
 // The runs a batch covers, and the one carrying its amount: the latest run
 // with a leg in it.  Every other run points at that one.
@@ -210,7 +215,7 @@ function spanRuns(b) {
   return { runs, main, legDays };
 }
 function aheadIn(b, run) {
-  return round2(aheadLines(b).filter(a => run.includes(a.date)).reduce((sum, a) => sum + a.amount, 0));
+  return round2(aheadLines(b).filter(a => run.includes(aheadDay(a))).reduce((sum, a) => sum + a.amount, 0));
 }
 function primaryRunOf(dates) { const r = runsOf(dates); return r[r.length - 1] || []; }
 function spanLabelOf(dates) { return dateSpanLabel(primaryRunOf(dates)); }
@@ -1329,7 +1334,7 @@ function batchesOn(dateStr) {
   const out = [];
   const add = b => { if (b && !seen.has(b.id)) { seen.add(b.id); out.push(b); } };
   for (const o of ordersOn(dateStr)) add(batchOf(o.order_id));
-  for (const b of data.settlements) if (aheadLines(b).some(a => a.date === dateStr)) add(b);
+  for (const b of data.settlements) if (aheadLines(b).some(a => aheadDay(a) === dateStr)) add(b);
   return out;
 }
 function openDay(dateStr) {

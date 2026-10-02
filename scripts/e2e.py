@@ -4004,21 +4004,28 @@ def want_foot(s: Session, platform: str = "ride") -> list:
                       s.api("GET", "/api/credits?platform=" + platform), month)
 
 
+def counted_day(a: dict):
+    """The day the month's totals count a statement's line on: the day of
+    the trip a 舉牌 was paid ahead of, as the server reads it off the order,
+    and none for any other line or for a trip that is no longer an order."""
+    return a.get("trip_date") if a.get("ahead") else None
+
+
 def batch_days(b: dict) -> list:
-    """The days a statement covers: its legs', and those of the 舉牌 lines it
-    paid ahead of a held-back trip."""
+    """The days a statement covers: its legs', and those of the trips it
+    paid a 舉牌 ahead of."""
     days = {o["scheduled_time"][:10] for o in b["orders"]}
-    days |= {a["date"] for a in b["adjustments"] if a.get("ahead")}
+    days |= {counted_day(a) or a["date"] for a in b["adjustments"] if a.get("ahead")}
     return sorted(date.fromisoformat(d) for d in days)
 
 
 def month_part(b: dict, month: str) -> int:
     """What one month's totals count of a statement, in cents: each of its
     legs scheduled in the month at owed_of, plus each 舉牌 line it paid ahead
-    that is dated in the month."""
+    of a trip that is scheduled in the month."""
     from ride_dispatch.service import owed_of
     legs = sum(round(owed_of(o) * 100) for o in b["orders"] if o["scheduled_time"][:7] == month)
-    return legs + sum(round(a["amount"] * 100) for a in b["adjustments"] if a.get("ahead") and a["date"][:7] == month)
+    return legs + sum(round(a["amount"] * 100) for a in b["adjustments"] if (counted_day(a) or "")[:7] == month)
 
 
 def fare_gap(b: dict) -> int:
@@ -4031,8 +4038,9 @@ def fare_gap(b: dict) -> int:
 
 def other_lines(b: dict) -> int:
     """The lines a statement carries that the month's totals count under no
-    order, in cents: every line but a 舉牌 paid ahead of a held-back trip."""
-    return sum(round(a["amount"] * 100) for a in b["adjustments"] if not a.get("ahead"))
+    order, in cents: every line but a 舉牌 paid ahead of a held-back trip
+    that is still an order."""
+    return sum(round(a["amount"] * 100) for a in b["adjustments"] if not counted_day(a))
 
 
 def listed(batches: list, lens: str, month: str) -> list:
@@ -4361,6 +4369,45 @@ def settle_list_straddle(s: Session) -> None:
           for d in days],
          [["cell st-received", "470"], ["cell st-received", "400"], ["cell st-received", "480"], ["cell st-received", "360"]],
          "the statement's four days on the strip")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-banner-paid-ahead-is-listed-in-the-month-its-trip-was-moved-to")
+def settle_list_moved_trip(s: Session) -> None:
+    """A trip held back with its 舉牌 already paid is moved to another month
+    after the statement was confirmed. The month's totals count the 舉牌
+    with the trip's order, so the statement is listed in the month the trip
+    is in now, for that amount, and in every month it touches its rows still
+    add up to the key."""
+    from ride_dispatch import db
+    cur = s.today.replace(day=1)
+    there = add_months(cur, -3).replace(day=15)
+    held, batch_id = s.t["order"]["held_trip"], s.t["batch"]["ahead"]
+    was = s.back(3)
+    db.update_order_fields(s.server.db_path, held, {"scheduled_time": there.isoformat() + " 10:10:00"})
+    months = sorted({month_key(d) for d in (there, s.back(6), s.back(5), was)})
+    books = {m: s.api("GET", settle_path(date.fromisoformat(m + "-01"))) for m in months}
+    batches = list({b["id"]: b for body in books.values() for b in body["settlements"]}.values())
+    batch = [b for b in batches if b["id"] == batch_id][0]
+    s.eq([(a["date"], a.get("trip_date")) for a in batch["adjustments"]], [(was.isoformat(), there.isoformat())],
+         "the line's own day and the day of its trip, as the server sends them")
+    s.expect(batch_id in [b["id"] for b in books[month_key(there)]["settlements"]],
+             "the month the trip was moved to was not sent the statement that paid its 舉牌")
+    s.eq(books[month_key(there)]["month_totals"]["awaiting"], 40.0, "what that month's totals count as awaiting")
+    s.open_settle()
+    s.tap('.lkey[data-lens="awaiting"]')
+    for m in months:
+        s.to_month(date.fromisoformat(m + "-01"))
+        want = list_matches(s, "awaiting", books, batches, "with a held-back trip moved")
+        key = cents(s.text('.lkey[data-lens="awaiting"] .v'))
+        s.eq(sum(month_part(x, m) for x in want), key, f"the rows' parts of {m} against the 等過數 key, in cents")
+    s.to_month(there)
+    row = [r for r in s.list_rows() if r["id"] == batch_id]
+    s.expect(row, "the statement is not listed in the month its held-back trip was moved to")
+    s.eq((row[0]["amount"], row[0]["month"], row[0]["other"], row[0]["gap"]), ("$1,425.00", "其中本月 $40.00", "", ""),
+         "the statement's row in that month")
+    s.expect(md_slash(there) in row[0]["sub"][0] and md_slash(was) not in row[0]["sub"][0],
+             f"the days the row names: {row[0]['sub'][0]}")
     s.eq(s.writes, [], "writes")
 
 

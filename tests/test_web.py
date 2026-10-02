@@ -666,7 +666,7 @@ def test_settle_carries_what_a_trip_was_paid_ahead_so_the_page_can_net_it(client
     assert r1["paid_ahead"] == 40.0 and r1["ahead_batch"] == ahead
     assert r2["paid_ahead"] == 0 and r2["ahead_batch"] is None
     assert data["totals"]["unsettled"] == 500.0
-    assert data["settlements"][0]["adjustments"] == R1_AHEAD
+    assert data["settlements"][0]["adjustments"] == [dict(R1_AHEAD[0], trip_date="2026-07-01")]
     assert data["settlements"][0]["expected_amount"] == 340.0
 
 

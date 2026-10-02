@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, fareGap, otherLines,
-  waitedDays,
+  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, countedDay, inMonthPart, fareGap,
+  otherLines, waitedDays,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -254,13 +254,51 @@ test('inMonthPart counts a 舉牌 the statement paid ahead in the month of its t
     id: 11, state: 'awaiting', confirmed_amount: 940,
     orders: [leg('m1', '2026-09-29 09:00', 500), leg('m2', '2026-09-30 09:00', 400)],
     adjustments: [
-      { order_ref: 'm9', date: '2026-10-02', amount: 40, ahead: true },
+      { order_ref: 'm9', date: '2026-10-02', trip_date: '2026-10-02', amount: 40, ahead: true },
       // A line of the statement's own that belongs to no trip's fare.
       { order_ref: 'm8', date: '2026-10-03', amount: -25 },
     ],
   };
   assert.equal(inMonthPart(batch, '2026-09'), 900);
   assert.equal(inMonthPart(batch, '2026-10'), 40);
+});
+
+test('countedDay is the day of the trip a 舉牌 was paid ahead of, and of no other line', () => {
+  assert.equal(countedDay({ order_ref: 'm9', date: '2026-09-30', trip_date: '2026-09-30', amount: 40, ahead: true }), '2026-09-30');
+  // Moved since the statement: the trip's day, not the day the line was printed under.
+  assert.equal(countedDay({ order_ref: 'm9', date: '2026-09-30', trip_date: '2026-10-02', amount: 40, ahead: true }), '2026-10-02');
+  // The trip is no longer an order the totals read.
+  assert.equal(countedDay({ order_ref: 'm9', date: '2026-09-30', amount: 40, ahead: true }), null);
+  // A line that is no trip's fare is counted on no day, whatever it carries.
+  assert.equal(countedDay({ order_ref: 'm8', date: '2026-09-30', amount: -25 }), null);
+  assert.equal(countedDay({ order_ref: 'm8', date: '2026-09-30', trip_date: '2026-09-30', amount: -25 }), null);
+});
+
+test('inMonthPart follows a held-back trip to the month it was moved to', () => {
+  // The statement printed the 舉牌 under 30 September, and the trip has since
+  // been moved to 2 October: the server counts the 40 in October.
+  const batch = {
+    id: 19, state: 'awaiting', confirmed_amount: 940,
+    orders: [leg('m1', '2026-09-29 09:00', 500), leg('m2', '2026-09-30 09:00', 400)],
+    adjustments: [{ order_ref: 'm9', date: '2026-09-30', trip_date: '2026-10-02', amount: 40, ahead: true }],
+  };
+  assert.equal(inMonthPart(batch, '2026-09'), 900);
+  assert.equal(inMonthPart(batch, '2026-10'), 40);
+  // Its parts of the two months are still the whole of what the keys count.
+  assert.equal(inMonthPart(batch, '2026-09') + inMonthPart(batch, '2026-10') + otherLines(batch) + fareGap(batch), 940);
+});
+
+test('inMonthPart counts a 舉牌 in no month once its trip is cancelled', () => {
+  const batch = {
+    id: 20, state: 'awaiting', confirmed_amount: 940,
+    orders: [leg('m1', '2026-09-29 09:00', 500), leg('m2', '2026-09-30 09:00', 400)],
+    adjustments: [{ order_ref: 'm9', date: '2026-09-30', amount: 40, ahead: true }],
+  };
+  assert.equal(inMonthPart(batch, '2026-09'), 900);
+  assert.equal(inMonthPart(batch, '2026-10'), 0);
+  // It is then a line no order carries, and the row says so.
+  assert.equal(otherLines(batch), 40);
+  assert.equal(fareGap(batch), 0);
 });
 
 test('fareGap is nothing when the statement is its legs to the cent', () => {
@@ -318,7 +356,7 @@ test('otherLines is the signed sum of the lines that are no order\'s fare', () =
 
 test('otherLines leaves out a 舉牌 paid ahead, which the totals count under its trip', () => {
   const batch = { id: 25, orders: [leg('t1', '2026-10-05 09:00', 500)], adjustments: [
-    { order_ref: 't9', date: '2026-10-08', amount: 40, ahead: true },
+    { order_ref: 't9', date: '2026-10-08', trip_date: '2026-10-08', amount: 40, ahead: true },
     { order_ref: 't8', date: '2026-09-20', amount: -30 },
   ] };
   assert.equal(otherLines(batch), -30);
@@ -328,13 +366,16 @@ test('a statement figure is what the keys count of it, its other lines and its g
   // What the keys count of a statement: its part of every month it touches.
   const inKeys = b => {
     const months = new Set([...b.orders.map(o => o.scheduled_time.slice(0, 7)),
-                            ...(b.adjustments || []).map(a => a.date.slice(0, 7))]);
+                            ...(b.adjustments || []).flatMap(a => [a.date, a.trip_date || a.date])
+                              .map(d => d.slice(0, 7))]);
     return [...months].reduce((sum, m) => sum + Math.round(inMonthPart(b, m) * 100), 0);
   };
   const c = n => Math.round(n * 100);
   const legs = [leg('u1', '2026-09-29 09:00', 500.5), leg('u2', '2026-09-30 21:00', 400.05, { penalty_fee: 20 }),
                 leg('u3', '2026-10-01 08:00', 480, { banner_fee: 40, paid_ahead: 40 })];
-  const ahead = { order_ref: 'u9', date: '2026-10-02', amount: 40, ahead: true };
+  const ahead = { order_ref: 'u9', date: '2026-10-02', trip_date: '2026-10-02', amount: 40, ahead: true };
+  const moved = { order_ref: 'u6', date: '2026-10-02', trip_date: '2026-11-03', amount: 35, ahead: true };
+  const dropped = { order_ref: 'u5', date: '2026-10-02', amount: 45, ahead: true };
   const fine = { order_ref: 'u8', date: '2026-08-20', amount: -63.45 };
   const waiver = { order_ref: 'u8', date: '2026-08-20', amount: 63.45 };
   const unknown = { order_ref: 'u7', date: '2026-09-28', amount: -25.1 };
@@ -352,6 +393,9 @@ test('a statement figure is what the keys count of it, its other lines and its g
     { id: 34, confirmed_amount: held + 0.01, orders: legs },
     // Nothing but lines.
     { id: 35, confirmed_amount: 40 - 25.1, orders: [], adjustments: [ahead, unknown] },
+    // A 舉牌 paid ahead of a trip moved to a third month, and one of a trip
+    // cancelled since.
+    { id: 36, confirmed_amount: held + 35 + 45, orders: legs, adjustments: [moved, dropped] },
   ];
   for (const b of cases) {
     assert.equal(c(b.confirmed_amount), inKeys(b) + c(otherLines(b)) + c(fareGap(b)), 'statement ' + b.id);
@@ -360,6 +404,8 @@ test('a statement figure is what the keys count of it, its other lines and its g
   assert.deepEqual([inKeys(cases[3]) / 100, otherLines(cases[3]), fareGap(cases[3])], [1400.55, -88.55, -12.3]);
   assert.deepEqual([otherLines(cases[1]), fareGap(cases[1])], [-63.45, 0]);
   assert.deepEqual([otherLines(cases[2]), fareGap(cases[2])], [0, 0]);
+  assert.deepEqual([inKeys(cases[6]) / 100, inMonthPart(cases[6], '2026-11'), inMonthPart(cases[6], '2026-10'),
+                    otherLines(cases[6]), fareGap(cases[6])], [1395.55, 35, 480, 45, 0]);
 });
 
 test('waitedDays counts whole calendar days since the statement date', () => {

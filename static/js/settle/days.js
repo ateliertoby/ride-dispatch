@@ -108,6 +108,18 @@ export function dayRunsLabel(dates, monthKey) {
   }).join('、');
 }
 
+// The day the month's totals count a line of a statement on, or null when
+// they count it on none. Only a 舉牌 paid ahead of a held-back trip is counted
+// at all, and it is counted with its trip's order, on the day that order is
+// scheduled now: `trip_date`, which the server reads off the order. That is
+// not the line's own `date`, the day the statement printed it under: the two
+// are one day until the trip is moved, and after that only the trip's is
+// where the money is counted. A line with no `trip_date` has no active order
+// left to be counted under.
+export function countedDay(line) {
+  return line.ahead && line.trip_date ? line.trip_date : null;
+}
+
 // How much of a statement falls in one month, as the server's month totals
 // count it: each leg at what this statement is owed for it, in the month the
 // leg was driven, and each 舉牌 the statement paid ahead of a held-back trip
@@ -120,7 +132,8 @@ export function inMonthPart(batch, monthKey) {
     if (orderDate(o).slice(0, 7) === monthKey) sum += cents(owedOf(o));
   }
   for (const a of batch.adjustments || []) {
-    if (a.ahead && a.date.slice(0, 7) === monthKey) sum += cents(a.amount);
+    const day = countedDay(a);
+    if (day && day.slice(0, 7) === monthKey) sum += cents(a.amount);
   }
   return sum / 100;
 }
@@ -132,14 +145,15 @@ export function inMonthPart(batch, monthKey) {
 // other line the statement carries itself is money on the transfer and on no
 // order the totals read: a 判罰 against a trip another statement holds, one
 // that was cancelled or one the book never had, the 免責 line that cancels
-// one. A row's figure therefore differs from what the keys count of its
-// statement by this sum and by fareGap, and by nothing else:
+// one, a 舉牌 paid ahead of a trip cancelled since. A row's figure therefore
+// differs from what the keys count of its statement by this sum and by
+// fareGap, and by nothing else:
 //
 //   confirmed figure = inMonthPart over every month + otherLines + fareGap
 export function otherLines(batch) {
   let sum = 0;
   for (const a of batch.adjustments || []) {
-    if (!a.ahead) sum += cents(a.amount);
+    if (!countedDay(a)) sum += cents(a.amount);
   }
   return sum / 100;
 }

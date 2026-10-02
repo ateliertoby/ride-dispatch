@@ -309,6 +309,8 @@ def test_init_db_adds_the_ahead_flag_to_existing_adjustments(tmp_path):
 # ---- 舉牌先結 (a 舉牌 line paid ahead of its trip) ----
 
 AHEAD = [{"order_ref": "B1", "date": "2026-08-23", "amount": 40.0, "ahead": True}]
+# As a batch hands the line back: with the day its trip is scheduled on.
+AHEAD_READ = [dict(AHEAD[0], trip_date="2026-08-23")]
 
 
 def seed_held(db_path):
@@ -327,7 +329,7 @@ def test_a_banner_paid_ahead_is_recorded_and_its_trip_stays_owed(db_path):
     sid = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
     batch = get_settlement(db_path, sid)
     assert batch["expected_amount"] == 250.0
-    assert batch["adjustments"] == AHEAD
+    assert batch["adjustments"] == AHEAD_READ
     held = held_row(db_path)
     assert held["settlement_id"] is None
     assert held["paid_ahead"] == 40.0 and held["ahead_batch"] == sid
@@ -395,9 +397,50 @@ def test_the_batch_that_paid_ahead_cannot_be_undone_under_the_trips_batch(db_pat
     later = create_settlement(db_path, "ride", ["B1"], 300.0, "2026-08-28", now=NOW)
     with pytest.raises(ValueError, match=f"#{later}"):
         delete_settlement(db_path, ahead)
-    assert get_settlement(db_path, ahead)["adjustments"] == AHEAD
+    assert get_settlement(db_path, ahead)["adjustments"] == AHEAD_READ
     assert delete_settlement(db_path, later) is True
     assert delete_settlement(db_path, ahead) is True
+
+
+def test_a_banner_paid_ahead_follows_its_trip_to_the_month_it_was_moved_to(db_path):
+    """The month totals count the 舉牌 with its trip's order, so the line has
+    to say where that order is now, not where the statement printed it."""
+    seed_held(db_path)
+    sid = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    db_module.update_order_fields(db_path, "B1", {"scheduled_time": "2026-07-30 22:00:00"})
+    line = get_settlement(db_path, sid)["adjustments"][0]
+    assert (line["date"], line["trip_date"]) == ("2026-08-23", "2026-07-30")
+    july = get_settle_month(db_path, "2026-07", "ride", now=NOW)
+    august = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    # The 40 is awaiting, with the statement that carried it, in the month of
+    # the trip; the month the statement printed it under no longer counts it.
+    assert july["month_totals"] == {
+        "fare": 340.0, "received": 0.0, "awaiting": 40.0, "unsettled": 300.0, "short": 0.0}
+    assert august["month_totals"] == {
+        "fare": 210.0, "received": 0.0, "awaiting": 210.0, "unsettled": 0.0, "short": 0.0}
+    # The statement reaches July by that line alone, and July's answer still
+    # carries it: the page has to show the statement July's key is counting.
+    assert [b["id"] for b in august["settlements"]] == [sid]
+    assert [b["id"] for b in july["settlements"]] == [sid]
+    assert july["orders"][0]["ahead_batch"] == sid
+
+
+def test_a_banner_paid_ahead_of_a_trip_cancelled_since_names_no_trip_day(db_path):
+    seed_held(db_path)
+    sid = create_settlement(db_path, "ride", ["A1"], 250.0, "2026-08-26", now=NOW, adjustments=AHEAD)
+    cancel_order(db_path, "B1")
+    assert get_settlement(db_path, sid)["adjustments"] == AHEAD
+    # No order is left for the totals to count it under.
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["month_totals"]["fare"] == 210.0
+
+
+def test_a_line_that_is_not_a_banner_paid_ahead_names_no_trip_day(db_path):
+    """A 判罰 against a trip the book holds is still no part of that trip's
+    fare in the totals, so it is given no day to be counted on."""
+    seed_held(db_path)
+    fine = [{"order_ref": "B1", "date": "2026-08-23", "amount": -30.0}]
+    sid = create_settlement(db_path, "ride", ["A1"], 180.0, "2026-08-26", now=NOW, adjustments=fine)
+    assert get_settlement(db_path, sid)["adjustments"] == fine
 
 
 def test_init_db_adds_the_penalty_column_to_an_old_database(tmp_path):

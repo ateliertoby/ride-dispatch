@@ -963,12 +963,23 @@ def _batch_allocations(conn, settlement_ids: list[int]) -> dict[int, list[dict]]
 
 
 def _batch_adjustments(conn, settlement_ids: list[int]) -> dict[int, list[dict]]:
-    """Each batch's own statement lines, in the order the statement printed them."""
+    """Each batch's own statement lines, in the order the statement printed them.
+
+    A line's `date` is the day the statement printed it under.  A 舉牌 paid
+    ahead also carries `trip_date`, the day its trip is scheduled on now: the
+    month totals count that money with the trip's order, in the month the
+    order is in, and an order can be moved after the statement was confirmed.
+    Sending the trip's own day lets the page place the line where the totals
+    do.  It is absent when the trip is no longer an active order, which is
+    when the totals count the line in no month at all.
+    """
     if not settlement_ids:
         return {}
     rows = conn.execute(
-        "SELECT settlement_id, order_ref, date, amount, ahead FROM settlement_adjustments "
-        f"WHERE settlement_id IN ({', '.join('?' * len(settlement_ids))}) ORDER BY id",
+        "SELECT a.settlement_id, a.order_ref, a.date, a.amount, a.ahead, o.scheduled_time "
+        "FROM settlement_adjustments a LEFT JOIN orders o "
+        "ON o.order_id = a.order_ref AND coalesce(o.status,'active') = 'active' "
+        f"WHERE a.settlement_id IN ({', '.join('?' * len(settlement_ids))}) ORDER BY a.id",
         settlement_ids,
     ).fetchall()
     grouped: dict[int, list[dict]] = {sid: [] for sid in settlement_ids}
@@ -977,6 +988,8 @@ def _batch_adjustments(conn, settlement_ids: list[int]) -> dict[int, list[dict]]
         line = {"order_ref": row["order_ref"], "date": row["date"], "amount": row["amount"]}
         if row["ahead"]:
             line["ahead"] = True
+            if row["scheduled_time"]:
+                line["trip_date"] = row["scheduled_time"][:10]
         grouped[row["settlement_id"]].append(line)
     return grouped
 
@@ -1466,7 +1479,8 @@ def get_settle_month(db_path: str, month: str, platform: str,
 
     Batches come back whole even when only part of them falls inside the
     month — a batch can straddle months and the day sheet labels it by its
-    full date range.  counts and totals deliberately span all time: the point
+    full date range.  A batch is in the month when one of its legs is, or
+    when it paid a 舉牌 ahead of a trip that is.  counts and totals deliberately span all time: the point
     of the page is clearing old days, which the month on screen would hide.
 
     month_totals is the month alone: its orders already driven, split by where
@@ -1490,8 +1504,12 @@ def get_settle_month(db_path: str, month: str, platform: str,
         orders = [dict(r) for r in month_rows if platform_of(r["service_type"]) == platform]
 
         settlement_ids = sorted({o["settlement_id"] for o in orders if o["settlement_id"]})
-        settlements = _derived_batches(conn, settlement_ids)
-        month_batches = _batches_for(conn, orders, settlements)
+        month_batches = _batches_for(conn, orders, _derived_batches(conn, settlement_ids))
+        # Every batch the month's totals count something of, not only those
+        # with a leg in the month: a batch that paid a 舉牌 ahead of a trip of
+        # this month has that money counted here, and a page that was not
+        # sent the batch could not show the statement its key is counting.
+        settlements = [month_batches[sid] for sid in sorted(month_batches)]
         try:
             month_totals = split_month(orders, month_batches, cutoff)
         except ValueError as exc:
