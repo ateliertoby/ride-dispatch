@@ -24,6 +24,14 @@
   /* The weekday head is the top of the panel the chosen total key opens
      into, so it takes that panel's ground. */
   .wk { line-height: 14px; color: var(--text-4); background: var(--surface); }
+  /* Uploading a statement is the first thing the page is opened for, so its
+     key is the one solid key of the masthead, ink reversed, as the day
+     board's + is. The character is not in the figure face. */
+  .stmt-btn {
+    background: var(--text); color: var(--bg); border-color: var(--text);
+    font-family: var(--han); font-weight: 700;
+  }
+  .stmt-btn:active { background: var(--text-2); border-color: var(--text-2); color: var(--bg); }
   /* Reading is ~2 s of OCR on top of the upload, so the control says it is
      working rather than looking like a tap that missed. */
   .icon-btn:disabled { opacity: .5; cursor: default; }
