@@ -349,13 +349,14 @@
      never wraps, so the foot is as tall as it is without a focus. --fs is
      the size the script sets the line in when it is too long for its room
      at the full one; a part that has given way is no longer in the line.
-     No gap before the key: its mark stands in the middle of a thumb's width,
-     which is space enough, and the line needs the room to stay at a size
-     that can be read. */
+     No gap before the key, and the line may run 8px under the key's edge:
+     the key's mark stands in the middle of a thumb's width, which leaves
+     space enough before it, and the line needs the room to keep its parts
+     at a size that can be read. */
   .fline { flex: 1; min-width: 0; display: flex; align-items: center; padding: 4px var(--gutter); }
   .fline .ft { flex: 1; min-width: 0; font-size: var(--fs, 13px); line-height: 1.5; white-space: nowrap; }
   .fx {
-    flex-shrink: 0; width: 44px; height: 44px; margin: 0 -12px 0 0; padding: 0;
+    flex-shrink: 0; width: 44px; height: 44px; margin: 0 -12px 0 -8px; padding: 0;
     background: none; border: none; border-radius: 3px; cursor: pointer;
     font-family: var(--mono); font-size: 16px; line-height: 1; color: var(--text-2);
   }
