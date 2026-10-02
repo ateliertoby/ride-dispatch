@@ -65,8 +65,10 @@
     font-size: min(15px, calc((100cqi - 80px) / (var(--n, 1) * .65)));
   }
   /* The cents are part of the figure and never dropped, but they are not
-     what it is read by. */
-  .lkey .ct { font-size: .7em; }
+     what it is read by. No line height of their own: a smaller box on the
+     same baseline with the line's height would hang below it and make the
+     key taller than one holding a dash. */
+  .lkey .ct { font-size: .7em; line-height: 0; }
   /* The chosen key opens into the column head under it: the hairline between
      them is covered, so the choice reads from the shape as well as from the
      ground, which alone is faint in the dark palette. Positioned, so that
