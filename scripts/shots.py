@@ -11,9 +11,10 @@ settle view's a third time 1000 wide (`<state>-1000-…`), under its desktop
 rule; `stress-sheet-…` is its sheets with seven-figure amounts and a bank
 reference longer than a line;
 `stress-<width>-…` is the day view with long names, every mark and wide
-fares at each width it is laid out for, and `stress-settle-…` is the settle
+fares at each width it is laid out for, `stress-settle-…` is the settle
 view with a five-digit fare with cents in a day's cell and seven-figure
-totals in the foot. A comparison prints the number of differing
+amounts in the foot, and `stress-foot-…` is its foot with three items at
+their longest. A comparison prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -39,8 +40,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (ROOT, SCHEMES, STATEMENT_SAMPLE, Driver, Server, new_context,  # noqa: E402
-                     paste_message, stress_sheets, stress_strip)
+from harness import (ROOT, SCHEMES, STATEMENT_SAMPLE, Driver, Server, foot_credits,  # noqa: E402
+                     foot_earlier, foot_month, foot_path, foot_short, month_before, new_context,
+                     paste_message, rewrite, stress_foot, stress_sheets, stress_strip)
 
 
 # The narrow window every state is shot at a second time, and the wide one
@@ -186,6 +188,17 @@ class Shooter(Driver):
             self.tap('[aria-label="前一個月"]')
         raise RuntimeError(f"the list never reached {want}")
 
+    def month_of(self, month: str) -> None:
+        """The settle view on a month ('YYYY-MM'), paged back to by the
+        arrow: the month button is read until it names that month."""
+        self.settle_page()
+        want = month[:4] + "·" + month[5:7]
+        for _ in range(8):
+            if self.on(".date-btn").first.text_content().startswith(want):
+                return
+            self.tap('[aria-label="前一個月"]')
+        raise RuntimeError(f"the strip never reached {want}")
+
     def credit_sheet(self, key: str) -> None:
         """An unmatched credit's sheet, through the queue in the foot."""
         self.settle_page()
@@ -323,6 +336,47 @@ def states() -> dict:
         s.tap(".slist [data-archived]")
         s.on(".sheet.show .qrow").first.wait_for()
         s.save("settle-archived")
+
+    def settle_foot(name, short, credits, earlier):
+        """The foot holding exactly the items named, on the month the seed's
+        shortfall is counted in: whether the statement paid short stays so,
+        how many of the seed's unmatched credits stay so, and whether an
+        earlier month still holds open money."""
+        def run(s):
+            today = date.fromisoformat(s.t["today"])
+            month = foot_month(today)
+
+            def book(body, path):
+                if path != foot_path(today):
+                    return
+                if not short:
+                    foot_short(body, 0.0)
+                foot_earlier(body, 1320.0 if earlier else 0.0, month_before(month) if earlier else None)
+
+            def ledger(body, path):
+                waiting = [c for c in body["credits"] if c["state"] in ("open", "partial")][:credits]
+                foot_credits(body, credits, round(sum(c["remaining"] for c in waiting), 2))
+
+            rewrite(s.ctx, book, ledger)
+            try:
+                s.month_of(month)
+                s.save(name)
+            finally:
+                s.ctx.unroute("**/api/settle?*")
+                s.ctx.unroute("**/api/credits?*")
+        return run
+
+    def foot_stressed(width):
+        def run(s):
+            s.viewport = {"width": width, "height": 844}
+            stress_foot(s.ctx, date.fromisoformat(s.t["today"]))
+            try:
+                s.month_of(foot_month(date.fromisoformat(s.t["today"])))
+                s.save(f"stress-foot-{width}")
+            finally:
+                s.ctx.unroute("**/api/settle?*")
+                s.ctx.unroute("**/api/credits?*")
+        return run
 
     def settle_day_sheet(s):
         s.day_sheet()
@@ -493,6 +547,10 @@ def states() -> dict:
         "settle": settle, "settle-focus-cells": settle_focus_cells, "settle-unsettled": settle_unsettled,
         "settle-awaiting": settle_awaiting, "settle-received": settle_received,
         "settle-archived": settle_archived,
+        "settle-foot-clean": settle_foot("settle-foot-clean", False, 0, False),
+        "settle-foot-one": settle_foot("settle-foot-one", True, 0, False),
+        "settle-foot-two": settle_foot("settle-foot-two", True, 3, False),
+        "settle-foot-three": settle_foot("settle-foot-three", True, 3, True),
         "settle-day-sheet": settle_day_sheet, "settle-order-sheet": settle_order_sheet,
         "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
@@ -505,7 +563,8 @@ def states() -> dict:
             | {f"{name}-{WIDE}": wide_of(fn) for name, fn in wide.items() if name.startswith("settle")}
             | {f"stress-sheet-{w}": sheets_stressed(w) for w in (NARROW, 390)}
             | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS}
-            | {f"stress-settle-{w}": settle_stressed(w) for w in (NARROW, 390)})
+            | {f"stress-settle-{w}": settle_stressed(w) for w in (NARROW, 390)}
+            | {f"stress-foot-{w}": foot_stressed(w) for w in (NARROW, 390)})
 
 
 def shoot(base_url: str, out: str, today: date, only: str) -> None:
