@@ -805,7 +805,7 @@ class Session(Driver):
         """Replace the serving process with one serving a changed asset, as a
         deploy does, and return the new version. Needs a check with copy=True."""
         self.server.stop()
-        with open(os.path.join(self.server.app_root, "static", "js", "lanes.js"), "a") as f:
+        with open(os.path.join(self.server.app_root, "static", "js", "dates.js"), "a") as f:
             f.write("// deployed\n")
         self.server.fault(**faults)
         self.server.start()

@@ -134,7 +134,7 @@
      The weekday head is on the same columns and rides in the sticky header,
      because the strip grows at both ends: scrolling up prepends months, so
      anything left above the first week row can never be scrolled back to. */
-  .wk, .grid, .lane { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+  .wk, .grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
   /* The strip's own ends, watched to know when to load the month past them.
      Zero height is skipped by some observers, so they keep a pixel. */
   .sent { height: 1px; }
@@ -207,91 +207,6 @@
   }
   .cell:not(.none):active { --band: var(--surface-press); }
 
-  /* ---- event lanes ----
-     Under each week's cells, one grid holding every batch segment and credit
-     chip of that week, each placed on the lane row the packer gave it. */
-  .lane { padding-top: 2px; grid-auto-rows: 18px; row-gap: 3px; }
-  /* An event reserves however many columns its label needs, but the coloured
-     fill belongs to the days the batch actually covers, so the two are
-     separate boxes: the slot is the reservation and repeats the lane's own
-     column track, and the bar is placed on the days inside it. */
-  .slot { display: grid; gap: 4px; min-width: 0; }
-  /* --mk is the colour a mark's state is said in: what its outline is drawn
-     in when it is lit. */
-  .bar {
-    position: relative; height: 18px; border-radius: 2px; border: none; padding: 0 4px; min-width: 0;
-    font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: -.01em;
-    display: flex; align-items: center; cursor: pointer;
-    overflow: visible; white-space: nowrap;
-  }
-  /* A batch waiting on the transfer asks nothing of the operator: a neutral
-     panel with a hairline edge. */
-  .bar.awaiting { --mk: var(--text-2); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); }
-  /* A batch paid short is solid: the script splits the fill at the fraction
-     received, the paid colour left of the split and the owed colour right.
-     Its label can be longer than its days, and no one colour reads on both
-     fills and on the page: the label is painted through a gradient cut at the
-     bar's own edge, so what lies on the fill is in the ink for solid blocks
-     and what runs past it is in the page's. 100cqi is the bar's content
-     width, measured from the label's start; the padding is the rest of the
-     way to the edge. */
-  .bar.partial { --mk: var(--amber); background: var(--amber); container-type: inline-size; }
-  .bar.partial:not(.makeup, .dim) .lb {
-    color: transparent; -webkit-background-clip: text; background-clip: text;
-    background-image: linear-gradient(90deg, var(--on-solid) calc(100cqi + 4px), var(--text) 0);
-  }
-  .bar.partial.spill-l:not(.makeup, .dim) .lb {
-    background-image: linear-gradient(270deg, var(--on-solid) calc(100cqi + 4px), var(--text) 0);
-  }
-  /* A collected batch is a record, not a task, so it keeps its colour and
-     gives up its weight. */
-  .bar.paid { --mk: var(--green); background: var(--paid-bg); color: var(--green); font-weight: 400; }
-  /* A batch cut by the week boundary loses its corners at the cut end, so
-     the two segments read as one bar wrapping. */
-  .bar.cut-r { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-  .bar.cut-l { border-top-left-radius: 0; border-bottom-left-radius: 0; }
-  /* A held-back day keeps the state colour but drops the fill, so it reads as
-     a pointer at the run carrying the amount rather than a batch of its own. */
-  .bar.makeup { background: none; box-shadow: none; border: 1px dashed currentColor; padding: 0 3px; }
-  .bar.awaiting.makeup { color: var(--text-2); }
-  .bar.partial.makeup { color: var(--amber); }
-  /* A pointer too long for the days it stands on is written beside the
-     outline, not across its edge, and so is the label of a bar on the last
-     columns that is too long for it: the script reserves the mark, the gap
-     and the label, and marks the bar. Beside a solid bar the label is on
-     the page and takes the page's ink. */
-  .bar.out .lb { position: absolute; left: calc(100% + 4px); }
-  .bar.out.spill-l .lb { left: auto; right: calc(100% + 4px); }
-  .bar.partial.out:not(.makeup, .dim) .lb { color: var(--text); background-image: none; }
-  /* An event sitting on the last column reserves its room to the left, so its
-     label has to leave the fill leftwards as well. */
-  .bar.spill-l { justify-content: flex-end; }
-
-  .bar:active { filter: brightness(1.15); }
-  /* A credit is an outline, not a fill: money arriving from outside the batch
-     never reads as one of the bars. A matched one is a record and recedes to
-     a thin edge and a light figure; only a credit still waiting for a
-     statement is drawn at full weight. */
-  .cchip {
-    --mk: var(--green);
-    height: 18px; border-radius: 2px; background: none;
-    border: 1px solid color-mix(in srgb, var(--green) 45%, transparent); color: var(--green);
-    font-family: var(--mono); font-size: 11px; font-weight: 400; letter-spacing: -.01em;
-    padding: 0 3px; min-width: 0; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    overflow: hidden; white-space: nowrap;
-    /* The chip is exactly its figure wide and sits at the start of its
-       reservation, so its edge stays under the day it arrived on. */
-    width: max-content; max-width: 100%; justify-self: start;
-  }
-  .cchip.spill-l { justify-self: end; }
-  .cchip.open { --mk: var(--blue); border-color: var(--blue); color: var(--blue); font-weight: 700; }
-  .cchip.gone { --mk: var(--text-3); border-color: var(--line); color: var(--text-3); }
-  /* Money that has been put against a batch which is still short: the credit
-     is done with but the account it paid into is not, so the chip wears the
-     colour of what is owed instead of receding as a record. */
-  .cchip.short { --mk: var(--amber); border-color: var(--amber); color: var(--amber); font-weight: 700; }
-
   /* ---- focus ----
      One statement at a time: its days are lit, every other day recedes. The
      days can be weeks apart on the strip, so the link is drawn by opening a
@@ -312,37 +227,6 @@
      on the number. */
   .cell.lit { --band: var(--surface); }
   .cell.lit:not(.today) .d { color: var(--text); }
-  /* A bar or chip is an object on the lane rather than a surface, so it lifts
-     by an outline in the colour it already wears -- state, never a hue of
-     its own. */
-  .bar.lit, .cchip.lit { outline: 1px solid var(--mk); outline-offset: 1px; }
-  /* !important: a part-paid bar carries its split fill inline. */
-  .bar.dim {
-    background: none !important; box-shadow: inset 0 0 0 1px var(--line);
-    color: var(--text-2); font-weight: 400;
-  }
-  .bar.makeup.dim { box-shadow: none; border-color: var(--text-3); }
-  .bar.paid.dim { color: var(--text-3); }
-  .cchip.dim { border-color: var(--line); color: var(--text-3); font-weight: 400; }
-  .cchip.open.dim, .cchip.short.dim { color: var(--text-2); }
-
-  /* The colour key: a swatch drawn the way the mark is, and what it says. */
-  .legend {
-    display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 10px 0 9px;
-    margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter);
-    border-bottom: 1px solid var(--line);
-    font-size: 11px; line-height: 15px; color: var(--text-2);
-  }
-  .legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .sw { width: 14px; height: 9px; border-radius: 2px; flex-shrink: 0; border: 1px solid transparent; }
-  .sw.owed { background: var(--amber); }
-  .sw.open { border-color: var(--blue); }
-  .sw.short { border-color: var(--amber); }
-  .sw.wait { background: var(--surface); border-color: var(--line); }
-  .sw.paid { background: var(--paid-bg); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
-  .sw.done { border-color: var(--text-3); }
-  .sw.held { border: 1px dashed var(--text-2); }
-
   /* ---- foot ----
      What is still to be done, over all time: the money no statement has
      claimed, the money statements are waiting on, and the bank money no
@@ -684,8 +568,6 @@
       .cell { min-height: 76px; padding: 10px 0 8px; }
       .cell .d { font-size: 12px; line-height: 16px; }
       .cell .amt { --size: 16px; line-height: 22px; }
-      .bar, .cchip { height: 22px; font-size: 13px; }
-      .lane { grid-auto-rows: 22px; }
       .foot-in { max-width: 640px; }
   }
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { packLanes } from '../../static/js/lanes.js';
+import { packLanes } from '../../static/js/settle/archive/lanes.js';
 
 const ev = (name, rs, reach) => ({ name, rs, reach });
 const names = lanes => lanes.map(lane => lane.map(e => e.name));

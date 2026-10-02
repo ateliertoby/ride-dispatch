@@ -116,7 +116,7 @@ def test_every_module_the_shell_imports_is_served_as_javascript(client):
             queue.append(posixpath.normpath(posixpath.join(posixpath.dirname(path), spec)))
     assert {"js/main.js", "js/router.js", "js/day/index.js", "js/settle/index.js",
             "js/order-sheet.js", "js/shared.js", "js/api.js", "js/store.js", "js/stream.js",
-            "js/dates.js", "js/lanes.js"} <= seen
+            "js/dates.js", "js/settle/days.js"} <= seen
 
 
 def test_asset_types_do_not_follow_the_systems_table(client, monkeypatch):
