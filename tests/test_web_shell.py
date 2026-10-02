@@ -188,6 +188,23 @@ def test_the_version_follows_the_assets(client, static_copy):
     assert web.asset_version() == before
 
 
+def test_the_version_ignores_what_is_archived(client, static_copy):
+    """Nothing loads an archived file and the worker does not precache it, so
+    a change to one must not send every client the app again."""
+    before = web.asset_version()
+    archived = [p for p in static_copy.rglob("*") if p.is_file() and "archive" in p.parts]
+    assert archived
+    for path in archived:
+        path.write_bytes(path.read_bytes() + b"\n/* edited */\n")
+    (static_copy / "js" / "day" / "archive").mkdir()
+    (static_copy / "js" / "day" / "archive" / "probe.js").write_text("// x\n")
+    assert web.asset_version() == before
+    # The same edit to a file that is loaded does move it.
+    live = static_copy / "js" / "settle" / "index.js"
+    live.write_bytes(live.read_bytes() + b"\n/* edited */\n")
+    assert web.asset_version() != before
+
+
 def test_the_version_is_computed_once_outside_tests(client, static_copy, monkeypatch):
     monkeypatch.setitem(web.app.config, "TESTING", False)
     monkeypatch.setattr(web, "_asset_version_cache", None)

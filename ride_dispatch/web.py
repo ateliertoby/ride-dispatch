@@ -81,10 +81,24 @@ _VERSION_TEMPLATES = ("app.html", "sw.js")
 _asset_version_cache = None
 
 
-def _versioned_files():
-    for root, _dirs, files in os.walk(app.static_folder):
+def _live_files(base):
+    """Every file under `base` that a client can be sent.
+
+    An archive directory holds code kept for reference that nothing imports
+    or links. The asset version and the precache list both walk through here,
+    so a file is either in both or in neither: an archived file that moved
+    the version would make every client download the app again for a change
+    none of them can run.
+    """
+    for root, dirs, files in os.walk(base):
+        # Pruned in place, which keeps the walk out of it at any depth.
+        dirs[:] = [d for d in dirs if d != "archive"]
         for name in files:
             yield os.path.join(root, name)
+
+
+def _versioned_files():
+    yield from _live_files(app.static_folder)
     for name in _VERSION_TEMPLATES:
         yield os.path.join(app.template_folder, name)
 
@@ -152,19 +166,13 @@ def _precache_urls() -> list[str]:
     v = asset_version()
     urls = []
     for sub in _PRECACHE_DIRS:
-        base = os.path.join(app.static_folder, sub)
-        for root, dirs, files in os.walk(base):
-            # An archive directory holds code kept for reference that nothing
-            # imports or links, so no client should download it. Pruned in
-            # place, which keeps the walk out of it at any depth.
-            dirs[:] = [d for d in dirs if d != "archive"]
-            for name in files:
-                # A file the page never asks for (the fonts' licence) is not
-                # worth holding.
-                if os.path.splitext(name)[1] not in _ASSET_MIMETYPES:
-                    continue
-                rel = os.path.relpath(os.path.join(root, name), app.static_folder)
-                urls.append(f"/assets/{v}/{rel.replace(os.sep, '/')}")
+        for path in _live_files(os.path.join(app.static_folder, sub)):
+            # A file the page never asks for (the fonts' licence) is not
+            # worth holding.
+            if os.path.splitext(path)[1] not in _ASSET_MIMETYPES:
+                continue
+            rel = os.path.relpath(path, app.static_folder)
+            urls.append(f"/assets/{v}/{rel.replace(os.sep, '/')}")
     return sorted(urls)
 
 
