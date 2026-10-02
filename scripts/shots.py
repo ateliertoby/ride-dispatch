@@ -173,6 +173,19 @@ class Shooter(Driver):
         self.tap(f'.sheet.show .blink[data-bl="{self.t["batch"][key]}"]')
         self.on(".sheet.show .hero").first.wait_for()
 
+    def statement_list(self, lens: str, day: str) -> None:
+        """The list a total key opens, paged back to the month `day` is in.
+        Under a list the month is changed by the arrows alone, so the month
+        button is read until it names that month."""
+        self.settle_page()
+        self.tap(f'.lkey[data-lens="{lens}"]')
+        want = day[:4] + "·" + day[5:7]
+        for _ in range(8):
+            if self.on(".date-btn").first.text_content().startswith(want):
+                return
+            self.tap('[aria-label="前一個月"]')
+        raise RuntimeError(f"the list never reached {want}")
+
     def credit_sheet(self, key: str) -> None:
         """An unmatched credit's sheet, through the queue in the foot."""
         self.settle_page()
@@ -292,6 +305,24 @@ def states() -> dict:
         s.reach(f'.cell[data-d="{s.t["batch_day"]["short"]}"]')
         s.tap('.lkey[data-lens="unsettled"]')
         s.save("settle-unsettled")
+
+    def settle_awaiting(s):
+        # The month the statement still waiting for its transfer was driven in.
+        s.statement_list("awaiting", s.t["batch_day"]["awaiting"])
+        s.on(".slist .brow").first.wait_for()
+        s.save("settle-awaiting")
+
+    def settle_received(s):
+        # The month of the statement paid short, which leads the list.
+        s.statement_list("received", s.t["batch_day"]["short"])
+        s.on(".slist .brow").first.wait_for()
+        s.save("settle-received")
+
+    def settle_archived(s):
+        s.statement_list("received", s.t["batch_day"]["short"])
+        s.tap(".slist [data-archived]")
+        s.on(".sheet.show .qrow").first.wait_for()
+        s.save("settle-archived")
 
     def settle_day_sheet(s):
         s.day_sheet()
@@ -460,6 +491,8 @@ def states() -> dict:
         "day-paste-preview": day_paste_preview, "day-paste-amend": day_paste_amend,
         "day-paste-locked": day_paste_locked,
         "settle": settle, "settle-focus-cells": settle_focus_cells, "settle-unsettled": settle_unsettled,
+        "settle-awaiting": settle_awaiting, "settle-received": settle_received,
+        "settle-archived": settle_archived,
         "settle-day-sheet": settle_day_sheet, "settle-order-sheet": settle_order_sheet,
         "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
