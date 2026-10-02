@@ -211,13 +211,16 @@ def test_the_worker_is_served_from_the_root_and_never_cached(client):
 def test_the_worker_lists_every_script_stylesheet_and_font(client):
     body = client.get("/sw.js").get_data(as_text=True)
     v = web.asset_version()
-    listed = 0
+    listed = archived = 0
     for sub, kinds in (("js", (".js",)), ("css", (".css",)), ("fonts", (".woff2",))):
         base = os.path.join(web.app.static_folder, sub)
         for root, _d, files in os.walk(base):
             for name in files:
                 rel = os.path.relpath(os.path.join(root, name), web.app.static_folder)
-                if name.endswith(kinds):
+                if "archive" in rel.split(os.sep):
+                    archived += 1
+                    assert f"/assets/{v}/{rel}" not in body, rel
+                elif name.endswith(kinds):
                     assert f'"/assets/{v}/{rel}"' in body, rel
                     listed += 1
                 else:
@@ -229,6 +232,10 @@ def test_the_worker_lists_every_script_stylesheet_and_font(client):
     for url in _asset_urls(client.get("/").get_data(as_text=True)):
         assert f'"{url}"' in body, url
     assert listed
+    # Archived files are kept in the tree and linked from nowhere: none of
+    # them is precached, wherever its directory sits.
+    assert archived
+    assert "/archive/" not in body
 
 
 def test_the_worker_never_names_the_api(client):

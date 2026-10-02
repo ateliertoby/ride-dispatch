@@ -153,7 +153,11 @@ def _precache_urls() -> list[str]:
     urls = []
     for sub in _PRECACHE_DIRS:
         base = os.path.join(app.static_folder, sub)
-        for root, _dirs, files in os.walk(base):
+        for root, dirs, files in os.walk(base):
+            # An archive directory holds code kept for reference that nothing
+            # imports or links, so no client should download it. Pruned in
+            # place, which keeps the walk out of it at any depth.
+            dirs[:] = [d for d in dirs if d != "archive"]
             for name in files:
                 # A file the page never asks for (the fonts' licence) is not
                 # worth holding.
