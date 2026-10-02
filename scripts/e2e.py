@@ -756,8 +756,12 @@ class Session(Driver):
         self.history(False, ".cell[data-d]")
 
     def texts(self, selector: str) -> list:
-        return self.page.eval_on_selector_all(
-            selector, "els => els.filter(e => e.getClientRects().length).map(e => e.textContent.trim())")
+        # Found and read in one step. In two, a repaint in between replaces
+        # the elements that were found, and those have no boxes any more: the
+        # answer would be an empty list that the page never showed.
+        return self.page.evaluate(
+            "sel => [...document.querySelectorAll(sel)].filter(e => e.getClientRects().length)"
+            ".map(e => e.textContent.trim())", selector)
 
     def asked(self, since: int = 0, prefix: str = "/api/settle?") -> list:
         return [p for _, p, _ in self.requests[since:] if p.startswith(prefix)]
