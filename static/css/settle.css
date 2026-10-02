@@ -21,7 +21,7 @@
      tops, the browser scrolls by whole pixels, and a fraction left over at
      each paint would add up to a row. */
   .date-btn .w { line-height: 18px; }
-  .wk { line-height: 14px; }
+  .wk { line-height: 14px; color: var(--text-4); }
   /* Reading is ~2 s of OCR on top of the upload, so the control says it is
      working rather than looking like a tap that missed. */
   .icon-btn:disabled { opacity: .5; cursor: default; }
@@ -98,7 +98,7 @@
      focus down. */
   .cell.none { cursor: default; pointer-events: none; }
   .cell .d { font-size: 11px; line-height: 14px; color: var(--text-2); letter-spacing: -.01em; }
-  .cell.none .d { color: var(--text-3); }
+  .cell.none .d { color: var(--text-4); }
   /* Exact to the cent and never cut: a figure too long for its column at the
      size the others are set in is set smaller, by as much as it takes. --n is
      the figure's length in character cells, written on the element; a cell

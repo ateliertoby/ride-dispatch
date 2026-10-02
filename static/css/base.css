@@ -40,7 +40,10 @@
      both --bg and --surface: --text 11:1 and no more than about 13.5:1 on
      --bg (brighter ink on a dark ground blooms), --text-2 6.5:1, --text-3
      4.5:1 and at least 2 below --text-2, the status colours 4.5:1 as text,
-     --on-solid 4.5:1 on each of them. --line is about 1.5:1 on --bg. */
+     --on-solid 4.5:1 on each of them. --line is about 1.5:1 on --bg.
+     --text-4 is for pure coordinates (the dates of empty days, the weekday
+     head): about 3:1 on --bg and no less than 3:1 on --surface, deliberately
+     below the 4.5:1 that text meant to be read holds. */
   --bg: #17181b;
   --surface: #1f2125;
   --surface-press: #26282d;
@@ -50,6 +53,7 @@
   --text: #dddad2;
   --text-2: #abadb2;
   --text-3: #868990;
+  --text-4: #686b72;
   --line: #363940;
   --amber: #e0a23c;
   --red: #ec6a60;
@@ -79,6 +83,7 @@
     --text: #232428;
     --text-2: #494c52;
     --text-3: #696b70;
+    --text-4: #86888b;
     --line: #d6d3c9;
     --amber: #935700;
     --red: #c8281e;
