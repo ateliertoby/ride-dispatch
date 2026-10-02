@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   dayState, cellFigure, keyFigure, statementName, dayRunsLabel, countedDay, inMonthPart, fareGap,
-  otherLines, waitedDays,
+  otherLines, fitLine, waitedDays,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -406,6 +406,56 @@ test('a statement figure is what the keys count of it, its other lines and its g
   assert.deepEqual([otherLines(cases[2]), fareGap(cases[2])], [0, 0]);
   assert.deepEqual([inKeys(cases[6]) / 100, inMonthPart(cases[6], '2026-11'), inMonthPart(cases[6], '2026-10'),
                     otherLines(cases[6]), fareGap(cases[6])], [1395.55, 35, 480, 45, 0]);
+});
+
+// The widths of a line's three forms at the full size, 13px, and what they
+// come to at the floor, 11px, when widths scale with the size.
+const at11 = widths => widths.map(w => w * 11 / 13);
+const fit = (room, widths) => fitLine(room, widths, at11(widths), 13, 11);
+
+test('fitLine sets the whole line at full size when it fits', () => {
+  assert.deepEqual(fit(300, [280, 240, 200]), { form: 0, size: 13 });
+  assert.deepEqual(fit(280, [280, 240, 200]), { form: 0, size: 13 });
+});
+
+test('fitLine sets every part smaller together before any part gives way', () => {
+  // 13 * 266 / 300 = 11.52..., rounded down to a twentieth.
+  assert.deepEqual(fit(266, [300, 260, 220]), { form: 0, size: 11.5 });
+  // Exactly at the floor is still the whole line.
+  assert.deepEqual(fit(275, [325, 260, 220]), { form: 0, size: 11 });
+});
+
+test('fitLine gives up one part at a time, and only below the floor', () => {
+  // The whole line would need 10.4px, so its last part goes; the rest fits as it is.
+  assert.deepEqual(fit(266, [332, 260, 220]), { form: 1, size: 13 });
+  // Without that part the line still has to be set smaller, above the floor.
+  assert.deepEqual(fit(266, [360, 300, 220]), { form: 1, size: 11.5 });
+  // Two parts go only when one is not enough.
+  assert.deepEqual(fit(266, [420, 340, 280]), { form: 2, size: 12.35 });
+});
+
+test('fitLine decides by the widths measured at the floor, not by scaling', () => {
+  // Scaled from its full width the whole line would need 10.95px, but set
+  // at the floor it is measured to fit: it stays whole, at the floor.
+  assert.deepEqual(fitLine(266, [316, 260, 220], [265.5, 219, 186], 13, 11), { form: 0, size: 11 });
+  // Scaled, it would fit at 11.05px; measured at the floor it does not.
+  assert.deepEqual(fitLine(266, [312.5, 260, 220], [266.4, 219, 186], 13, 11), { form: 1, size: 13 });
+});
+
+test('fitLine never cuts the last form: it is set as small as it takes', () => {
+  assert.deepEqual(fit(200, [420, 340, 280]), { form: 2, size: 9.25 });
+});
+
+test('fitLine never asks for more room than its widths say there is', () => {
+  for (const [room, widths] of [[266, [300.4, 260, 220]], [251.3, [287.9, 250, 201]], [199.99, [333.33, 301, 250.5]]]) {
+    const { form, size } = fit(room, widths);
+    assert.ok(widths[form] * size / 13 <= room, room + ' ' + widths);
+  }
+});
+
+test('fitLine with no room to judge by leaves the whole line at full size', () => {
+  assert.deepEqual(fit(0, [300, 260, 220]), { form: 0, size: 13 });
+  assert.deepEqual(fitLine(266, [], [], 13, 11), { form: 0, size: 13 });
 });
 
 test('waitedDays counts whole calendar days since the statement date', () => {

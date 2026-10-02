@@ -178,6 +178,26 @@ export function fareGap(batch) {
   return (cents(batch.confirmed_amount || 0) - held) / 100;
 }
 
+// How a line that must stay on one line is set in the room it has. The line
+// can take several forms, the whole line first and each later form one part
+// shorter; `atFull` and `atFloor` are the widths of those forms, in px, set
+// at the size `full` and at the smallest size the text may be read at,
+// `floor`. The first form that fits at the floor is taken, so every part is
+// set smaller together before any part gives way; the last form is taken
+// when none does, at whatever size it needs, because what it holds is never
+// cut. The size is `full` when the form fits as it is; otherwise the one
+// that makes it fit, worked out from its width at `full`, rounded down to a
+// twentieth of a pixel and never under the floor for a form that fits there.
+// With no room to judge by, the whole line at full size.
+export function fitLine(room, atFull, atFloor, full, floor) {
+  if (!(room > 0) || !atFull.length) return { form: 0, size: full };
+  const fits = atFloor.findIndex(w => w <= room);
+  const form = fits < 0 ? atFull.length - 1 : fits;
+  if (atFull[form] <= room) return { form, size: full };
+  const size = Math.floor(full * room / atFull[form] * 20) / 20;
+  return { form, size: fits < 0 ? size : Math.max(floor, size) };
+}
+
 // Whole calendar days from the statement date to `today`, never negative.
 // null when the batch has no statement date: how long it has waited is then
 // unknown, which is not the same as no wait. Counted in UTC so a clock change

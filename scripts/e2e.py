@@ -3025,10 +3025,10 @@ def settle_focus(s: Session) -> None:
     held = s.count("#grid .cell[data-d]")
     s.eq((s.count("#grid .cell[data-d].dim"), s.count("#grid .cell.none.dim")), (held - 3, 0), "every other day recedes, bar the empty ones")
 
-    def line() -> str:
-        return (f"{s.named('short')} · {day_runs(days, s.view_month())} · 5 程 · $2,310.00 · 差 $380✕")
+    def line() -> list:
+        return focus_line(s, s.named("short"), day_runs(days, s.view_month()), "5 程", "$2,310.00", "差 $380")
 
-    s.eq(s.totals(), [line()], "the foot while a statement is lit")
+    s.eq(s.totals(), line(), "the foot while a statement is lit")
     close = s.on(".foot [data-unfocus]").first.bounding_box()
     s.expect(close["width"] >= 44 and close["height"] >= 44, f"the key that clears the focus is under 44px: {close}")
     s.expect("B612 Mono" in s.colour(".foot .fline .num", "fontFamily"), "the line's figures are not in the figure face")
@@ -3059,7 +3059,7 @@ def settle_focus(s: Session) -> None:
     # It survives a change made elsewhere.
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
     s.wait(lambda: s.cell_state(1)[1] == "941", "the change made elsewhere")
-    s.eq((s.lit(), s.totals()), (relation, [line()]), "the focus after a live update")
+    s.eq((s.lit(), s.totals()), (relation, line()), "the focus after a live update")
     # A day opens on one tap whatever is focused, and the focus is still there after.
     s.to_top(s.cell(26))
     s.tap(s.cell(1))
@@ -3080,6 +3080,132 @@ def settle_focus(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
+def focus_line(s: Session, name: str, days: str, legs: str, amount: str, state: str) -> list:
+    """What the foot should hold while a statement is in focus: the one line
+    naming it, with the key that clears it. The line gives up its leg count,
+    and then its days, where it has no room for them, which its own check
+    holds to the rule; here the line is taken in the form the page has
+    drawn, and every other part of it has to be as given."""
+    parts = s.page.evaluate("() => [...document.querySelectorAll('.foot .fline [data-part]')]"
+                            ".filter(e => e.getClientRects().length).map(e => e.dataset.part)")
+    s.expect(parts in (["days", "legs"], ["days"], []), f"the parts the focus line keeps: {parts}")
+    kept = [name] + ([days] if "days" in parts else []) + ([legs] if "legs" in parts else []) + [amount, state]
+    return [" · ".join(kept) + "✕"]
+
+
+# The focus line as it is drawn: what it says, the size it is set in, the
+# room it has and the width it takes, which of the parts that can give way
+# are in it, and the lines its parts stand on.
+FLINE_JS = """
+() => {
+  const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+  const ft = seen('.foot .fline .ft'), fi = ft.querySelector('.fi');
+  return {
+    text: ft.textContent, size: parseFloat(getComputedStyle(ft).fontSize),
+    room: ft.clientWidth, width: fi.getBoundingClientRect().width, height: ft.getBoundingClientRect().height,
+    parts: [...fi.querySelectorAll('[data-part]')].map(e => e.dataset.part),
+    tops: [...new Set([...fi.querySelectorAll('.pt')].map(e => Math.round(e.getBoundingClientRect().top)))],
+    foot: seen('.foot').getBoundingClientRect().height,
+  };
+}
+"""
+
+# The widths the line's three forms take at the smallest size it may be set
+# in: the whole line, without its leg count, without its days either. Read
+# where the whole line is on screen, and left as it was found.
+FLINE_FORMS_JS = """
+floor => {
+  const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+  const ft = seen('.foot .fline .ft'), fi = ft.querySelector('.fi');
+  const days = fi.querySelector('[data-part="days"]'), legs = fi.querySelector('[data-part="legs"]');
+  if (!days || !legs) return null;
+  const was = ft.style.getPropertyValue('--fs');
+  ft.style.setProperty('--fs', floor + 'px');
+  const out = [fi.getBoundingClientRect().width];
+  legs.hidden = true;
+  out.push(fi.getBoundingClientRect().width);
+  days.hidden = true;
+  out.push(fi.getBoundingClientRect().width);
+  legs.hidden = days.hidden = false;
+  if (was) ft.style.setProperty('--fs', was); else ft.style.removeProperty('--fs');
+  return out;
+}
+"""
+
+FOCUS_FLOOR = 11
+
+
+@check("settle.the-focus-line-holds-on-one-line")
+def settle_focus_line(s: Session) -> None:
+    """The line that names a focused statement stays on one line, so the
+    foot is as tall with a focus as without. At its longest (a name of two
+    runs across two months, a five-digit amount with cents, a shortfall) it
+    is set smaller, every part together, down to 11px and no further; past
+    that the leg count gives way, then the days, and only when the line set
+    at 11px would not fit with them. The name, the amount and the state are
+    always there, whole."""
+    year = s.back(23).year
+
+    def change(body: dict, path: str) -> None:
+        for x in body["settlements"]:
+            if x["id"] == s.t["batch"]["short"]:
+                x.update(due_dates=[f"{year}-11-28", f"{year}-12-02"], confirmed_amount=12345.67,
+                         received=10000.0, outstanding=2345.67)
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    s.reach(s.cell(26))
+    widths = (600,) + PHONE_WIDTHS
+    plain = {}
+    for width in widths:
+        s.resize(width)
+        plain[width] = s.foot_look()["height"]
+    s.resize(390)
+    s.focus_on("short", ".sheet.show .up-sec")
+    days = day_runs([s.back(n) for n in (27, 26, 25)], s.view_month())
+    name, amount, state = "11/28、12/2 結算", "$12,345.67", "差 $2345.67"
+    forms = [f"{name} · {days} · 5 程 · {amount} · {state}", f"{name} · {days} · {amount} · {state}",
+             f"{name} · {amount} · {state}"]
+    kept = [["days", "legs"], ["days"], []]
+    # Where there is room for all of it, the whole line at its full size.
+    s.resize(600)
+    whole = s.page.evaluate(FLINE_JS)
+    s.eq((whole["text"], whole["size"], whole["parts"]), (forms[0], 13, kept[0]), "the line where it has room")
+    at_floor = s.page.evaluate(FLINE_FORMS_JS, FOCUS_FLOOR)
+    seen = {}
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        for width in widths:
+            s.resize(width)
+            f = s.page.evaluate(FLINE_JS)
+            where = f"at {width} ({scheme}): {f}"
+            s.eq(f["foot"], plain[width], f"the foot's height with a focus against without, {where}")
+            s.expect(len(f["tops"]) == 1 and f["height"] < 2 * f["size"], f"the line is on more than one line {where}")
+            s.expect(f["width"] <= f["room"] + 0.5, f"the line is longer than its room {where}")
+            # The first form that fits when set at the floor, and no shorter one.
+            fits = [i for i, w in enumerate(at_floor) if w <= f["room"]]
+            form = fits[0] if fits else 2
+            s.eq((f["text"], f["parts"]), (forms[form], kept[form]), f"what the line says {where}")
+            s.expect(FOCUS_FLOOR <= f["size"] <= 13, f"the size the line is set in {where}")
+            # Set smaller by no more than it takes.
+            s.expect(f["size"] == 13 or f["room"] - f["width"] < 3, f"the line is set smaller than its room asks {where}")
+            close = s.on(".foot [data-unfocus]").first.bounding_box()
+            s.expect(close["width"] >= 44 and close["height"] >= 44 and close["x"] + close["width"] <= width + 0.5,
+                     f"the key that clears the focus {where}: {close}")
+            s.expect(not s.page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth"),
+                     f"the page scrolls sideways {where}")
+            seen[width] = form
+        s.resize(390)
+    s.page.emulate_media(color_scheme="dark")
+    # At its longest the line does give parts up on a phone, the leg count
+    # before the days, and has all of them back when the room returns.
+    s.expect(seen[340] >= 1 and seen[340] >= seen[390] >= seen[600] == 0, f"the forms taken at each width: {seen}")
+    s.resize(600)
+    s.eq(s.page.evaluate(FLINE_JS)["text"], forms[0], "the whole line again once there is room")
+    s.resize(390)
+    s.eq(s.writes, [], "writes")
+
+
 @check("settle.focus-is-revealed-when-its-days-are-off-screen")
 def settle_focus_reveal(s: Session) -> None:
     """A batch reached through a credit, with the strip somewhere else: the
@@ -3097,8 +3223,8 @@ def settle_focus_reveal(s: Session) -> None:
     s.wait(lambda: not s.sheet_open(), "the sheet to close")
     s.eq(s.lit(), sorted(d.isoformat() for d in days), "the days lit")
     s.expect(s.page.evaluate(LIT_ON_SCREEN_JS), "none of the statement's days was brought on screen")
-    s.eq(s.totals(), [f"{s.named('held_back')} · {day_runs(days, s.view_month())} · 4 程 · $1,780.00 · 已收 {md_slash(s.back(7))}✕"],
-         "the foot's line for a collected statement")
+    s.eq(s.totals(), focus_line(s, s.named("held_back"), day_runs(days, s.view_month()), "4 程", "$1,780.00",
+                                f"已收 {md_slash(s.back(7))}"), "the foot's line for a collected statement")
     s.eq(s.colour(".foot .fline .bs"), s.token("--green"), "collected, in the line")
     # Already on screen: the strip stays where it is. The statement's days
     # can lie on two week rows, and the strip brings one of them to its top,

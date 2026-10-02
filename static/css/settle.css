@@ -336,10 +336,12 @@
   .fnote.ok { color: var(--green); }
   .fnote.wait { color: var(--text-3); }
   /* While a statement's days are lit the foot names it instead: one line of
-     parts that wraps between two parts where it must, never inside one, and
-     the key that puts the focus down, a thumb's size. */
+     parts, and the key that puts the focus down, a thumb's size. The line
+     never wraps, so the foot is as tall as it is without a focus. --fs is
+     the size the script sets the line in when it is too long for its room
+     at the full one; a part that has given way is no longer in the line. */
   .fline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 4px var(--gutter); }
-  .fline .ft { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; }
+  .fline .ft { flex: 1; min-width: 0; font-size: var(--fs, 13px); line-height: 1.5; white-space: nowrap; }
   .fx {
     flex-shrink: 0; width: 44px; height: 44px; margin: 0 -12px 0 0; padding: 0;
     background: none; border: none; border-radius: 3px; cursor: pointer;

@@ -15,8 +15,8 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure,
-         otherLines, statementName, waitedDays } from './days.js';
+import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, fitLine, inMonthPart,
+         keyFigure, otherLines, statementName, waitedDays } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -523,7 +523,7 @@ function labelWidth(text) {
 function renderFoot() {
   const foot = byId('settle-foot');
   // A focus takes the foot: the lit days say which, and this line says what.
-  if (focus) { foot.dataset.n = '0'; foot.innerHTML = focusLineHtml(); return; }
+  if (focus) { foot.dataset.n = '0'; foot.innerHTML = focusLineHtml(); fitFocusLine(); return; }
   const items = footItems();
   foot.dataset.n = String(items.length);
   if (!items.length) { foot.innerHTML = footRestHtml(); return; }
@@ -559,6 +559,10 @@ function nameOf(b) {
 // its figure and where its money has got to. A batch the strip no longer
 // holds is known only from the ledger, which carries neither its statement
 // date nor the day it was collected, so the line says less of it.
+//
+// The days and the leg count are each written with the dot before them, in
+// an element of their own: they are the two parts that can give way (see
+// fitFocusLine), and a part that goes takes its dot with it.
 function focusLineHtml() {
   const b = batchById(focus.id);
   const known = b || ledger.credits.flatMap(c => c.batches).find(x => x.id === focus.id);
@@ -567,11 +571,73 @@ function focusLineHtml() {
   const state = b ? batchTag(b)
     : known.state === 'paid' ? '已收'
     : known.state === 'partial' ? '差 $' + $(known.outstanding) : '等過數';
-  return '<div class="fline"><span class="ft">' +
-    parts([b ? nameOf(b) : '結算', dayRunsLabel(batchDatesOf(focus.id), viewMonth),
-           (b ? b.orders.length : known.orders) + ' 程', amount.dollars + '.' + amount.cents]) +
-    ' · <span class="pt bs ' + known.state + '">' + figs(state) + '</span></span>' +
+  const pt = text => '<span class="pt">' + figs(text) + '</span>';
+  return '<div class="fline"><span class="ft"><span class="fi">' + pt(b ? nameOf(b) : '結算') +
+    '<span data-part="days"> · ' + pt(dayRunsLabel(batchDatesOf(focus.id), viewMonth)) + '</span>' +
+    '<span data-part="legs"> · ' + pt((b ? b.orders.length : known.orders) + ' 程') + '</span>' +
+    ' · ' + pt(amount.dollars + '.' + amount.cents) +
+    ' · <span class="pt bs ' + known.state + '">' + figs(state) + '</span></span></span>' +
     '<button class="fx" data-unfocus="1" aria-label="取消">&#10005;</button></div>';
+}
+
+// The focus line stays on one line at every width, so the foot is as tall
+// with a focus as without and the calendar does not move under it. Nothing
+// in it is cut or abbreviated: when the line is too long for its room every
+// part is set smaller together, and only when that would take the text
+// under FOCUS_FLOOR does a part give way, the leg count first and then the
+// days, both of which the lit calendar and the statement's sheet still say.
+// The name, the amount and the state always stay.
+//
+// The line is measured where it stands, in the faces that draw it: it mixes
+// the text face, the figure face and punctuation pulled in by tight(), and
+// a width counted from the characters would be an upper bound that gives
+// parts up while they still fit.
+const FOCUS_FLOOR = 11;
+function fitFocusLine() {
+  const ft = byId('settle-foot').querySelector('.ft');
+  if (!ft) return;
+  const inner = ft.querySelector('.fi');
+  const days = inner.querySelector('[data-part="days"]');
+  const legs = inner.querySelector('[data-part="legs"]');
+  ft.style.removeProperty('--fs');
+  const full = parseFloat(getComputedStyle(ft).fontSize);
+  const room = ft.clientWidth;
+  const width = () => inner.getBoundingClientRect().width;
+  // The three forms: the whole line, the line without its leg count, and the
+  // line without its days either. Each is measured at the full size and at
+  // the floor: which form is taken is decided by what fits at the floor, as
+  // measured, and not by a width scaled down from the full size, which is a
+  // fraction of a pixel out because each glyph's advance is rounded.
+  const measure = () => {
+    const widths = [];
+    legs.hidden = days.hidden = false;
+    widths.push(width());
+    legs.hidden = true;
+    widths.push(width());
+    days.hidden = true;
+    widths.push(width());
+    return widths;
+  };
+  const atFull = measure();
+  ft.style.setProperty('--fs', FOCUS_FLOOR + 'px');
+  const atFloor = measure();
+  ft.style.removeProperty('--fs');
+  const fit = fitLine(room, atFull, atFloor, full, FOCUS_FLOOR);
+  // A part that has given way is taken out, not hidden: the line then says
+  // exactly what is on screen to whatever reads it.
+  if (fit.form > 0) legs.remove(); else legs.hidden = false;
+  if (fit.form > 1) days.remove(); else days.hidden = false;
+  if (fit.size >= full) return;
+  // For the same reason the size worked out can leave the line a fraction of
+  // a pixel too long. It is checked where it stands and taken down a
+  // twentieth of a pixel at a time, a pixel at the most; a form that fits at
+  // the floor fits before the floor is passed.
+  let size = fit.size;
+  ft.style.setProperty('--fs', size + 'px');
+  for (let step = 0; step < 20 && width() > room; step++) {
+    size = Math.round((size - 0.05) * 100) / 100;
+    ft.style.setProperty('--fs', size + 'px');
+  }
 }
 
 // The four totals of the month the header names, for the platform chosen.
@@ -2102,6 +2168,19 @@ export const settleView = {
       const prior = e.target.closest('[data-earlier]');
       if (prior) { setLens('fare'); goMonth(prior.dataset.earlier, false); }
     });
+    // Which parts of the focus line stay, and at what size, depends on the
+    // room the foot gives it, so the line is drawn again when the foot's
+    // width changes: a window resized or turned, or the view shown after
+    // being hidden, when it had no width at all. Only on a change of width:
+    // drawing the line does not change it, so one draw cannot call for
+    // another.
+    let footWidth = -1;
+    new ResizeObserver(entries => {
+      const width = entries[0].contentRect.width;
+      if (width === footWidth) return;
+      footWidth = width;
+      if (showing && focus) renderFoot();
+    }).observe(byId('settle-foot'));
     // The whole calendar area, not just the week rows: an empty day and the
     // padding around the strip answer nothing else, so a tap there is the way
     // out of a focus.

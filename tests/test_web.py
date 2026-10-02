@@ -1002,7 +1002,9 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     and writes nothing.  'focus' lights a statement's days on the calendar
     and 'unfocus' puts that down again; neither writes.  'total' and 'loose'
     are not actions: a day's cell carries its whole fare and its unsettled
-    part, the two figures it can print.  'archived' opens the list of bank
+    part, the two figures it can print.  Nor is 'part': it marks the two
+    parts of the focus line that give way when the line has no room for
+    them.  'archived' opens the list of bank
     credits put away without a statement, a read like the queue.  'short' and
     'earlier' are items of the foot: one chooses the list of statements with
     money in, the other goes to the earliest month still holding open money;
@@ -1010,7 +1012,8 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
     page = settle_view(client)
     assert set(re.findall(r"data-([a-z-]+)=", page)) == {
         "archived", "back", "bl", "close", "copy", "credit", "credits", "d", "earlier", "f",
-        "focus", "fold", "k", "lens", "loose", "od", "s", "short", "total", "unfocus", "upbatch", "upguess", "uptick", "upsave",
+        "focus", "fold", "k", "lens", "loose", "od", "part", "s", "short", "total", "unfocus", "upbatch", "upguess",
+        "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
         "unlink-batch", "unlink-credit", "unlinkgo"}
 
