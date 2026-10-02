@@ -15,7 +15,8 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, dayRunsLabel, dayState, keyFigure, statementName } from './days.js';
+import { cellFigure, dayRunsLabel, dayState, fareGap, inMonthPart, keyFigure, statementName,
+         waitedDays } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -58,6 +59,9 @@ let viewMonth = fmtDate(new Date()).slice(0, 7);
 // header shows, and is changed through setLens() and nowhere else.
 const LENSES = ['fare', 'received', 'awaiting', 'unsettled'];
 let lens = 'fare';
+// Two of the totals are about statements, not days, and open a list of them
+// in the strip's place.
+function isList() { return lens === 'awaiting' || lens === 'received'; }
 // Settle-ability is decided against the server's clock, not the browser's, so
 // the page and the API agree on which legs are done.
 let NOW = '';
@@ -136,6 +140,13 @@ function figs(text) {
     at = m.index + m[0].length;
   }
   return out + esc(s.slice(at));
+}
+
+// An amount as it is written outside the calendar: the $, the thousands
+// comma, and the cents always there.
+function fullMoney(n) {
+  const f = keyFigure(n);
+  return f.dollars + '.' + f.cents;
 }
 
 // A line made of parts joined by a middle dot. Each part is kept together
@@ -317,6 +328,7 @@ async function refound(key) {
   loading = new Map();
   anchorDebt = 0;
   pinId = '';
+  stripAt = null;
   byId('grid').innerHTML = '';
   window.scrollTo(0, 0);
   await load(key);
@@ -409,6 +421,7 @@ function render() {
   renderTabs();
   renderCalendar();
   renderHeader();
+  renderBody();
 }
 
 function renderHeader() {
@@ -508,12 +521,150 @@ function renderLens() {
 function setLens(name) {
   if (!LENSES.includes(name)) return;
   lens = name;
-  // The strip lights one set of days at a time. A statement's days and the
-  // days holding unsettled money are different sets, so asking for the
-  // second puts the first down.
-  if (name === 'unsettled' && focus) { focus = null; renderFoot(); }
+  // A focus is read on the whole-fare calendar and nowhere else. The strip
+  // lights one set of days at a time, and a statement's days are not the
+  // days holding unsettled money; a list shows no days at all.
+  if (name !== 'fare' && focus) { focus = null; renderFoot(); }
   renderLens();
+  renderBody();
   paintLit();
+}
+
+// ---- body: the strip, or a list of statements ----
+// The strip is hidden while a list stands in its place, never emptied: the
+// months it holds and the rows it has drawn are still there on the way back.
+// Hiding it takes its height out of the document, so the document's scroll
+// position stops meaning anything for it; where it stood is kept here
+// instead: its top row, how far under the strip's top line that row sat, and
+// the month the header named. Null while the strip is showing.
+let stripAt = null;
+// What the list on screen was drawn for, so a repaint of the same list (a
+// live update) leaves it where the operator is reading and a different one
+// starts from its top.
+let listKey = '';
+function stripShown() { return !root.querySelector('.cal').hidden; }
+
+// The one place the body is switched and the list is drawn, called from
+// setLens and from every paint of data.
+function renderBody() {
+  const list = isList();
+  const cal = root.querySelector('.cal');
+  const back = !list && cal.hidden;
+  if (list && !cal.hidden) {
+    const el = topRow();
+    stripAt = el
+      ? { id: el.id, off: el.getBoundingClientRect().top - stripTop(), month: viewMonth } : null;
+  }
+  cal.hidden = list;
+  // The weekday head belongs to the calendar and goes with it; the list has
+  // a head of its own in the same place.
+  root.querySelector('.header .wk').hidden = list;
+  byId('settle-lhead').hidden = !list;
+  byId('settle-list').hidden = !list;
+  if (list) {
+    renderList();
+    const key = lens + ' ' + curPlat + ' ' + viewMonth;
+    if (key !== listKey) window.scrollTo(0, 0);
+    listKey = key;
+    return;
+  }
+  listKey = '';
+  if (!back) return;
+  // Back on the calendar. The strip goes where it was left if the month is
+  // still the one it was left on, and to the month the header names now if
+  // the list was paged to another. What the anchor owed belongs to a scroll
+  // position that is gone.
+  pinId = '';
+  anchorDebt = 0;
+  const el = stripAt && stripAt.month === viewMonth && byId(stripAt.id);
+  if (el) {
+    window.scrollTo(0, Math.max(0, window.scrollY + el.getBoundingClientRect().top - stripTop() - stripAt.off));
+  } else {
+    scrollToMonth(viewMonth);
+  }
+  stripAt = null;
+  pokeEdges();
+}
+
+// The statements a list lens shows for the month the header names: those
+// with a day in that month, a leg's or a 舉牌 line's, which are the ones the
+// month's total counts something of. Under 等過數, only statements no
+// transfer has come for: one paid short is neither waiting nor finished, and
+// is listed with the money that did come.
+function listBatches() {
+  const want = lens === 'awaiting' ? ['awaiting'] : ['paid', 'partial'];
+  const rows = data.settlements.filter(b =>
+    want.includes(b.state) && batchSpan(b).some(d => monthKey(d) === viewMonth));
+  if (lens === 'awaiting') {
+    // Longest wait first. A statement stored without its date has an unknown
+    // wait, which is not a short one, so it goes after every known one.
+    const wait = b => { const n = waitedDays(b, TODAY); return n === null ? -1 : n; };
+    return rows.sort((a, z) => wait(z) - wait(a) || a.id - z.id);
+  }
+  // The one still owed money leads, since it is the one needing action; the
+  // rest are records, newest statement first.
+  const on = b => b.settled_on || '';
+  return rows.sort((a, z) => (z.state === 'partial') - (a.state === 'partial') ||
+    on(z).localeCompare(on(a)) || z.id - a.id);
+}
+
+// One statement as a row: what it is at the left, its own figure at the
+// right with what is to be said about it underneath. The figure is the
+// statement's, not the month's: what the platform confirmed while nothing
+// has come, what has arrived once something has.
+function stmtRowHtml(b) {
+  const span = batchSpan(b);
+  const sub = [[dayRunsLabel(span, viewMonth), b.orders.length + ' 程']];
+  const end = [];
+  let amount;
+  if (lens === 'awaiting') {
+    amount = b.confirmed_amount;
+  } else {
+    amount = b.received;
+    if (b.state === 'partial') sub.push(['應收 ' + fullMoney(b.confirmed_amount)]);
+    for (const a of b.allocations) sub.push(['入數 ' + mdSlash(a.value_date), fullMoney(a.amount)]);
+  }
+  // The total above counts this month's orders only, so a statement that
+  // reaches outside the month says how much of it the total counts.
+  if (span.some(d => monthKey(d) !== viewMonth)) {
+    end.push('<span class="bmon">其中本月 ' + figs(fullMoney(inMonthPart(b, viewMonth))) + '</span>');
+  }
+  // The total counts fares; the row states the statement's figure. Where the
+  // two differ the row says by how much, so the rows can be added up against
+  // the total. It is information, not a state: no colour.
+  const gap = fareGap(b);
+  if (gap) end.push('<span class="bgap">同車費差 ' + figs(fullMoney(gap)) + '</span>');
+  if (lens === 'awaiting') {
+    const waited = waitedDays(b, TODAY);
+    if (waited !== null) end.push('<span class="btag">' + figs('等咗 ' + waited + ' 日') + '</span>');
+  } else if (b.state === 'partial') {
+    end.push('<span class="btag warn">' + figs('仲差 ' + fullMoney(b.outstanding)) + '</span>');
+  } else {
+    end.push('<span class="btag paid">已收齊</span>');
+  }
+  // A collected statement is a record and recedes; one still owed does not.
+  return '<button class="brow' + (b.state === 'paid' ? ' rec' : '') + '" data-bl="' + b.id + '">' +
+    '<span class="bl"><span class="bt">' + figs(nameOf(b)) + '</span>' +
+    sub.map(line => '<span class="bsub">' + parts(line) + '</span>').join('') + '</span>' +
+    '<span class="bend"><span class="ba">' + num(fullMoney(amount)) + '</span>' + end.join('') + '</span>' +
+    '<span class="bc">&rsaquo;</span></button>';
+}
+
+function renderList() {
+  // A month the strip does not hold has no statements to show yet, which is
+  // not the same as having none: the head gives no count and the list no
+  // wording until the month is in.
+  const loaded = months.has(viewMonth);
+  const rows = loaded ? listBatches() : [];
+  byId('settle-lhead').innerHTML =
+    '<span>結算單' + (loaded ? ' ' + num(String(rows.length)) + ' 張' : '') + '</span>' +
+    '<span>' + (lens === 'awaiting' ? '未過數' : '已過數') + '</span>';
+  let html = '';
+  if (loaded) {
+    html = rows.map(stmtRowHtml).join('') || '<div class="empty">' +
+      (lens === 'awaiting' ? '今個月冇等過數嘅結算單' : '今個月未有入數') + '</div>';
+  }
+  byId('settle-list').innerHTML = html;
 }
 
 function renderTabs() {
@@ -626,11 +777,16 @@ function renderCalendar() {
     return '<div class="wkblock' + (start ? ' mstart' : '') + '" id="' + weekId(week[0]) +
       '"><div class="grid">' + week.map(cellHtml).join('') + '</div></div>';
   }).join('');
-  const anchor = takeAnchor();
+  // A hidden strip has no geometry: it is rebuilt where it lies, and neither
+  // held in place nor asked which month it is showing.
+  const shown = stripShown();
+  const anchor = shown ? takeAnchor() : null;
   grid.innerHTML = html;
-  putAnchor(anchor);
-  const mon = monthAtTop();
-  if (mon) viewMonth = mon;
+  if (shown) {
+    putAnchor(anchor);
+    const mon = monthAtTop();
+    if (mon) viewMonth = mon;
+  }
   // A month arriving under the scroll draws days of a statement the operator
   // is already reading, or days the chosen lens lights, so the paint ends by
   // restating which days are lit.
@@ -1592,7 +1748,8 @@ async function openBatch(id) {
     const month = b && b.dates.length ? monthKey(b.dates[b.dates.length - 1]) : '';
     if (!month) return;
     if (!await ensureMonth(month)) return;
-    scrollToMonth(month);
+    // Under a list the strip is hidden and has nowhere to be scrolled to.
+    if (stripShown()) scrollToMonth(month);
     if (!batchById(id)) return;
   }
   pushView({ kind: 'batch', id: id });
@@ -1662,13 +1819,20 @@ function copyId(id) {
 }
 
 // ---- events ----
-// The arrows move the strip a month at a time, relative to the month it is
-// showing, and load whatever is not in it yet. They move the scroll, not the
-// data: everything already loaded stays loaded and scrollable.
-async function shiftMonth(n) {
-  const key = addMonths(viewMonth, n);
-  if (await ensureMonth(key)) scrollToMonth(key);
+// The arrows and the month button name a month, and whatever of it is not
+// loaded yet is loaded first. On the calendar they move the scroll, not the
+// data: everything already loaded stays loaded and scrollable, and the header
+// follows the strip. Under a list there is no scroll to follow, so the month
+// is set here and the header and the list are drawn for it; the strip is put
+// on that month when the calendar comes back.
+async function goMonth(key, smooth) {
+  if (!await ensureMonth(key)) return;
+  if (!isList()) { scrollToMonth(key, smooth); return; }
+  viewMonth = key;
+  renderHeader();
+  renderBody();
 }
+function shiftMonth(n) { return goMonth(addMonths(viewMonth, n), false); }
 // ---- unpaid tick interaction ----
 // The tick state lives in the DOM: toggling repaints only the section rather
 // than the whole sheet, so scroll position and the rest of the view survive.
@@ -1788,10 +1952,10 @@ export const settleView = {
     });
     byId('prevM').addEventListener('click', () => shiftMonth(-1));
     byId('nextM').addEventListener('click', () => shiftMonth(1));
-    byId('monthBtn').addEventListener('click', async () => {
+    byId('monthBtn').addEventListener('click', () => {
       const key = todayMonth();
       if (key === viewMonth) return;
-      if (await ensureMonth(key)) scrollToMonth(key, true);
+      goMonth(key, true);
     });
     byId('settle-tabs').addEventListener('click', e => {
       const c = e.target.closest('.tab');
@@ -1799,7 +1963,9 @@ export const settleView = {
       curPlat = c.dataset.f;
       savePlat();
       // Another platform's book is another set of months worth loading, so the
-      // strip starts again where the operator would start reading it.
+      // strip starts again where the operator would start reading it. The
+      // strip names that month itself once it is drawn; a list has to be told.
+      if (isList()) viewMonth = todayMonth();
       refound(todayMonth());
     });
     byId('settle-lens').addEventListener('click', e => {
@@ -1819,6 +1985,10 @@ export const settleView = {
       const cell = e.target.closest('.cell');
       if (cell && cell.dataset.d) { openDay(cell.dataset.d); return; }
       clearFocus();
+    });
+    byId('settle-list').addEventListener('click', e => {
+      const row = e.target.closest('[data-bl]');
+      if (row) openBatch(+row.dataset.bl);
     });
     byId('settle-scrim').addEventListener('click', closeSheet);
     byId('settle-sheet').addEventListener('click', e => {
@@ -1877,11 +2047,12 @@ export const settleView = {
     // rather than when something is loaded. One read per frame at most: this fires
     // on every scroll tick.
     window.addEventListener('scroll', () => {
-      // The document scrolls under the other view as well.
-      if (!showing || monthTick) return;
+      // The document scrolls under the other view as well, and under a list,
+      // where the strip is hidden and names no month.
+      if (!showing || monthTick || !stripShown()) return;
       monthTick = requestAnimationFrame(() => {
         monthTick = 0;
-        if (!showing) return;
+        if (!showing || !stripShown()) return;
         const mon = monthAtTop();
         if (mon && mon !== viewMonth) { viewMonth = mon; renderHeader(); }
       });

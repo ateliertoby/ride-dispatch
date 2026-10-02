@@ -695,6 +695,20 @@ class Session(Driver):
         text = self.month_text()
         return text[:4] + "-" + text[5:7]
 
+    def to_month(self, d: date) -> None:
+        """Page the header to the month `d` is in, by its arrows."""
+        want = month_key(d)
+        for _ in range(12):
+            at = self.view_month()
+            if at == want:
+                return
+            self.tap('[aria-label="前一個月"]' if at > want else '[aria-label="後一個月"]')
+        raise Failed(f"the header never named {want}")
+
+    def list_rows(self) -> list:
+        """The statement list, row by row, as it is drawn."""
+        return self.page.evaluate(LIST_JS)
+
     def title(self) -> str:
         return self.text(".sheet.show .sheet-title")
 
@@ -2808,8 +2822,12 @@ def settle_focus(s: Session) -> None:
     relation = sorted(d.isoformat() for d in days)
     usual = s.totals()
     s.eq(len(usual), 3, "the foot's usual cells")
-    s.tap('.lkey[data-lens="awaiting"]')
-    s.open_batch("short", ".sheet.show .up-sec")
+    # From a list: the statement's row opens its sheet, and the sheet's key
+    # leads back to the calendar.
+    s.tap('.lkey[data-lens="received"]')
+    s.to_month(s.back(26))
+    s.tap(f'#settle-list .brow[data-bl="{s.t["batch"]["short"]}"]')
+    s.on(".sheet.show .up-sec").first.wait_for()
     key = s.on(".sheet.show [data-focus]").first.evaluate(
         "e => { const c = getComputedStyle(e), r = e.getBoundingClientRect();"
         " return [e.textContent, r.height >= 44, c.backgroundColor, c.borderTopWidth, c.textDecorationLine]; }")
@@ -2817,7 +2835,9 @@ def settle_focus(s: Session) -> None:
     s.tap(".sheet.show [data-focus]")
     s.wait(lambda: not s.sheet_open() and not s.count(".scrim.show"), "the sheet to close")
     s.eq(s.pressed(), ["fare"], "the lens after going to the calendar")
+    s.eq((s.count(".cal"), s.count("#settle-list")), (1, 0), "the calendar in the list's place")
     s.eq(s.lit(), relation, "the days lit")
+    s.expect(s.page.evaluate(LIT_ON_SCREEN_JS), "none of the statement's days is on screen")
     held = s.count("#grid .cell[data-d]")
     s.eq((s.count("#grid .cell[data-d].dim"), s.count("#grid .cell.none.dim")), (held - 3, 0), "every other day recedes, bar the empty ones")
 
@@ -3077,7 +3097,11 @@ def settle_total_keys(s: Session) -> None:
     # The row rides in the sticky header, between the tabs and the column head.
     s.eq(s.page.evaluate("() => { const h = document.querySelector('#view-settle .header');"
                          " return [getComputedStyle(h).position, [...h.children].map(e => e.className.split(' ')[0])]; }"),
-         ["sticky", ["header-row", "tabs", "lens", "cols"]], "what the header holds")
+         ["sticky", ["header-row", "tabs", "lens", "cols", "cols"]], "what the header holds")
+    # Two column heads, one for each form of the body, and one showing.
+    s.eq(s.page.evaluate("() => [...document.querySelectorAll('#view-settle .header .cols')]"
+                         ".map(e => [e.className, e.getClientRects().length > 0])"),
+         [["cols wk", True], ["cols lhead", False]], "the column heads under the keys")
     # Two kinds of control: a tab is chosen by a rule under it, a key by its ground.
     s.eq((s.colour(".tab.on", "borderBottomWidth"), s.colour(".tab.on", "borderBottomColor")),
          ("2px", s.token("--text")), "the chosen tab's rule")
@@ -3352,6 +3376,406 @@ def settle_unsettled_lens_stress(s: Session) -> None:
         big = s.look(2)
         s.expect(6 <= big["size"] < 13 and round(big["cents"], 2) == 0.7, f"the long lit figure at {width}: {big}")
     s.eq(s.writes, [], "writes")
+
+
+# ---- settle view: the statement lists ----
+
+# Every row of the list on screen: what it says, part by part, and what a
+# layout check needs of it.
+LIST_JS = """
+() => [...document.querySelectorAll('#settle-list .brow')].map(r => {
+  const t = sel => [...r.querySelectorAll(sel)].map(e => e.textContent);
+  const cs = e => getComputedStyle(e);
+  const box = r.getBoundingClientRect();
+  const name = r.querySelector('.bt'), fig = r.querySelector('.ba'), tag = r.querySelector('.btag');
+  return {
+    id: r.dataset.bl ? +r.dataset.bl : null, tag: r.tagName, name: name.textContent, sub: t('.bsub'),
+    amount: fig ? fig.textContent : '', month: t('.bmon')[0] || '', gap: t('.bgap')[0] || '', tags: t('.btag'),
+    mark: t('.bc')[0], receded: r.classList.contains('rec'), height: box.height,
+    ink: [cs(name).color, cs(name).fontWeight], figure: fig ? [cs(fig).color, cs(fig).fontWeight] : null,
+    tagInk: tag ? cs(tag).color : null, gapInk: r.querySelector('.bgap') ? cs(r.querySelector('.bgap')).color : null,
+    lined: [r, ...r.querySelectorAll('*')].some(e => cs(e).textDecorationLine !== 'none'),
+    inside: [...r.querySelectorAll('.pt, .bt, .ba, .bmon, .bgap, .btag, .bc')].every(e => {
+      const b = e.getBoundingClientRect();
+      return b.left >= box.left - 0.5 && b.right <= box.right + 0.5;
+    }),
+  };
+})
+"""
+
+
+def money2(n: float) -> str:
+    """Money as the list prints it: $, thousands comma, cents always."""
+    return ("−" if n < 0 else "") + f"${abs(n):,.2f}"
+
+
+def batch_days(b: dict) -> list:
+    """The days a statement covers: its legs', and those of the 舉牌 lines it
+    paid ahead of a held-back trip."""
+    days = {o["scheduled_time"][:10] for o in b["orders"]}
+    days |= {a["date"] for a in b["adjustments"] if a.get("ahead")}
+    return sorted(date.fromisoformat(d) for d in days)
+
+
+def month_part(b: dict, month: str) -> int:
+    """What one month's totals count of a statement, in cents: each of its
+    legs scheduled in the month at owed_of, plus each 舉牌 line it paid ahead
+    that is dated in the month."""
+    from ride_dispatch.service import owed_of
+    legs = sum(round(owed_of(o) * 100) for o in b["orders"] if o["scheduled_time"][:7] == month)
+    return legs + sum(round(a["amount"] * 100) for a in b["adjustments"] if a.get("ahead") and a["date"][:7] == month)
+
+
+def fare_gap(b: dict) -> int:
+    """A statement's confirmed figure less its legs (owed_of) and its own
+    lines, in cents."""
+    from ride_dispatch.service import owed_of
+    held = sum(round(owed_of(o) * 100) for o in b["orders"]) + sum(round(a["amount"] * 100) for a in b["adjustments"])
+    return round(b["confirmed_amount"] * 100) - held
+
+
+def listed(batches: list, lens: str, month: str) -> list:
+    """The statements a list shows for a month, in the order it shows them."""
+    states = ("awaiting",) if lens == "awaiting" else ("paid", "partial")
+    rows = [b for b in batches if b["state"] in states and any(month_key(d) == month for d in batch_days(b))]
+    if lens == "awaiting":
+        # Longest wait first; a statement with no date last. The dates are
+        # ISO strings, so the earliest date is the longest wait.
+        return sorted(rows, key=lambda b: (b["settled_on"] is None, b["settled_on"] or "", b["id"]))
+    rows.sort(key=lambda b: (b["settled_on"] or "", b["id"]), reverse=True)
+    return sorted(rows, key=lambda b: b["state"] != "partial")
+
+
+def row_text(b: dict, lens: str, month: str, batches: list, today: date) -> dict:
+    """What a statement's row says, part by part."""
+    same = sorted(x["id"] for x in batches if x["settled_on"] == b["settled_on"])
+    name = (md_slash(date.fromisoformat(b["settled_on"])) + " " if b["settled_on"] else "") + "結算"
+    name += f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else ""
+    days = batch_days(b)
+    sub = [f"{day_runs(days, month)} · {len(b['orders'])} 程"]
+    if lens == "awaiting":
+        amount = b["confirmed_amount"]
+        tags = [f"等咗 {max(0, (today - date.fromisoformat(b['settled_on'])).days)} 日"] if b["settled_on"] else []
+    else:
+        amount = b["received"]
+        if b["state"] == "partial":
+            sub.append("應收 " + money2(b["confirmed_amount"]))
+        sub += [f"入數 {md_slash(date.fromisoformat(a['value_date']))} · {money2(a['amount'])}" for a in b["allocations"]]
+        tags = ["仲差 " + money2(b["outstanding"])] if b["state"] == "partial" else ["已收齊"]
+    gap = fare_gap(b)
+    return {
+        "id": b["id"], "name": name, "sub": sub, "amount": money2(amount), "tags": tags,
+        "month": "其中本月 " + money2(month_part(b, month) / 100) if any(month_key(d) != month for d in days) else "",
+        "gap": "同車費差 " + money2(gap / 100) if gap else "",
+        "receded": b["state"] == "paid",
+    }
+
+
+LIST_HEAD = {"awaiting": "未過數", "received": "已過數"}
+LIST_EMPTY = {"awaiting": "今個月冇等過數嘅結算單", "received": "今個月未有入數"}
+
+
+def statements(rows: list) -> list:
+    """The rows of the list that are statements, as row_text words them."""
+    keep = ("id", "name", "sub", "amount", "tags", "month", "gap", "receded")
+    return [{k: r[k] for k in keep} for r in rows if r["id"] is not None]
+
+
+def list_matches(s: Session, lens: str, books: dict, batches: list, what: str) -> list:
+    """The list on screen against the payload of the month the header names:
+    its head, its rows in order, and its wording when it has none. Returns
+    the statements it should hold."""
+    month = s.view_month()
+    want = listed(batches, lens, month)
+    s.eq(statements(s.list_rows()), [row_text(b, lens, month, batches, s.today) for b in want],
+         f"the {lens} list of {month}, {what}")
+    s.eq(s.texts(".header .lhead span"), [f"結算單 {len(want)} 張", str(len(want)), LIST_HEAD[lens]],
+         f"the head of the {lens} list of {month}, {what}")
+    s.eq(s.texts("#settle-list .empty"), [] if want else [LIST_EMPTY[lens]], f"the wording of an empty {lens} list of {month}, {what}")
+    s.eq(s.keys_text(), key_texts(books[month]["month_totals"]), f"the keys over the {lens} list of {month}, {what}")
+    return want
+
+
+@check("settle.statement-lists")
+def settle_lists(s: Session) -> None:
+    """等過數 and 已收 open a list of statements in the strip's place. For
+    each of the three months the seed reaches, the rows are the statements
+    the payload holds for that month, in order, and what the month's total
+    counts of them adds up to the key over the list."""
+    cur = s.today.replace(day=1)
+    months = [cur, add_months(cur, -1), add_months(cur, -2)]
+    books = {month_key(m): s.api("GET", settle_path(m)) for m in months}
+    batches = list({b["id"]: b for body in books.values() for b in body["settlements"]}.values())
+    b, c = s.t["batch"], s.t["credit"]
+    s.open_settle()
+    seen = {"awaiting": [], "received": []}
+    for lens in ("awaiting", "received"):
+        s.tap(f'.lkey[data-lens="{lens}"]')
+        s.eq(s.pressed(), [lens], "the chosen key")
+        s.eq((s.count(".cal"), s.count(".header .wk"), s.count("#settle-list"), s.count(".header .lhead")),
+             (0, 0, 1, 1), f"the strip and its head give way to the {lens} list and its head")
+        s.eq((s.colour(".header .lhead", "backgroundColor"), s.colour(".lkey.on", "backgroundColor")),
+             (s.token("--surface"), s.token("--surface")), "the list's head on the chosen key's ground")
+        for m in months:
+            s.to_month(m)
+            month = month_key(m)
+            s.eq(s.month_text(), month_label(m, now=m == cur), f"the month button under the {lens} list")
+            want = list_matches(s, lens, books, batches, "paged to by the arrows")
+            seen[lens] += [x["id"] for x in want]
+            # What is summed, in cents: for every statement row on screen, the
+            # batch it opens is taken from the payload and counted at
+            # month_part(batch, month), which is owed_of over its legs
+            # scheduled in the month plus the 舉牌 lines it paid ahead that
+            # are dated in the month. Under 等過數 that sum is the key. Under
+            # 已收 the rows also hold what a statement paid short is still
+            # owed, which the server counts as short and not as received, so
+            # the month's month_totals.short comes off the sum first.
+            totals = books[month]["month_totals"]
+            parts = sum(month_part(x, month) for x in want)
+            short = round(totals["short"] * 100) if lens == "received" else 0
+            key = cents(s.text(f'.lkey[data-lens="{lens}"] .v'))
+            s.eq(parts - short, key, f"the rows' parts of {month} against the {lens} key, in cents")
+            s.eq(key, round(totals[lens] * 100), f"the {lens} key of {month} against the server's figure")
+        s.tap(".date-btn")
+        s.eq(s.view_month(), month_key(cur), "the month button takes a list to the current month")
+        list_matches(s, lens, books, batches, "reached by the month button")
+    # Every seeded statement was listed, each under the key its state belongs
+    # to: the one paid short is with the money that came, not with the waiting.
+    s.eq((sorted(set(seen["awaiting"])), sorted(set(seen["received"]))),
+         (sorted([b["awaiting"], b["ahead"], b["group"]]), sorted([b["paid"], b["short"], b["held_back"]])),
+         "the seeded statements under each key")
+
+    # The month of the statement paid short, under 已收: it leads, it is not
+    # receded, its figure is what arrived, and what is still owed is in amber.
+    s.tap('.lkey[data-lens="received"]')
+    s.to_month(s.back(26))
+    rows = s.list_rows()
+    first = rows[0]
+    s.eq((first["id"], first["receded"], first["amount"], first["tags"], first["sub"][1:]),
+         (b["short"], False, "$1,930.00", ["仲差 $380.00"], ["應收 $2,310.00", f"入數 {md_slash(s.back(21))} · $1,930.00"]),
+         "the statement paid short, leading the 已收 list")
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        text, text2, amber, green = (s.token(n) for n in ("--text", "--text-2", "--amber", "--green"))
+        rows = s.list_rows()
+        s.eq((rows[0]["ink"], rows[0]["figure"], rows[0]["tagInk"]), ([text, "700"], [text, "700"], amber),
+             f"a statement paid short ({scheme})")
+        done = [r for r in rows if r["receded"] and r["id"] is not None]
+        s.expect(done, "no collected statement in the month of the one paid short")
+        s.eq({(tuple(r["ink"]), tuple(r["figure"]), r["tagInk"]) for r in done}, {((text2, "400"), (text2, "400"), green)},
+             f"a collected statement recedes by weight and ink ({scheme})")
+    s.page.emulate_media(color_scheme="dark")
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.expect(b["short"] not in [r["id"] for r in s.list_rows()], "the statement paid short is under 等過數")
+
+    # The month of the statement confirmed for 20 less than its fares: it says
+    # so, in the ink of a note. The statement beside it carries a 舉牌 line of
+    # its own on top of its legs and agrees with the book, so it says nothing;
+    # the two confirmed on one date are told apart by a number.
+    s.to_month(s.back(19))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq((by[b["awaiting"]]["amount"], by[b["awaiting"]]["gap"], by[b["awaiting"]]["gapInk"]),
+         ("$1,270.00", "同車費差 −$20.00", s.token("--text-2")), "a statement confirmed for less than its fares")
+    s.to_month(s.back(6))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq((by[b["ahead"]]["amount"], by[b["ahead"]]["gap"]), ("$1,425.00", ""), "a statement that is its legs and its own line")
+    s.to_month(s.back(8))
+    by = {r["id"]: r for r in s.list_rows()}
+    s.eq((by[b["group"]]["name"], by[b["group"]]["gap"]), (f"{md_slash(s.back(2))} 結算 (2)", ""),
+         "the second statement confirmed on one date")
+
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.statement-list-rows-hold-at-phone-widths")
+def settle_list_layout(s: Session) -> None:
+    """Both lists, in both palettes, at both phone widths: every row a
+    button a thumb can take, ending in its mark, nothing underlined, nothing
+    past the row's edge and the page not scrolling sideways."""
+    s.open_settle()
+    for lens, back in (("awaiting", 19), ("received", 26)):
+        s.tap(f'.lkey[data-lens="{lens}"]')
+        s.to_month(s.back(back))
+        for scheme in SCHEMES:
+            s.page.emulate_media(color_scheme=scheme)
+            for width in PHONE_WIDTHS:
+                s.resize(width)
+                rows = s.list_rows()
+                where = f"in the {lens} list at {width} ({scheme})"
+                s.expect(rows, f"no rows to judge {where}")
+                s.eq(({r["tag"] for r in rows}, {r["mark"] for r in rows}), ({"BUTTON"}, {"›"}), f"what a row is and ends in {where}")
+                s.expect(all(r["height"] >= 44 for r in rows), f"a row under 44px {where}: {[r['height'] for r in rows]}")
+                s.expect(not any(r["lined"] for r in rows), f"something underlined {where}")
+                s.expect(all(r["inside"] for r in rows), f"a part of a row runs past the row {where}")
+                s.expect(not s.page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth"),
+                         f"the page scrolls sideways {where}")
+                s.expect(not s.page.evaluate("() => [...document.querySelectorAll('.header .lhead, .header .lhead *')]"
+                                             ".some(e => getComputedStyle(e).textDecorationLine !== 'none')"),
+                         f"the list's head is underlined {where}")
+            s.resize(390)
+        s.page.emulate_media(color_scheme="dark")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-statement-across-two-months-says-its-part-of-each")
+def settle_list_straddle(s: Session) -> None:
+    """A collected statement with one leg in the month before its others:
+    listed in both months, its days written with their months, and in each
+    its part of that month."""
+    kept = seed_demo_db._oid(402)
+    moved = seed_demo_db._oid(401)
+    # The month the statement's other legs begin in, and a day three days
+    # before that month.
+    home = s.back(12).replace(day=1)
+    early = home - timedelta(days=3)
+
+    def change(body: dict, path: str) -> None:
+        for x in body["settlements"]:
+            if x["id"] == s.t["batch"]["held_back"]:
+                for o in x["orders"]:
+                    if o["order_id"] == moved:
+                        o["scheduled_time"] = early.isoformat() + o["scheduled_time"][10:]
+
+    def served(d: date) -> dict:
+        body = s.api("GET", settle_path(d))
+        change(body, settle_path(d))
+        return body
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    books = {month_key(m): served(m) for m in (home, early, add_months(home, 1), s.today)}
+    batches = list({x["id"]: x for body in books.values() for x in body["settlements"]}.values())
+    batch = [x for x in batches if x["id"] == s.t["batch"]["held_back"]][0]
+    s.expect(kept in [o["order_id"] for o in batch["orders"]], "the seeded statement lost a leg")
+    s.tap('.lkey[data-lens="received"]')
+    for m in (home, early):
+        s.to_month(m)
+        month = month_key(m)
+        row = [r for r in s.list_rows() if r["id"] == batch["id"]]
+        s.expect(row, f"the statement is not listed in {month}")
+        want = row_text(batch, "received", month, batches, s.today)
+        s.eq(statements(row), [want], f"the statement's row in {month}")
+        s.expect(want["month"].startswith("其中本月 $") and "/" in want["sub"][0], f"the check expected no part and bare days: {want}")
+        s.eq(cents(row[0]["month"].replace("其中本月 ", "")), month_part(batch, month), f"its part of {month}, in cents")
+    s.eq(month_part(batch, month_key(early)), 44000, "the part of the month holding the one leg moved there")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-statement-without-its-date-waits-last")
+def settle_list_undated(s: Session) -> None:
+    """A statement stored without its date has waited an unknown time: its
+    row says nothing of a wait and stands after every row that does."""
+    # A month holding two waiting statements or more, and of those the one
+    # that has waited longest, which its date would have put first. The
+    # seeded statements lie close enough together that some month always
+    # holds two.
+    cur = s.today.replace(day=1)
+    held = {}
+    for m in (cur, add_months(cur, -1), add_months(cur, -2)):
+        held[m] = listed(s.api("GET", settle_path(m))["settlements"], "awaiting", month_key(m))
+    month = [m for m in held if len(held[m]) >= 2][0]
+    undated = held[month][0]["id"]
+
+    def change(body: dict, path: str) -> None:
+        for x in body["settlements"]:
+            if x["id"] == undated:
+                x["settled_on"] = None
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.to_month(month)
+    rows = s.list_rows()
+    s.eq(len(rows), len(held[month]), "the waiting statements of the month")
+    s.eq((rows[-1]["id"], rows[-1]["name"], rows[-1]["tags"]), (undated, "結算", []), "the undated statement")
+    s.expect(all(len(r["tags"]) == 1 and r["tags"][0].startswith("等咗 ") for r in rows[:-1]), f"the dated ones say their wait: {rows[:-1]}")
+    waits = [int(r["tags"][0].split()[1]) for r in rows[:-1]]
+    s.eq(waits, sorted(waits, reverse=True), "longest wait first")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.the-list-follows-month-platform-and-live-changes")
+def settle_list_follows(s: Session) -> None:
+    """Under a list the month is changed by the arrows and the month button
+    alone; the strip keeps its months and its place and is back where it was,
+    or on the month the list was paged to; platform and live changes repaint
+    the list with the lens kept."""
+    cur = s.today.replace(day=1)
+    prev = add_months(cur, -1)
+    b, c = s.t["batch"], s.t["credit"]
+    s.open_settle()
+    # A place in the strip that is not a month's first row.
+    s.reach(s.cell(26))
+    s.to_top(s.cell(26))
+    at, top, month, weeks = s.scroll_y(), s.top_week(), s.view_month(), s.weeks()
+    asked = len(s.requests)
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.eq((s.count(".cal"), s.view_month(), s.scroll_y()), (0, month, 0), "the list opens on the month the strip showed, from its top")
+    # The hidden strip no longer names the month: scrolling the page moves nothing.
+    s.page.evaluate("() => window.scrollBy(0, 400)")
+    s.never(lambda: s.view_month() != month, "the month changed under a list by scrolling", 500)
+    s.tap('.lkey[data-lens="received"]')
+    s.tap('.lkey[data-lens="fare"]')
+    s.eq((s.count(".cal"), s.count("#settle-list"), s.top_week(), s.scroll_y(), s.view_month(), s.weeks()),
+         (1, 0, top, at, month, weeks), "the strip back where it was left")
+    s.eq(s.asked(asked, "/api/"), [], "requests made by going to a list and back")
+    # Paged to another month under the list, the strip comes back on that month.
+    s.tap('.lkey[data-lens="received"]')
+    other = add_months(date.fromisoformat(month + "-01"), 1 if month != month_key(cur) else -1)
+    s.to_month(other)
+    s.eq(s.pressed(), ["received"], "the chosen key after paging")
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq((s.count(".cal"), s.top_week(), s.view_month()), (1, week_id(other), month_key(other)),
+         "the strip on the month the list was paged to")
+    # A month the strip does not hold is loaded before the list is drawn for it.
+    s.tap('.lkey[data-lens="received"]')
+    far = date.fromisoformat(s.weeks()[0][2:]) + timedelta(days=6)
+    far = add_months(far.replace(day=1), -1)
+    asked = len(s.requests)
+    s.to_month(far)
+    s.expect(settle_path(far) in s.asked(asked), "the month paged to was never asked for")
+    body = s.api("GET", settle_path(far))
+    want = [x["id"] for x in listed(body["settlements"], "received", month_key(far))]
+    s.eq((s.keys_text(), [r["id"] for r in s.list_rows() if r["id"] is not None], s.texts("#settle-list .empty")),
+         (key_texts(body["month_totals"]), want, [] if want else ["今個月未有入數"]), "the list of a month loaded under it")
+    # A focus is put down by choosing a list, and its line leaves the foot.
+    s.tap('.lkey[data-lens="fare"]')
+    s.eq((s.top_week(), s.view_month()), (week_id(far), month_key(far)), "the strip on a month loaded under the list")
+    s.reach(s.cell(26))
+    s.to_top(s.cell(26))
+    s.focus_on("short", ".sheet.show .up-sec")
+    s.eq((len(s.lit()), s.count(".foot .fline")), (3, 1), "a focus and its line")
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.eq(s.count(".foot .fline"), 0, "the focus line under a list")
+    s.tap('.lkey[data-lens="fare"]')
+    s.eq((s.lit(), s.count("#grid .dim")), ([], 0), "the focus after a list was chosen")
+    # A change made elsewhere repaints the list: the waiting statement is
+    # paid, and moves from one list to the other.
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.to_month(s.back(19))
+    s.expect(b["awaiting"] in [r["id"] for r in s.list_rows()], "the waiting statement is not listed")
+    s.api("POST", f"/api/credits/{c['exact']}/allocate", {"settlement_id": b["awaiting"]})
+    s.wait(lambda: b["awaiting"] not in [r["id"] for r in s.list_rows()], "the list to follow a change made elsewhere")
+    s.eq((s.pressed(), s.count(".cal")), (["awaiting"], 0), "the lens after a live update")
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(s.back(19)))["month_totals"]), "the keys after a live update")
+    s.tap('.lkey[data-lens="received"]')
+    paid = [r for r in s.list_rows() if r["id"] == b["awaiting"]]
+    s.eq((paid[0]["tags"], paid[0]["sub"][-1]), (["已收齊"], f"入數 {md_slash(s.back(14))} · $1,270.00"), "the statement, collected, under 已收")
+    # Another platform: the lens stays, the list is that platform's and names
+    # the current month; with no statements it says so in words.
+    s.tap(".tab", has_text="滴滴")
+    s.eq((s.pressed(), s.count(".cal"), s.count("#settle-list"), s.month_text()),
+         (["received"], 0, 1, month_label(cur, now=True)), "the lens and the month after changing platform")
+    s.eq((s.list_rows(), s.texts("#settle-list .empty"), s.texts(".header .lhead span")[0]),
+         ([], ["今個月未有入數"], "結算單 0 張"), "another platform's list")
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(cur, "didi"))["month_totals"]), "another platform's keys")
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.eq(s.texts("#settle-list .empty"), ["今個月冇等過數嘅結算單"], "another platform's waiting list")
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.month_text(), s.pressed()), (month_label(prev), ["awaiting"]), "paging another platform's list")
+    s.tap('.lkey[data-lens="fare"]')
+    s.eq((s.top_week(), s.month_text()), (week_id(prev), month_label(prev)), "another platform's strip on the month paged to")
+    s.eq(s.writes, [], "writes by the page")
 
 
 @check("settle.total-keys-without-a-figure")
