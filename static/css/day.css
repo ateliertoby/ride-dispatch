@@ -74,7 +74,7 @@
   }
   .gap {
     display: block; margin-top: 5px; white-space: nowrap;
-    font-family: var(--mono); font-size: 10.5px; line-height: 19px; color: var(--text-3);
+    font-family: var(--mono); font-size: 12px; line-height: 19px; color: var(--text-3);
   }
   .row:has(.meta) .gap { position: absolute; left: 0; top: var(--t-time); }
   .code { font-family: var(--mono); font-weight: 700; font-size: 14px; letter-spacing: .02em; white-space: nowrap; }
@@ -129,7 +129,7 @@
      total is gross, and a row that quietly showed net would not add up to it.
      Exact to the cent -- the layout gives way to the number, never the other
      way round. */
-  .price .pen { display: block; font-size: 11.5px; line-height: 1.35; color: var(--red); }
+  .price .pen { display: block; font-size: 12px; line-height: 1.35; color: var(--red); }
 
   .meta {
     grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
@@ -140,14 +140,14 @@
   /* Status: a solid block, one per row, the only place a row carries colour. */
   .st {
     display: inline-block; padding: 2px 6px 1px; border-radius: 2px;
-    font-size: 11.5px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
+    font-size: 12px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
   }
   .st.landed { background: var(--green); color: var(--on-solid); }
   .st.gate { background: var(--text); color: var(--bg); }
   .st.est { box-shadow: inset 0 0 0 1px var(--amber); color: var(--amber); }
 
   .mk {
-    font-size: 11.5px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
+    font-size: 12px; line-height: 1.35; padding: 1px 5px 0; border-radius: 2px;
     box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2);
   }
   .mk.sign { color: var(--text); box-shadow: inset 0 0 0 1px var(--text-3); }
@@ -172,7 +172,7 @@
     display: grid; grid-template-columns: var(--c-time) minmax(0, 1fr); column-gap: 10px; align-items: center;
     padding: 0 var(--gutter); height: 18px; border-bottom: 1px solid var(--line);
   }
-  .now-t { font-family: var(--mono); font-size: 11px; line-height: 1; font-weight: 700; color: var(--red); }
+  .now-t { font-family: var(--mono); font-size: 12px; line-height: 1; font-weight: 700; color: var(--red); }
   .now-line { height: 1px; background: var(--red); }
 
   .empty { padding: 28px var(--gutter); font-size: 14px; color: var(--text-3); }
