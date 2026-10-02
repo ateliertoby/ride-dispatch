@@ -48,7 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, TIMEOUT_MS, TIMEZONE,  # noqa: E402
+from harness import (DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, STABLE_JS, TIMEOUT_MS, TIMEZONE,  # noqa: E402
                      Driver, Ports, Server, copy_app, demo_now, foot_credits, foot_earlier, foot_month,
                      foot_second_short, foot_short, month_before, new_context, paste_message,
                      rewrite, stress_foot, stress_strip)
@@ -2652,6 +2652,120 @@ def settle_months(s: Session) -> None:
     s.eq(s.top_week(), week_id(after + timedelta(days=7)), "top row after scrolling into the next month")
     s.eq(s.month_text(), month_label(after), "month button after scrolling")
     s.eq(s.weeks()[:len(weeks)], weeks, "rows already drawn changed")
+
+
+# The week row at the top of the strip, and how far its top is from the line
+# the strip's top row sits on, the header's bottom edge.
+TOP_WEEK_AT_JS = """
+() => {
+  const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length);
+  const edge = header.getBoundingClientRect().bottom;
+  for (const el of document.querySelectorAll('.wkblock')) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom > edge + 1) return [el.id, Math.abs(r.top - edge) < 1];
+  }
+  return null;
+}
+"""
+
+
+@check("settle.the-first-press-of-an-arrow-reaches-its-month", long=True)
+def settle_first_arrow(s: Session) -> None:
+    """The strip opens on one month and grows as the months around it
+    arrive. An arrow pressed before they have can ask for a month whose
+    first row cannot be put at the top yet: there is not a screen's worth of
+    strip under it, so the document cannot be scrolled that far. The one
+    press still ends, once the strip has grown, with that row at the top and
+    the header naming its month, on a phone and in a window taller than a
+    month; and once the row is there nothing holds it there."""
+    cur = s.today.replace(day=1)
+    # The month that gives the strip its length under the rows asked for is
+    # kept from arriving until the arrow has been pressed.
+    late = settle_path(add_months(cur, 2))
+    short = {"後一個月": 0, "前一個月": 0}
+    paints = 0
+    for size in ({"width": 390, "height": 664}, {"width": 390, "height": 844}, {"width": 1000, "height": 1400}):
+        for label, step in (("後一個月", 1), ("前一個月", -1)):
+            if s.page:
+                s.page.close()
+            s.page = s.ctx.new_page()
+            s.page.set_default_timeout(TIMEOUT_MS)
+            s._watch(s.page)
+            s.page.set_viewport_size(size)
+            s.hold(late)
+            s.page.goto(s.base + "/settle")
+            s.on(".cell[data-d]").first.wait_for()
+            # At rest but for the month held back: every other month the
+            # strip's edges asked for is in.
+            s.wait(lambda: s.holding(late) and len(s.pending) == 1, f"the strip to be waiting on the held month alone, {size}")
+            s.page.evaluate(STABLE_JS)
+            # The arrow moves from the month the header names. With so little
+            # strip that need not be the current one.
+            target = add_months(date.fromisoformat(s.view_month() + "-01"), step)
+            where = f"after {label} from {s.view_month()} in a window of {size['width']}x{size['height']}"
+            s.on(f'[aria-label="{label}"]').first.tap()
+            s.wait(lambda: week_id(target) in s.weeks(), f"the month asked for to be drawn {where}")
+            s.page.evaluate(STABLE_JS)
+            short[label] += s.page.evaluate(TOP_WEEK_AT_JS) != [week_id(target), True]
+            s.release_all()
+            s.settle()
+            s.eq(s.month_text(), month_label(target, now=target == cur), f"the month the header names {where}")
+            s.eq(s.page.evaluate(TOP_WEEK_AT_JS), [week_id(target), True], f"the row at the top of the strip {where}")
+            # Nothing is left holding the row there: moved by hand, the strip
+            # stays where it was put through a later paint.
+            s.page.evaluate("() => window.scrollBy(0, 30)")
+            s.settle()
+            at = s.scroll_y()
+            paints += 1
+            s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 400 + paints})
+            s.wait(lambda: s.cell_state(1)[1] == str(940 + paints), "a change made elsewhere to be painted")
+            s.eq(s.scroll_y(), at, f"the strip after a later paint, {where}")
+    # The row could not be reached at the press in every case of the arrow
+    # that goes forward, which is what the check is for.
+    s.eq(short["後一個月"], 3, f"cases in which the strip was too short at the press: {short}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-row-the-strip-could-not-grow-to-reach-is-let-go")
+def settle_pin_let_go(s: Session) -> None:
+    """A row that could not be put at the top waits for the strip to grow.
+    When the month it was waiting on cannot be loaded the row is let go: the
+    strip stays where the operator puts it next, through later paints,
+    and is not taken back to a row asked for before."""
+    cur = s.today.replace(day=1)
+    late = settle_path(add_months(cur, 2))
+    s.page = s.ctx.new_page()
+    s.page.set_default_timeout(TIMEOUT_MS)
+    s._watch(s.page)
+    s.hold(late)
+    s.page.goto(s.base + "/settle")
+    s.on(".cell[data-d]").first.wait_for()
+    s.wait(lambda: s.holding(late) and len(s.pending) == 1, "the strip to be waiting on the held month alone")
+    s.page.evaluate(STABLE_JS)
+    target = add_months(date.fromisoformat(s.view_month() + "-01"), 1)
+    s.on('[aria-label="後一個月"]').first.tap()
+    s.wait(lambda: week_id(target) in s.weeks(), "the month asked for to be drawn")
+    s.page.evaluate(STABLE_JS)
+    s.expect(s.page.evaluate(TOP_WEEK_AT_JS) != [week_id(target), True], "the strip was long enough at the press: nothing waits")
+    s.allow("http 500", "status of 500")
+    s.answer(late, status=500, content_type="text/html", body="<html>boom</html>")
+    s.wait_toast("載入失敗")
+    # Somewhere else, by hand: a row of the current month a little under the
+    # strip's top line, far enough from both ends that nothing more is asked.
+    s.page.evaluate("""id => {
+      const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+        .getBoundingClientRect().bottom;
+      window.scrollBy(0, document.getElementById(id).getBoundingClientRect().top - header + 20);
+    }""", week_id(cur))
+    s.page.evaluate(STABLE_JS)
+    held = s.page.evaluate(TOP_WEEK_JS)
+    s.eq(held[0], week_id(cur), "the row the strip was put on by hand")
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.cell_state(1)[1] == "941", "a change made elsewhere to be painted")
+    s.page.evaluate(STABLE_JS)
+    s.eq(s.page.evaluate(TOP_WEEK_JS), held, "the top row after a later paint")
+    s.release_all()
+    s.eq(s.writes, [], "writes")
 
 
 @check("settle.edge-loading")

@@ -317,6 +317,10 @@ async function ensureMonth(key) {
   } catch (e) {
     // An expired login is announced by the shell, not by a toast.
     if (!(e instanceof AuthExpired)) toast('載入失敗');
+    // A pinned row is waiting for the strip to grow, and this growth is not
+    // coming. Left pinned, it would be asked for again by whatever paint
+    // came next, however long after and wherever the operator had gone.
+    pinId = '';
     return false;
   }
   if (g === gen) want.forEach((k, i) => months.set(k, payloads[i]));
@@ -987,12 +991,30 @@ function monthAtTop() {
   const el = topRow();
   return el ? monthKey(addDays(idWeek(el.id), 6)) : null;
 }
-// Put a week row at the top of the strip.
+// Put a week row at the top of the strip, now when the document is long
+// enough to be scrolled that far, and otherwise as soon as it has grown.
+//
+// The strip is a few months long when it has just opened or been refounded,
+// and the row asked for can have less than a screen of strip under it. The
+// scroll then stops at the document's end, short of the row, and the strip's
+// own growth would go on to hold whatever row that left on top. So a row
+// that cannot be reached is pinned: every paint that lengthens the strip
+// asks for it again until it is at the top (see takeAnchor). Stopping at the
+// document's end is also what brings the next month into reach of the
+// strip's edge, so the growth the pin waits for is already asked for.
+//
+// Whether the row can be reached is worked out from the document's length,
+// not read off where the row is afterwards: a smooth scroll has not arrived
+// yet. A row that can be reached takes any earlier pin away, since the strip
+// has been asked to be somewhere else.
 function scrollToWeek(id, smooth) {
   const el = byId(id);
   if (!el) return;
-  const y = window.scrollY + el.getBoundingClientRect().top - stripTop();
-  window.scrollTo({ top: Math.max(0, y), behavior: smooth ? 'smooth' : 'auto' });
+  const y = Math.max(0, window.scrollY + el.getBoundingClientRect().top - stripTop());
+  const room = document.documentElement.scrollHeight - window.innerHeight;
+  pinId = y - room >= 1 ? id : '';
+  anchorDebt = 0;
+  window.scrollTo({ top: y, behavior: smooth ? 'smooth' : 'auto' });
 }
 // Put a month's first week row at the top of the strip.
 function scrollToMonth(key, smooth) { scrollToWeek(monthWeekId(key), smooth); }
