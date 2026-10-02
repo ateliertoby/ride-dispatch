@@ -2837,15 +2837,15 @@ def settle_day_fare(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-# Whether a lit day can be read where it is: below the header, above the foot.
+# The lit days that can be read where they are, below the header and above
+# the foot: each with where its top edge is.
 LIT_ON_SCREEN_JS = """
 () => {
   const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
   const top = seen('.header').getBoundingClientRect().bottom, bottom = seen('.foot').getBoundingClientRect().top;
-  return [...document.querySelectorAll('#grid .cell.lit')].some(e => {
-    const r = e.getBoundingClientRect();
-    return r.top >= top - 1 && r.bottom <= bottom + 1;
-  });
+  return [...document.querySelectorAll('#grid .cell.lit')].map(e => [e.dataset.d, e.getBoundingClientRect()])
+    .filter(([d, r]) => r.top >= top - 1 && r.bottom <= bottom + 1)
+    .map(([d, r]) => [d, Math.round(r.top)]);
 }
 """
 
@@ -2968,10 +2968,19 @@ def settle_focus_reveal(s: Session) -> None:
     s.eq(s.totals(), [f"{md_slash(s.back(9))} 結算 · {day_runs(days, s.view_month())} · 4 程 · $1,780.00 · 已收 {md_slash(s.back(7))}✕"],
          "the foot's line for a collected statement")
     s.eq(s.colour(".foot .fline .bs"), s.token("--green"), "collected, in the line")
-    # Already on screen: the strip stays where it is.
-    at = s.scroll_y()
-    s.focus_on("held_back")
-    s.eq(s.scroll_y(), at, "the strip moved although the days were on screen")
+    # Already on screen: the strip stays where it is. The statement's days
+    # can lie on two week rows, and the strip brings one of them to its top,
+    # which leaves the other behind the header; so the sheet is opened from a
+    # day that can be seen, since a tap on one that cannot scrolls the strip
+    # to reach it, and where the days stand is read off the screen, since the
+    # document's own offset moves whenever a month is added above.
+    at = s.page.evaluate(LIT_ON_SCREEN_JS)
+    s.tap(f'.cell[data-d="{at[0][0]}"]')
+    s.tap(f'.sheet.show .blink[data-bl="{s.t["batch"]["held_back"]}"]')
+    s.on(".sheet.show .hero").first.wait_for()
+    s.tap(".sheet.show [data-focus]")
+    s.wait(lambda: not s.sheet_open(), "the sheet to close a second time")
+    s.eq(s.page.evaluate(LIT_ON_SCREEN_JS), at, "the strip moved although the days were on screen")
     s.eq(s.writes, [], "writes")
 
 
