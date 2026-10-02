@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -89,8 +90,23 @@ def serve(app_root: str, db_path: str, port: int, now: str) -> None:
     real_now_str = db._now_str
     db._now_str = lambda moment=None: real_now_str(moment or fixed)
     web.DB_PATH = db_path
+    _leave_with_parent()
     _install_faults(web.app, os.path.join(os.path.dirname(db_path), FAULTS_FILE), port)
     web.app.run(host="127.0.0.1", port=port, threaded=True)
+
+
+def _leave_with_parent() -> None:
+    """Exit once the process that started this one is gone. A run that is
+    killed cannot stop its servers, and one left behind would hold its port
+    and its database for good."""
+    parent = os.getppid()
+
+    def watch():
+        while os.getppid() == parent:
+            time.sleep(1)
+        os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
 
 
 FAULTS_FILE = "faults.json"
@@ -167,6 +183,31 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+class Ports:
+    """The ports one process may put its servers on: `count` of them from
+    `first`, tried in turn.
+
+    free_port() lets go of the port before the server binds it, and the
+    system may give the same answer to another process in between. Runs that
+    start servers side by side each draw from a range of their own instead,
+    below the range the system hands out by itself."""
+
+    def __init__(self, first: int, count: int):
+        self.first, self.count, self.at = first, count, 0
+
+    def next(self) -> int:
+        for _ in range(self.count):
+            port = self.first + self.at
+            self.at = (self.at + 1) % self.count
+            with socket.socket() as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                except OSError:
+                    continue
+            return port
+        raise RuntimeError(f"no free port from {self.first} to {self.first + self.count - 1}")
+
+
 def copy_app(dst: str, app_root: str = ROOT) -> str:
     """A throwaway copy of what the app is served from, so a check can change
     a file the way a deploy does without writing into the working tree."""
@@ -183,9 +224,10 @@ class Server:
     the database, which is what a deploy does.
     """
 
-    def __init__(self, today: date, app_root: str = ROOT):
+    def __init__(self, today: date, app_root: str = ROOT, ports: Ports = None):
         self.today = today
         self.app_root = app_root
+        self.ports = ports
         self.proc = None
 
     def __enter__(self) -> str:
@@ -194,7 +236,7 @@ class Server:
         began = time.monotonic()
         seed_demo_db.seed(self.db_path, self.today)
         self.seed_s = time.monotonic() - began
-        self.port = free_port()
+        self.port = self.ports.next() if self.ports else free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.log = open(os.path.join(self.dir.name, "server.log"), "w")
         began = time.monotonic()
