@@ -644,7 +644,14 @@ class Session(Driver):
     def toasts(self) -> list:
         """The words of every toast this tab has put up, oldest first: one
         entry each time, whether or not an earlier one was still showing."""
-        return self.page.evaluate("key => JSON.parse(sessionStorage.getItem(key) || '[]')", TOASTS_KEY)
+        log, showing = self.page.evaluate(
+            "key => [JSON.parse(sessionStorage.getItem(key) || '[]'),"
+            " (document.querySelector('.toast.show') || { textContent: null }).textContent]", TOASTS_KEY)
+        # A log that has stopped following the page would let "no toast
+        # since" be said of anything: the toast on screen must be its last.
+        if showing is not None and log[-1:] != [showing.strip()]:
+            raise Failed(f"the toast log does not end with the toast that is showing: {showing.strip()!r}")
+        return log
 
     def wait_toast(self, want, since: int = None) -> str:
         """`want` is the whole text, or a compiled pattern it must match.
