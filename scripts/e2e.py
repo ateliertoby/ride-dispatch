@@ -436,6 +436,7 @@ class Session(Driver):
         self.noise = []        # console errors, failed requests, error statuses
         self.allowed = []
         self.held = {}         # path -> routes, oldest first, for requests a check is holding back
+        self.gates = []        # one per hold(): whether it has been told to let everything through
         self.spent = {"fixed": 0.0, "poll": 0.0, "settle": 0.0}    # seconds, for --timings
         ctx.add_init_script(TOASTS_JS)
 
@@ -555,11 +556,14 @@ class Session(Driver):
         """Every request for these paths waits until release() or answer(),
         each of which lets the oldest one waiting go."""
         wanted = set(paths)
-        self.letting_go = False
+        gate = {"open": False}
+        self.gates.append(gate)
 
         def handler(route, request):
             path = request.url[len(self.base):]
-            if path in wanted and not self.letting_go:
+            if gate["open"]:
+                route.fallback()
+            elif path in wanted:
                 self.held.setdefault(path, []).append(route)
             else:
                 route.continue_()
@@ -579,15 +583,17 @@ class Session(Driver):
 
     def release_all(self) -> None:
         """Stop holding: what is waiting goes, and so does what comes later."""
-        self.letting_go = True
+        # The handler stays where it is and passes every request on, as if
+        # it were not there. Taking it away is not the same thing: the
+        # browser's driver hands a request that is passing through it at that
+        # moment to the next handler in line a second time, and a handler on
+        # the context that answers by fetching (rewrite) then answers the
+        # one request twice, which is an error.
+        for gate in self.gates:
+            gate["open"] = True
         for routes in self.held.values():
             while routes:
                 routes.pop(0).continue_()
-        # A request can be passing through the handler at this very moment.
-        # Taking the handler away under it makes the browser let the request
-        # go by itself, and the handler's own word then comes as a second
-        # answer, which is an error. Waiting lets it finish first.
-        self.page.unroute_all(behavior="wait")
 
     def stub(self, method, glob: str, status: int, body: str, content_type: str) -> None:
         """Answer every matching request with this instead of the server's.
