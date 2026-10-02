@@ -1357,10 +1357,10 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
             credits.append(c)
         by_credit = {c["id"]: c for c in credits}
         batch_rows = conn.execute(
-            "SELECT id, confirmed_amount, statement_image FROM settlements "
+            "SELECT id, confirmed_amount, settled_on, statement, statement_image FROM settlements "
             "WHERE platform = ? ORDER BY id", (platform,)
         ).fetchall()
-        batches = {r["id"]: r for r in batch_rows}
+        batches = {r["id"]: _settlement_dict(r) for r in batch_rows}
         dates: dict[int, set] = {sid: set() for sid in batches}
         counts: dict[int, int] = {sid: 0 for sid in batches}
         received: dict[int, float] = {sid: 0.0 for sid in batches}
@@ -1388,6 +1388,10 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
                     "amount": r["amount"],
                     "dates": sorted(d for d in dates[sid] if d), "orders": counts[sid],
                     "has_image": bool(batches[sid]["statement_image"]),
+                    # What a batch is named by, so a reader that holds only
+                    # the ledger gives it the name the month's payload does.
+                    "due_dates": due_dates(batches[sid]["statement"]),
+                    "settled_on": batches[sid]["settled_on"],
                 })
         # The batch's own state, not the credit's: a credit can be spent while
         # the batch it paid part of is still owed money.

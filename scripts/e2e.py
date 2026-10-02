@@ -4291,7 +4291,9 @@ def listed(batches: list, lens: str, month: str) -> list:
         # Longest wait first; a statement with no date last. The dates are
         # ISO strings, so the earliest date is the longest wait.
         return sorted(rows, key=lambda b: (b["settled_on"] is None, b["settled_on"] or "", b["id"]))
-    rows.sort(key=lambda b: (b["settled_on"] or "", b["id"]), reverse=True)
+    # Newest first by the date a statement is named by, its latest due date
+    # or failing that the day it was confirmed; one paid short leads.
+    rows.sort(key=lambda b: (max(b["due_dates"], default="") or b["settled_on"] or "", b["id"]), reverse=True)
     return sorted(rows, key=lambda b: b["state"] != "partial")
 
 
@@ -4531,6 +4533,77 @@ def settle_list_name_guard(s: Session) -> None:
     s.tap(".tab", has_text="滴滴")
     s.tap(".tab", has_text="接送")
     s.eq(names(), {"ahead": s.named("ahead"), "group": s.named("ahead") + " (2)"}, "two statements printing the same due dates")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.the-collected-list-follows-the-due-dates")
+def settle_list_by_due(s: Session) -> None:
+    """The 已收 list reads in the order of the names on its rows: newest
+    first by the latest due date a statement prints, not by the day it was
+    confirmed, which stands in only for a statement that prints none. A
+    statement paid short still leads."""
+    # A month holding two statements collected in full or more, newest
+    # confirmed first, which is the order the due dates are set against.
+    cur = s.today.replace(day=1)
+    held = {}
+    for m in (cur, add_months(cur, -1), add_months(cur, -2)):
+        rows = [b for b in s.api("GET", settle_path(m))["settlements"]
+                if b["state"] == "paid" and any(month_key(d) == month_key(m) for d in batch_days(b))]
+        held[m] = sorted(rows, key=lambda b: (b["settled_on"], b["id"]), reverse=True)
+    found = [m for m in held if len(held[m]) >= 2]
+    s.expect(found, "the seed has no month with two collected statements")
+    month = found[0]
+    # The later a statement was confirmed, the earlier the dates it prints;
+    # the one confirmed first prints none and is placed by that day, which is
+    # later than any date given here.
+    due = {b["id"]: [(s.back(100 - 10 * i)).isoformat(), (s.back(102 - 10 * i)).isoformat()]
+           for i, b in enumerate(held[month])}
+    due[held[month][-1]["id"]] = []
+
+    def change(body: dict, path: str) -> None:
+        for x in body["settlements"]:
+            if x["id"] in due:
+                x["due_dates"] = due[x["id"]]
+
+    rewrite_settle(s, change)
+    s.open_settle()
+    s.tap('.lkey[data-lens="received"]')
+    s.to_month(month)
+    body = s.api("GET", settle_path(month))
+    change(body, "")
+    want = [b["id"] for b in listed(body["settlements"], "received", month_key(month))]
+    full = [b["id"] for b in held[month]]
+    got = [r["id"] for r in s.list_rows() if r["id"] is not None]
+    s.eq(got, want, "the collected statements in order")
+    s.eq([i for i in got if i in full], full[::-1], "those collected in full, against the order they were confirmed in")
+    short = [b["id"] for b in body["settlements"] if b["state"] == "partial" and b["id"] in got]
+    s.eq(got[:len(short)], [i for i in got if i in short], "a statement paid short leads")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-statement-known-only-from-the-ledger-keeps-its-name")
+def settle_focus_ledger_name(s: Session) -> None:
+    """A statement in focus whose month the strip does not hold is known
+    only from the ledger. The foot's line names it as it is named anywhere
+    else, by the due dates it prints, and not by the bare word."""
+    short = s.t["batch"]["short"]
+    s.open_settle()
+    s.focus_on("short", ".sheet.show .up-sec")
+    days = [s.back(n) for n in (27, 26, 25)]
+    line = focus_line(s, s.named("short"), day_runs(days, s.view_month()), "5 程", "$2,310.00", "差 $380")
+    s.eq(s.totals(), line, "the line while the statement's month is held")
+
+    # From here the months answer without the statement, which is what a
+    # strip refounded on some other month holds of it: nothing.
+    def change(body: dict, path: str) -> None:
+        body["settlements"] = [x for x in body["settlements"] if x["id"] != short]
+
+    rewrite_settle(s, change)
+    s.reach(s.cell(27))
+    s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
+    s.wait(lambda: s.cell_state(1)[1] == "941", "the change made elsewhere")
+    s.eq(s.lit(), sorted(d.isoformat() for d in days), "the days lit from the ledger")
+    s.eq(s.totals(), line, "the line once the statement is known only from the ledger")
     s.eq(s.writes, [], "writes")
 
 

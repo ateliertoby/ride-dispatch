@@ -934,7 +934,8 @@ def test_credits_endpoint_carries_the_whole_ledger_with_its_states(client):
     assert by_ref["C1"]["batches"] == [{"id": paid, "confirmed_amount": 540.0,
                                         "amount": 540.0, "state": "paid",
                                         "dates": ["2026-07-01"], "orders": 1,
-                                        "has_image": False, "outstanding": 0.0}]
+                                        "has_image": False, "outstanding": 0.0,
+                                        "due_dates": [], "settled_on": "2026-07-03"}]
 
 
 def test_credits_endpoint_carries_payer_and_what_a_batch_is_still_owed(client):
@@ -1060,7 +1061,8 @@ def test_a_credits_row_carries_what_it_paid_of_each_batch(client):
     batches = client.get("/api/credits").get_json()["credits"][0]["batches"]
     assert batches == [{"id": settlement_id, "confirmed_amount": 3000.0, "amount": 2540.0,
                         "state": "partial", "dates": ["2026-07-01"], "orders": 1,
-                        "has_image": False, "outstanding": 460.0}]
+                        "has_image": False, "outstanding": 460.0,
+                        "due_dates": [], "settled_on": "2026-07-03"}]
 
 
 # ---- a statement the platform paid short ----

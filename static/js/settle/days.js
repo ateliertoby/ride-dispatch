@@ -93,6 +93,17 @@ export function statementName(batch, sameNameIndex = 0) {
     (sameNameIndex > 0 ? ' (' + (sameNameIndex + 1) + ')' : '');
 }
 
+// Collected statements in the order their list shows them. One still owed
+// money leads, since it is the one needing action; the rest are records,
+// newest first by the date they are named by: the latest due date a
+// statement prints, or the day it was confirmed when it prints none, so the
+// names read down the list in order. A statement with neither goes last.
+export function collectedOrder(batches) {
+  const on = b => (b.due_dates || []).reduce((a, d) => d > a ? d : a, '') || b.settled_on || '';
+  return batches.slice().sort((a, z) => (z.state === 'partial') - (a.state === 'partial') ||
+    on(z).localeCompare(on(a)) || z.id - a.id);
+}
+
 // The service days a statement covers, as runs of consecutive days. Inside
 // the month shown the days stand alone ('10日、18–20日'); once any date lies
 // outside it, a bare day number would be ambiguous, so every run carries its

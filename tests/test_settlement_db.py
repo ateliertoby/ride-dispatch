@@ -8,7 +8,7 @@ from ride_dispatch import db as db_module
 from ride_dispatch.db import (
     init_db, save_order, update_price, cancel_order, create_settlement, delete_settlement,
     get_settlement, get_settle_month, open_batches, insert_credit, allocate, mark_unpaid,
-    settlement_candidates, statement_image_path, image_extension,
+    settlement_candidates, statement_image_path, image_extension, list_credits,
 )
 from ride_dispatch.parser import Order
 
@@ -98,6 +98,25 @@ def test_a_batch_carries_the_due_dates_its_statement_prints(db_path):
     listed = {b["id"]: b["due_dates"] for b in get_settle_month(db_path, "2026-08", "ride", now=NOW)["settlements"]}
     assert listed == {with_dates: ["2026-08-25", "2026-08-27"], without: []}
     assert {b["id"]: b["due_dates"] for b in open_batches(db_path, "ride")} == listed
+
+
+def test_the_ledger_names_a_batch_as_the_month_does(db_path):
+    """A batch met through a credit, with its month not in hand, is named from
+    the ledger alone: it carries the same due dates and confirm date."""
+    seed(db_path, "A1", "2026-08-23 09:00:00", 280.0)
+    seed(db_path, "A2", "2026-08-24 12:30:00", 210.0)
+    stored = {"days": [
+        {"date": "2026-08-23", "rows": [{"order_id": "A1", "amount": 280.0, "settle_date": "2026-08-27"}]}]}
+    with_dates = create_settlement(db_path, "ride", ["A1"], 280.0, "2026-08-25", now=NOW, statement=stored)
+    without = create_settlement(db_path, "ride", ["A2"], 210.0, "2026-08-26", now=NOW)
+    cid = credit(db_path, "R-BOTH", 490.0)
+    allocate(db_path, cid, with_dates)
+    allocate(db_path, cid, without)
+    month = {b["id"]: (b["due_dates"], b["settled_on"])
+             for b in get_settle_month(db_path, "2026-08", "ride", now=NOW)["settlements"]}
+    [paid] = list_credits(db_path, "ride")
+    assert {b["id"]: (b["due_dates"], b["settled_on"]) for b in paid["batches"]} == month
+    assert month == {with_dates: (["2026-08-27"], "2026-08-25"), without: ([], "2026-08-26")}
 
 
 def test_delete_removes_image_file(db_path):

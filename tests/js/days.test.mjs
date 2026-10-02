@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   dayState, cellFigure, keyFigure, statementName, dayRunsLabel, countedDay, inMonthPart, fareGap,
-  otherLines, fitLine, waitedDays,
+  otherLines, fitLine, waitedDays, collectedOrder,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -193,6 +193,44 @@ test('statementName falls back on the confirm date when the statement prints no 
 test('statementName of a batch with neither date has no date in it', () => {
   assert.equal(statementName({ id: 42, settled_on: null, paid_on: '2026-10-12', due_dates: [] }, 0), '結算');
   assert.equal(statementName({ id: 43 }, 1), '結算 (2)');
+});
+
+test('collectedOrder is newest first by the latest due date, not by the day confirmed', () => {
+  const rows = [
+    stmt(['2026-09-14'], { id: 1, state: 'paid', settled_on: '2026-10-21' }),
+    stmt(['2026-09-28', '2026-10-02'], { id: 2, state: 'paid', settled_on: '2026-10-05' }),
+    stmt(['2026-09-29', '2026-09-30'], { id: 3, state: 'paid', settled_on: '2026-10-20' }),
+  ];
+  assert.deepEqual(collectedOrder(rows).map(b => b.id), [2, 3, 1]);
+  // The latest is the greatest, in whatever order the dates arrive.
+  rows[0].due_dates = ['2026-10-03', '2026-09-14'];
+  assert.deepEqual(collectedOrder(rows).map(b => b.id), [1, 2, 3]);
+});
+
+test('collectedOrder places a statement that prints no due date by the day it was confirmed', () => {
+  const rows = [
+    stmt(['2026-10-01'], { id: 1, state: 'paid' }),
+    stmt([], { id: 2, state: 'paid', settled_on: '2026-10-09' }),
+    { id: 3, state: 'paid', settled_on: '2026-09-30' },
+    stmt([], { id: 4, state: 'paid', settled_on: null }),
+  ];
+  assert.deepEqual(collectedOrder(rows).map(b => b.id), [2, 1, 3, 4]);
+});
+
+test('collectedOrder leads with a statement paid short, and breaks a tie by the later statement', () => {
+  const rows = [
+    stmt(['2026-10-02'], { id: 1, state: 'paid' }),
+    stmt(['2026-09-01'], { id: 2, state: 'partial' }),
+    stmt(['2026-10-02'], { id: 3, state: 'paid' }),
+    stmt(['2026-09-20'], { id: 4, state: 'partial' }),
+  ];
+  assert.deepEqual(collectedOrder(rows).map(b => b.id), [4, 2, 3, 1]);
+});
+
+test('collectedOrder leaves the list it was given as it was', () => {
+  const rows = [stmt(['2026-09-01'], { id: 1, state: 'paid' }), stmt(['2026-10-01'], { id: 2, state: 'paid' })];
+  collectedOrder(rows);
+  assert.deepEqual(rows.map(b => b.id), [1, 2]);
 });
 
 test('dayRunsLabel inside the month names days only', () => {

@@ -16,7 +16,7 @@ import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
 import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, fitLine, inMonthPart,
-         keyFigure, otherLines, statementName, waitedDays } from './days.js';
+         keyFigure, otherLines, statementName, waitedDays, collectedOrder } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -561,8 +561,10 @@ function nameOf(b) {
 
 // The focused statement in one line: its name, the days it lights, its legs,
 // its figure and where its money has got to. A batch the strip no longer
-// holds is known only from the ledger, which carries neither its statement
-// date nor the day it was collected, so the line says less of it.
+// holds is known only from the ledger, which carries what it is named by but
+// not the day it was collected, so the line names it the same and says less
+// of its state. Its name is not numbered there: the statements it would be
+// counted among are not loaded.
 //
 // The days and the leg count are each written with the dot before them, in
 // an element of their own: they are the two parts that can give way (see
@@ -576,7 +578,7 @@ function focusLineHtml() {
     : known.state === 'paid' ? '已收'
     : known.state === 'partial' ? '差 $' + $(known.outstanding) : '等過數';
   const pt = text => '<span class="pt">' + figs(text) + '</span>';
-  return '<div class="fline"><span class="ft"><span class="fi">' + pt(b ? nameOf(b) : '結算') +
+  return '<div class="fline"><span class="ft"><span class="fi">' + pt(b ? nameOf(b) : statementName(known)) +
     '<span data-part="days"> · ' + pt(dayRunsLabel(batchDatesOf(focus.id), viewMonth)) + '</span>' +
     '<span data-part="legs"> · ' + pt((b ? b.orders.length : known.orders) + ' 程') + '</span>' +
     ' · ' + pt(amount.dollars + '.' + amount.cents) +
@@ -760,11 +762,7 @@ function listBatches() {
     const wait = b => { const n = waitedDays(b, TODAY); return n === null ? -1 : n; };
     return rows.sort((a, z) => wait(z) - wait(a) || a.id - z.id);
   }
-  // The one still owed money leads, since it is the one needing action; the
-  // rest are records, newest statement first.
-  const on = b => b.settled_on || '';
-  return rows.sort((a, z) => (z.state === 'partial') - (a.state === 'partial') ||
-    on(z).localeCompare(on(a)) || z.id - a.id);
+  return collectedOrder(rows);
 }
 
 // One statement as a row: what it is at the left, its own figure at the
