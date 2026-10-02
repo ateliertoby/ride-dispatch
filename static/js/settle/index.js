@@ -44,10 +44,12 @@ let loading = new Map();
 // question nobody is asking any more.
 let gen = 0;
 // The merged read of every loaded month, which is what the whole page below
-// works off. monthTotals is the one part that stays apart: 'YYYY-MM' -> that
-// month's own totals, or null where the server withheld them.
-let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 },
-             monthTotals: {}, now: '' };
+// works off. Two parts stay apart, each 'YYYY-MM' -> what that month's own
+// payload said, or null where the server withheld it: monthTotals, the month's
+// totals, and earlier, the money still open before that month. Neither can be
+// taken from another month's payload: earlier is counted up to the month that
+// was asked for.
+let data = { orders: [], settlements: [], counts: {}, monthTotals: {}, earlier: {}, now: '' };
 // The bank ledger, exactly what /api/credits returns: every credit of the
 // platform, whatever the strip has loaded.
 let ledger = { counts: { open: 0, partial: 0, done: 0, archived: 0 }, sums: { open: 0, done: 0 }, credits: [] };
@@ -239,12 +241,14 @@ function remerge(book) {
   const orders = [];
   const settlements = [];
   const monthTotals = {};
+  const earlier = {};
   const seen = new Set();
   for (const key of loadedMonths()) {
     const p = months.get(key);
     // A month's totals are that month's alone, so each is kept under its own
     // key rather than taken from the freshest payload.
     monthTotals[key] = p.month_totals || null;
+    earlier[key] = p.earlier || null;
     for (const o of p.orders) orders.push(o);
     // Orders are scoped to their month server-side, but a batch straddling a
     // boundary comes back whole in both months' payloads, so it is taken
@@ -255,9 +259,9 @@ function remerge(book) {
       settlements.push(b);
     }
   }
-  // counts, totals and the clock span all time, so any payload carries them and
-  // the freshest one wins.
-  data = { orders, settlements, counts: book.counts, totals: book.totals, monthTotals, now: book.now };
+  // counts and the clock span all time, so any payload carries them and the
+  // freshest one wins.
+  data = { orders, settlements, counts: book.counts, monthTotals, earlier, now: book.now };
   NOW = data.now;
   TODAY = NOW.slice(0, 10);
   reindex();
@@ -440,26 +444,100 @@ function renderHeader() {
   renderFoot();
 }
 
+// ---- foot ----
+// Only what the operator has to act on, for the month the header names: a
+// statement paid short, bank credits no statement accounts for, and money
+// still open in an earlier month. The month's own totals are the keys in the
+// header; the last item is here because those keys are per month, and open
+// money in a month not on screen would otherwise be seen only by paging back
+// to look for it.
+//
+// Each item is { kind, label, amount, attr }. amount is null where the server
+// withheld the figure. attr is what makes the item a control, and is empty
+// where a tap has nowhere to lead.
+function footItems() {
+  const items = [];
+  const t = data.monthTotals[viewMonth] || null;
+  if (t && t.short > 0) {
+    // The statements the shortfall can be on: those paid short with a leg or
+    // a 舉牌 line in the month. One is named; several are counted.
+    const on = data.settlements.filter(b =>
+      b.state === 'partial' && batchSpan(b).some(d => monthKey(d) === viewMonth));
+    const which = on.length === 1 ? ' · ' + nameOf(on[0]) : on.length ? ' ' + on.length + ' 張' : '';
+    items.push({ kind: 'short', label: '收少咗' + which, amount: t.short, attr: ' data-short="1"' });
+  }
+  const open = openCredits();
+  if (open.length) {
+    items.push({ kind: 'open', label: '入數未對 ' + open.length + ' 筆', amount: ledger.sums.open,
+                 attr: ' data-credits="1"' });
+  }
+  // Undefined while the month is not loaded, null where the server withheld
+  // the figure. Withheld is not nothing: the item stands, with no figure and,
+  // since the payload then names no month, no tap.
+  const e = data.earlier[viewMonth];
+  if (e === null || (e && e.open > 0)) {
+    items.push({ kind: 'prior', label: '之前月份未清', amount: e ? e.open : null,
+                 attr: e && e.month ? ' data-earlier="' + e.month + '"' : '' });
+  }
+  return items;
+}
+
+// What the foot says with no item in it. 全部啱數 is a claim about every
+// figure an item could have carried, so it is made only when the month's
+// totals and the earlier months' figure are both in hand. A month still
+// loading shows a dash, as its keys do; a month whose totals the server
+// withheld says so in words, since nothing else in the foot would.
+function footRestHtml() {
+  const stated = data.monthTotals[viewMonth] && data.earlier[viewMonth];
+  if (stated) return '<div class="fnote ok">全部啱數</div>';
+  if (!months.has(viewMonth)) return '<div class="fnote wait">—</div>';
+  return '<div class="fnote">今個月計唔到準數</div>';
+}
+
+// A foot figure's markup and its length in cells of the dollars' size, as a
+// total key's is counted. A withheld figure is a dash.
+function footFigure(amount) {
+  if (amount === null) return { html: '—', n: 1 };
+  const f = keyFigure(amount);
+  const dollars = tight(f.dollars), cts = tight('.' + f.cents);
+  return { html: dollars + '<span class="ct">' + cts + '</span>',
+           n: +cellsOf(dollars) + +cellsOf(cts) * 0.7 };
+}
+
+// How wide a foot label sets at its full size, in px, counted rather than
+// measured so the stylesheet can size the foot before it is laid out. An
+// upper bound: an ideograph and the middle dot at 1em, a space at .3em, and
+// anything else at the figure face's .65em cell, each with the label's
+// .14em of letter-spacing, at 10.5px.
+function labelWidth(text) {
+  let em = 0;
+  for (const ch of text) em += (ch === ' ' ? 0.3 : ch === '·' || ch > '⹿' ? 1 : 0.65) + 0.14;
+  return em * 10.5;
+}
+
 function renderFoot() {
   const foot = byId('settle-foot');
   // A focus takes the foot: the lit days say which, and this line says what.
-  if (focus) { foot.innerHTML = focusLineHtml(); return; }
-  // Totals span the whole book, not the months the strip has loaded: old
-  // unsettled days are exactly the ones the operator is here to clear. The
-  // server computes them, so the tabs and the calendar cannot disagree about
-  // the same money.
-  // Only what is still to be done: a matched or archived credit is finished
-  // business.
-  const open = openCredits();
-  const vals = [money(data.totals.unsettled), '$' + $(data.totals.awaiting)]
-    .concat(open.length ? ['$' + $(ledger.sums.open)] : []).map(tight);
-  // The stylesheet sizes the figures so that all of them fit the one line.
-  foot.style.setProperty('--n', vals.reduce((n, f) => n + +cellsOf(f), 0).toFixed(2));
-  foot.innerHTML =
-    '<div class="warn"><span class="k">未結算</span><span class="v">' + vals[0] + '</span></div>' +
-    '<div><span class="k">等過數</span><span class="v">' + vals[1] + '</span></div>' +
-    (open.length ? '<button class="tot queue" data-credits="1"><span class="k">入數未對 ' + open.length +
-      ' 筆</span><span class="v">' + vals[2] + '</span></button>' : '');
+  if (focus) { foot.dataset.n = '0'; foot.innerHTML = focusLineHtml(); return; }
+  const items = footItems();
+  foot.dataset.n = String(items.length);
+  if (!items.length) { foot.innerHTML = footRestHtml(); return; }
+  const figures = items.map(it => footFigure(it.amount));
+  // What each cell needs at full size: the wider of its label and its figure
+  // (15px, in cells of .65em). --w is the width the stylesheet sets against
+  // the room there is, to shrink every label and figure together when they
+  // do not fit. Three cells take what each needs, so they need the sum; one
+  // or two share the width equally, so each needs as much as the widest.
+  const need = items.map((it, i) => Math.max(labelWidth(it.label), figures[i].n * 0.65 * 15));
+  const w = items.length > 2 ? need.reduce((a, b) => a + b, 0) : items.length * Math.max(...need);
+  foot.style.setProperty('--w', w.toFixed(1));
+  foot.innerHTML = items.map((it, i) => {
+    // A cell that leads nowhere is not a control.
+    const tag = it.attr ? 'button' : 'div';
+    return '<' + tag + ' class="fkey ' + it.kind + (it.kind === 'short' ? ' st-short' : '') +
+      (it.amount === null ? ' unknown' : '') + '"' + it.attr + '><span class="k">' + figs(it.label) +
+      '</span><span class="v">' + figures[i].html + '</span><i class="mk"></i></' + tag + '>';
+  }).join('');
 }
 
 // A statement's name. Its place among the loaded statements confirmed on the
@@ -2005,7 +2083,12 @@ export const settleView = {
     });
     byId('settle-foot').addEventListener('click', e => {
       if (e.target.closest('[data-unfocus]')) { clearFocus(); return; }
-      if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
+      if (e.target.closest('[data-short]')) { setLens('received'); return; }
+      if (e.target.closest('[data-credits]')) { openView({ kind: 'queue' }); return; }
+      // The earliest month with open money, on the calendar of whole fares:
+      // the days that hold it are what the operator goes there to see.
+      const prior = e.target.closest('[data-earlier]');
+      if (prior) { setLens('fare'); goMonth(prior.dataset.earlier, false); }
     });
     // The whole calendar area, not just the week rows: an empty day and the
     // padding around the strip answer nothing else, so a tap there is the way
@@ -2098,6 +2181,9 @@ export const settleView = {
     // Each visit starts from the month's whole fare: the lens is where the
     // operator was looking, not a setting.
     setLens('fare');
+    // The foot has nothing in it until it is first drawn; drawn now, it says
+    // that the month is not in yet, as the keys do.
+    renderFoot();
     // Loaded again on every showing: nothing was drawn while the view was
     // hidden, and the load ends by painting the open sheet.
     return load();

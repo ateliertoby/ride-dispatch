@@ -425,7 +425,7 @@ LONG_FARE = 12345.67
 def stress_settle(body: dict, today: date) -> None:
     """Rewrite one month's answer from /api/settle so the view carries what
     strains it: a five-digit fare with cents on one day, seven-figure amounts
-    with cents on a short-paid and an awaiting batch and in the totals, and a
+    with cents on a short-paid and an awaiting batch and in the foot, and a
     batch whose days are three separate runs either side of the first of
     today's month."""
     first = today.replace(day=1)
@@ -442,7 +442,10 @@ def stress_settle(body: dict, today: date) -> None:
     for o in body["orders"]:
         if o["order_id"] == seed_demo_db._oid(801):
             o["price"] = LONG_FARE
-    body["totals"].update(unsettled=LONG_AMOUNT, awaiting=1048576.5)
+    # The foot's figures of the month the short-paid batch is counted in.
+    if body.get("month_totals") and body["month_totals"]["short"] > 0:
+        foot_short(body, LONG_AMOUNT)
+        foot_earlier(body, 1048576.5, None)
 
 
 def stress_credits(body: dict, today: date) -> None:
@@ -463,17 +466,119 @@ def stress_credits(body: dict, today: date) -> None:
     body["sums"]["open"] = LONG_AMOUNT
 
 
+def rewrite(ctx, settle=None, credits=None) -> None:
+    """From now on, every page of this context is served the settle view's
+    data as these leave it. Each is called with the answer's body and the
+    path that was asked for, and rewrites the body in place: `settle` for
+    /api/settle, `credits` for /api/credits."""
+    def through(change):
+        def handler(route):
+            body = route.fetch().json()
+            url = urllib.parse.urlsplit(route.request.url)
+            change(body, url.path + "?" + url.query)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+        return handler
+    if settle:
+        ctx.route("**/api/settle?*", through(settle))
+    if credits:
+        ctx.route("**/api/credits?*", through(credits))
+
+
 def stress_strip(ctx, today: date) -> None:
     """From now on, every page of this context is served the settle view's
     data rewritten by the two functions above."""
-    def rewrite(change):
-        def handler(route):
-            body = route.fetch().json()
-            change(body, today)
-            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
-        return handler
-    ctx.route("**/api/settle?*", rewrite(stress_settle))
-    ctx.route("**/api/credits?*", rewrite(stress_credits))
+    rewrite(ctx, lambda body, path: stress_settle(body, today),
+            lambda body, path: stress_credits(body, today))
+
+
+# ---- the settle view's foot, item by item ----
+# The foot holds up to three items, and which of them a month has depends on
+# where the seed's days fall around the first of the month. These rewrite one
+# month's answer so that it has exactly the items wanted, whatever the date.
+
+def foot_month(today: date) -> str:
+    """The month the seed's shortfall is counted in: that of the leg the
+    statement paid short left unpaid."""
+    return seed_demo_db.day(today, 26)[:7]
+
+
+def foot_path(today: date) -> str:
+    """What the page asks for that month of the platform the seed's
+    statements are on."""
+    return f"/api/settle?month={foot_month(today)}&platform=ride"
+
+
+def month_before(month: str) -> str:
+    y, m = int(month[:4]), int(month[5:])
+    return f"{y - (m == 1)}-{(m - 2) % 12 + 1:02d}"
+
+
+def foot_short(body: dict, amount: float) -> None:
+    """Make a month's shortfall `amount`. The totals keep their identity: a
+    shortfall made smaller goes to what was received, one made larger is
+    added to the month's fare. At zero the statement paid short is a
+    collected one."""
+    t = body.get("month_totals")
+    if t:
+        if amount < t["short"]:
+            t["received"] = round(t["received"] + t["short"] - amount, 2)
+        else:
+            t["fare"] = round(t["fare"] + amount - t["short"], 2)
+        t["short"] = amount
+    if not amount:
+        for b in body["settlements"]:
+            if b["state"] == "partial":
+                b.update(state="paid", received=b["confirmed_amount"], outstanding=0.0)
+
+
+def foot_second_short(body: dict, settled_on: str) -> None:
+    """Give the month a second statement paid short: a copy of the seeded
+    one under another id and another statement date."""
+    first = next(b for b in body["settlements"] if b["id"] == seed_demo_db.BATCH["short"])
+    body["settlements"].append(dict(first, id=902, settled_on=settled_on))
+
+
+def foot_earlier(body: dict, amount: float, month) -> None:
+    """Make the money still open before a month `amount`, the earliest of it
+    in `month` ('YYYY-MM', or None when there is none)."""
+    body["earlier"] = {"open": amount, "month": month}
+
+
+def foot_credits(body: dict, n: int, total: float) -> None:
+    """Rewrite the answer from /api/credits so that `n` credits are unmatched,
+    `total` between them. Those the seed left unmatched beyond `n` are made
+    matched ones; any still wanted are copies of one of them."""
+    waiting = [c for c in body["credits"] if c["state"] in ("open", "partial")]
+    for c in waiting[n:]:
+        c.update(state="done", remaining=0.0)
+    for i in range(len(waiting), n):
+        body["credits"].append(dict(waiting[0], id=950 + i, ref=f"DEMO-REF-095{i}", proposals=[],
+                                    batches=[], combo=None))
+    body["counts"].update(open=n, partial=0)
+    body["sums"]["open"] = total
+
+
+# The longest figure a foot item is expected to hold beside two others.
+FOOT_LONG = 12345.67
+
+
+def stress_foot(ctx, today: date) -> None:
+    """From now on, every page of this context is served a foot of three
+    items at their longest in the month foot_month names: five-digit amounts
+    with cents, a two-digit count of credits, and a statement named by a
+    two-digit month and day."""
+    month = foot_month(today)
+
+    def settle(body: dict, path: str) -> None:
+        if path != foot_path(today):
+            return
+        foot_short(body, FOOT_LONG)
+        foot_earlier(body, FOOT_LONG, month_before(month))
+        for b in body["settlements"]:
+            if b["id"] == seed_demo_db.BATCH["short"]:
+                b["settled_on"] = month[:4] + "-12-29"
+
+    rewrite(ctx, settle, lambda body, path: foot_credits(body, 12, FOOT_LONG))
 
 
 # What POST /api/statements/read answers for a statement that can be settled,

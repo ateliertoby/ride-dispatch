@@ -37,8 +37,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (DEVICE, LOGIN_PATH, LONG_AMOUNT, ROOT, TIMEOUT_MS, TIMEZONE, Driver,  # noqa: E402
-                     Server, copy_app, demo_now, new_context, paste_message, stress_strip)
+from harness import (DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, TIMEOUT_MS, TIMEZONE,  # noqa: E402
+                     Driver, Server, copy_app, demo_now, foot_credits, foot_earlier, foot_month,
+                     foot_second_short, foot_short, month_before, new_context, paste_message,
+                     rewrite, stress_foot, stress_strip)
 
 CHECKS = []
 
@@ -196,6 +198,51 @@ KEYS_JS = """
     inside: fig.left >= box.left - 0.5 && fig.right <= box.right - parseFloat(cs(key).paddingRight) + 0.5,
   };
 })
+"""
+
+# The settle view's foot: its box, and each thing in it with what a layout
+# check needs. `inside` is whether the label and the figure end before the
+# cell's own padding does.
+FOOT_JS = """
+() => {
+  const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
+  const cs = e => getComputedStyle(e);
+  const foot = seen('.foot'), box = seen('.foot .foot-in');
+  const cells = [...box.children].map(e => {
+    const k = e.querySelector('.k'), v = e.querySelector('.v'), mk = e.querySelector('.mk'), ct = e.querySelector('.ct');
+    const r = e.getBoundingClientRect(), edge = r.right - parseFloat(cs(e).paddingRight) + 0.5;
+    const ends = x => x.getBoundingClientRect().right <= edge && x.getBoundingClientRect().left >= r.left - 0.5;
+    return {
+      tag: e.tagName, cls: e.className, text: e.textContent, label: k ? k.textContent : null,
+      figure: v ? v.textContent : null, width: r.width, height: r.height, left: r.left, right: r.right,
+      ink: cs(v || e).color, face: v ? cs(v).fontFamily : '', size: v ? parseFloat(cs(v).fontSize) : null,
+      labelSize: k ? parseFloat(cs(k).fontSize) : null, labelHeight: k ? k.getBoundingClientRect().height : null,
+      cents: ct ? parseFloat(cs(ct).fontSize) / parseFloat(cs(v).fontSize) : null,
+      figTop: v ? Math.round(v.getBoundingClientRect().top) : null, figHeight: v ? v.getBoundingClientRect().height : null,
+      rule: mk ? [mk.getBoundingClientRect().width, mk.getBoundingClientRect().height, cs(mk).backgroundColor, cs(mk).backgroundImage] : null,
+      ground: cs(e).backgroundColor, edge: cs(e).borderLeftWidth,
+      inside: (!k || ends(k)) && (!v || ends(v)),
+    };
+  });
+  return {
+    height: foot.getBoundingClientRect().height, fixed: cs(foot).position,
+    bottom: Math.round(window.innerHeight - foot.getBoundingClientRect().bottom),
+    left: box.getBoundingClientRect().left, right: box.getBoundingClientRect().right,
+    inView: !!foot.closest('#view-settle'), cells,
+    lined: [foot, ...foot.querySelectorAll('*')].filter(e => cs(e).textDecorationLine !== 'none').length,
+    wide: document.documentElement.scrollWidth > window.innerWidth,
+  };
+}
+"""
+
+# Every element of the month's total keys, the calendar, the statement list
+# and the foot that is underlined, among those on screen.
+UNDERLINED_JS = """
+() => [...document.querySelectorAll('#settle-lens, #view-settle .cal, #settle-list, #view-settle .foot')]
+  .filter(e => e.getClientRects().length)
+  .flatMap(e => [e, ...e.querySelectorAll('*')])
+  .filter(e => getComputedStyle(e).textDecorationLine !== 'none')
+  .map(e => e.className || e.tagName)
 """
 
 # The week row at the top of the strip, read the way the page reads it: the
@@ -636,6 +683,14 @@ class Session(Driver):
     def totals(self) -> list:
         """The settle view's foot, cell by cell: label and figure run together."""
         return self.texts(".foot .foot-in > *")
+
+    def queue_text(self) -> str:
+        """The foot's item for unmatched bank credits: label and figure."""
+        return self.text(".foot [data-credits]")
+
+    def foot_look(self) -> dict:
+        """The settle view's foot as it is drawn."""
+        return self.page.evaluate(FOOT_JS)
 
     def keys_text(self) -> list:
         """The month's total keys, key by key: label and figure run together."""
@@ -2313,10 +2368,8 @@ def settle_boot(s: Session) -> None:
     book = s.api("GET", settle_path(s.today))
     ledger = s.api("GET", CREDITS)
     waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
-    s.eq(s.totals(),
-         [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}",
-          f"入數未對 {len(waiting)} 筆${fmt(ledger['sums']['open'])}"], "totals")
-    s.expect(s.count(".foot .warn") and s.count(".foot [data-credits]"), "the totals' amber figure and queue link")
+    s.eq(s.totals(), foot_texts(book, ledger, month_key(s.today)), "the foot")
+    s.expect(waiting and s.count(".foot [data-credits]") == 1, "the way into the queue of unmatched credits")
     n = book["counts"]
     s.eq(s.texts(".tabs .tab"), [f"接送{n['ride']}", f"滴滴{n['didi']}", f"Uber{n['uber']}", f"熊貓{n['foodpanda']}"], "tabs")
     s.eq(s.text(".tab.on"), f"接送{n['ride']}", "highlighted tab")
@@ -2401,7 +2454,7 @@ def settle_platform(s: Session) -> None:
     s.eq(s.top_week(), week_id(s.today.replace(day=1)), "the row at the top after switching")
     s.eq(s.month_text(), month_label(s.today, now=True), "month button after switching")
     book = s.api("GET", settle_path(s.today, "didi"))
-    s.eq(s.totals(), [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}"], "totals")
+    s.eq(s.totals(), foot_texts(book, s.api("GET", "/api/credits?platform=didi"), month_key(s.today)), "the foot")
     s.eq(s.cell_state(10), ("unsettled", "88"), "a day of the chosen platform")
     s.tap(s.cell(10))
     s.eq(s.sub(), "滴滴", "day sheet subtitle")
@@ -2820,8 +2873,7 @@ def settle_focus(s: Session) -> None:
     s.open_settle()
     days = [s.back(n) for n in (27, 26, 25)]
     relation = sorted(d.isoformat() for d in days)
-    usual = s.totals()
-    s.eq(len(usual), 3, "the foot's usual cells")
+    s.eq(s.totals(), want_foot(s), "the foot's items before a focus")
     # From a list: the statement's row opens its sheet, and the sheet's key
     # leads back to the calendar.
     s.tap('.lkey[data-lens="received"]')
@@ -2885,7 +2937,8 @@ def settle_focus(s: Session) -> None:
     # ✕ puts it down, and the foot is its usual self again.
     s.tap(".foot [data-unfocus]")
     s.eq((s.lit(), s.count("#grid .dim"), s.count(".foot .fline")), ([], 0, 0), "after ✕")
-    s.eq([t[:3] for t in s.totals()], [t[:3] for t in usual], "the foot after ✕")
+    s.eq(s.totals(), want_foot(s), "the foot's items after ✕")
+    s.expect(s.count(".foot .fkey"), "the month of the focused statement has no item to come back")
     # So does a tap on empty calendar.
     s.focus_on("short", ".sheet.show .up-sec")
     s.eq(s.lit(), relation, "the days lit a second time")
@@ -2951,14 +3004,13 @@ def settle_figures(s: Session) -> None:
 
 @check("settle.cells-under-stress")
 def settle_cells_stress(s: Session) -> None:
-    """A five-digit fare with cents in a cell and seven-figure totals in the
-    foot: the figure is set smaller, whole, inside its column, and the foot
-    stays on its one line."""
+    """A five-digit fare with cents in a cell and seven-figure amounts in the
+    foot: the figure is set smaller, whole, inside its column, and the foot's
+    items stay whole on its one line."""
     stress_strip(s.ctx, s.today)
     s.open_settle()
     s.reach(s.cell(27))
     s.eq(s.cell_state(2), ("unsettled", "12345.67"), "a five-digit fare with cents")
-    long = fmt(LONG_AMOUNT)
     for scheme in SCHEMES:
         s.page.emulate_media(color_scheme=scheme)
         for width in PHONE_WIDTHS:
@@ -2967,46 +3019,67 @@ def settle_cells_stress(s: Session) -> None:
             big = s.look(2)
             s.expect(6 <= big["size"] < 13 and round(big["cents"], 2) == 0.7, f"the long figure at {width}: {big}")
     s.page.emulate_media(color_scheme="dark")
+    # The month the shortfall is counted in holds all three of the foot's items.
+    s.to_month(s.back(26))
     for width in STRIP_WIDTHS:
         s.resize(width)
         cells_hold(s, f"under stress at {width}")
-        # The foot's three figures stay whole on its one line.
-        foot = s.page.evaluate("""() => {
-          const f = [...document.querySelectorAll('.foot-in')].find(e => e.getClientRects().length);
-          const box = f.getBoundingClientRect();
-          const cells = [...f.querySelectorAll('.v')].map(e => e.getBoundingClientRect());
-          return { tops: [...new Set(cells.map(r => Math.round(r.top)))].length,
-                   inside: cells.every(r => r.left >= box.left - 0.5 && r.right <= box.right + 0.5),
-                   apart: cells.every((r, i) => !i || r.left >= cells[i - 1].right) };
-        }""")
-        s.eq(foot, {"tops": 1, "inside": True, "apart": True}, f"the foot under stress at {width}")
-    s.eq(s.totals(), [f"未結算${long}", "等過數$1048576.50", f"入數未對 8 筆${long}"], "totals under stress")
+        foot_holds(s, 3, f"under stress at {width}")
+    long = money2(LONG_AMOUNT)
+    s.eq(s.totals(), [f"收少咗 · {md_slash(s.back(23))} 結算{long}", f"入數未對 8 筆{long}", "之前月份未清$1,048,576.50"],
+         "the foot under stress")
     s.eq(s.writes, [], "writes")
+
+
+# ---- settle view: the foot ----
+
+def foot_holds(s: Session, n: int, what: str) -> dict:
+    """The foot holding `n` items: each label and figure whole inside its
+    cell, all on one line and at one size, the cells side by side inside the
+    foot, nothing underlined and the page not scrolling sideways. Returns the
+    foot as drawn."""
+    f = s.foot_look()
+    cells = f["cells"]
+    s.eq([c["cls"].split()[0] for c in cells], ["fkey"] * n, f"the foot's cells {what}")
+    s.expect(all(c["inside"] for c in cells), f"a label or a figure runs out of its cell {what}: {[c['text'] for c in cells if not c['inside']]}")
+    s.eq(len({c["figTop"] for c in cells}), 1, f"lines the foot's figures stand on {what}")
+    s.eq(({c["figHeight"] for c in cells}, {c["labelHeight"] for c in cells}), ({20}, {14}), f"a figure or a label wrapped {what}")
+    s.eq((len({c["size"] for c in cells}), len({c["labelSize"] for c in cells})), (1, 1), f"sizes the figures and the labels are set in {what}")
+    s.expect(cells[0]["left"] >= f["left"] - 0.5 and cells[-1]["right"] <= f["right"] + 0.5
+             and all(c["left"] >= cells[i]["right"] - 0.5 for i, c in enumerate(cells[1:])),
+             f"the foot's cells overlap or leave the foot {what}")
+    s.expect(all(c["height"] >= 44 for c in cells), f"a foot cell under 44px {what}")
+    s.eq((f["lined"], f["wide"]), (0, False), f"underlined elements in the foot, and the page scrolling sideways, {what}")
+    return f
 
 
 @check("settle.foot")
 def settle_foot(s: Session) -> None:
+    """The foot as the seed leaves it on the current month, which always
+    holds unmatched bank credits and money open in an earlier month: each a
+    ruled cell that is a button, neither underlined."""
     s.open_settle()
     book, ledger = s.api("GET", settle_path(s.today)), s.api("GET", CREDITS)
     waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
-    s.eq(s.totals(), [f"未結算${fmt(book['totals']['unsettled'])}", f"等過數${fmt(book['totals']['awaiting'])}",
-                      f"入數未對 {len(waiting)} 筆${fmt(ledger['sums']['open'])}"], "totals against the server's")
-    s.eq(s.texts(".foot .k"), ["未結算", "等過數", f"入數未對 {len(waiting)} 筆"], "labels")
-    # Amber is what the platform still owes, blue the bank money not matched.
-    s.eq([s.colour(".foot .warn .v"), s.colour(".foot .queue .v")], [s.token("--amber"), s.token("--blue")], "the figures' colours")
-    s.expect("B612 Mono" in s.colour(".foot .v", "fontFamily"), "the figures are not in the figure face")
-    foot = s.page.evaluate("""() => {
-      const seen = q => [...document.querySelectorAll(q)].find(e => e.getClientRects().length);
-      const f = seen('.foot'), q = seen('.foot [data-credits]'), cs = getComputedStyle(f);
-      return { fixed: cs.position, bottom: Math.round(window.innerHeight - f.getBoundingClientRect().bottom),
-               inView: !!f.closest('#view-settle'), tag: q.tagName,
-               tall: q.getBoundingClientRect().height >= 44, line: getComputedStyle(q.querySelector('.v')).textDecorationLine,
-               height: f.getBoundingClientRect().height,
-               room: parseFloat(getComputedStyle(seen('.cal')).paddingBottom) };
-    }""")
-    s.eq({k: foot[k] for k in ("fixed", "bottom", "inView", "tag", "tall", "line")},
-         {"fixed": "fixed", "bottom": 0, "inView": True, "tag": "BUTTON", "tall": True, "line": "underline"}, "the foot")
-    s.expect(foot["room"] >= foot["height"], f"the strip's end does not clear the foot: {foot}")
+    s.eq(s.totals(), foot_texts(book, ledger, month_key(s.today)), "the foot against the server's figures")
+    # Whatever the date, the seed's oldest open day is in an earlier month.
+    s.expect(waiting and book["earlier"]["open"] > 0, "the seed leaves the current month without the two items")
+    f = s.foot_look()
+    queue, prior = ([c for c in f["cells"] if kind in c["cls"].split()][0] for kind in ("open", "prior"))
+    s.eq((queue["label"], queue["figure"], prior["label"], prior["figure"]),
+         (f"入數未對 {len(waiting)} 筆", money2(ledger["sums"]["open"]), "之前月份未清", money2(book["earlier"]["open"])),
+         "label over figure")
+    # Blue is bank money not matched, amber what is still owed; money from
+    # earlier months mixes states, so no state rule stands under it.
+    s.eq((queue["ink"], prior["ink"], prior["rule"][2:]), (s.token("--blue"), s.token("--amber"), [CLEAR, "none"]), "the figures' colours")
+    s.eq(({c["tag"] for c in f["cells"]}, {c["ground"] for c in f["cells"]}, [c["edge"] for c in f["cells"]]),
+         ({"BUTTON"}, {CLEAR}, ["0px"] + ["1px"] * (len(f["cells"]) - 1)), "the cells are buttons on the foot's ground, ruled apart")
+    s.expect(all("B612 Mono" in c["face"] and round(c["cents"], 2) == 0.7 for c in f["cells"]), "the figures' face and their cents")
+    s.eq({k: f[k] for k in ("fixed", "bottom", "inView")}, {"fixed": "fixed", "bottom": 0, "inView": True}, "the foot")
+    foot_holds(s, len(f["cells"]), "on the current month")
+    room = s.page.evaluate("() => parseFloat(getComputedStyle([...document.querySelectorAll('.cal')]"
+                           ".find(e => e.getClientRects().length)).paddingBottom)")
+    s.expect(room >= f["height"], f"the strip's end does not clear the foot: {room}, {f['height']}")
     # The strip's true end clears the foot, and reaching it still loads on.
     weeks = len(s.weeks())
     s.page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
@@ -3018,10 +3091,304 @@ def settle_foot(s: Session) -> None:
     s.close_sheets()
     # Nothing unmatched: no way in. Another platform has no credits at all.
     s.tap(".tab", has_text="滴滴")
-    s.eq((len(s.totals()), s.count(".foot [data-credits]")), (2, 0), "the foot with nothing unmatched")
+    s.eq((s.totals(), s.count(".foot [data-credits]")), (want_foot(s, "didi"), 0), "the foot with nothing unmatched")
     # The foot belongs to the view: the day view shows its own.
     s.go_day()
-    s.eq((s.count(".foot [data-credits]"), s.count(".foot .foot-in")), (0, 1), "feet on the day view")
+    s.eq((s.count(".foot .fkey"), s.count(".foot .foot-in")), (0, 1), "feet on the day view")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.foot-holds-only-what-needs-action")
+def settle_foot_items(s: Session) -> None:
+    """Every combination of the three items, on the month the seed's
+    shortfall is counted in, in both palettes at both phone widths: one or
+    two share the width, three take what each needs, none of them leaves one
+    plain line, and the foot is one height throughout."""
+    month = foot_month(s.today)
+    first = date.fromisoformat(month + "-01")
+    case = {}
+
+    def book(body: dict, path: str) -> None:
+        if path != settle_path(first):
+            return
+        if not case["short"]:
+            foot_short(body, 0.0)
+        elif case["short"] > 1:
+            foot_second_short(body, s.back(20).isoformat())
+        foot_earlier(body, 1320.0 if case["earlier"] else 0.0, month_before(month) if case["earlier"] else None)
+
+    def ledger(body: dict, path: str) -> None:
+        if not case["credits"]:
+            foot_credits(body, 0, 0.0)
+
+    def serve(short: int, credits: bool, earlier: bool) -> None:
+        """Have the server's answers rewritten for this case, and the page
+        ask again: a change of platform throws its months away."""
+        case.update(short=short, credits=credits, earlier=earlier)
+        s.tap(".tab", has_text="滴滴")
+        s.tap(".tab", has_text="接送")
+        s.to_month(first)
+
+    case.update(short=1, credits=True, earlier=True)
+    rewrite(s.ctx, book, ledger)
+    s.open_settle()
+    named = f"收少咗 · {md_slash(s.back(23))} 結算$380.00"
+    queue, prior = "入數未對 3 筆$4,440.00", "之前月份未清$1,320.00"
+    heights = set()
+    for short, credits, earlier, want in (
+            (1, False, False, [named]), (0, True, False, [queue]), (0, False, True, [prior]),
+            (1, True, False, [named, queue]), (2, True, False, ["收少咗 2 張$380.00", queue]),
+            (1, True, True, [named, queue, prior])):
+        serve(short, credits, earlier)
+        s.eq(s.totals(), want, "the foot's items")
+        for scheme in SCHEMES:
+            s.page.emulate_media(color_scheme=scheme)
+            amber, green, blue = (s.token(n) for n in ("--amber", "--green", "--blue"))
+            for width in PHONE_WIDTHS:
+                s.resize(width)
+                where = f"with {want} at {width} ({scheme})"
+                f = foot_holds(s, len(want), where)
+                heights.add(f["height"])
+                cells = f["cells"]
+                s.eq({c["tag"] for c in cells}, {"BUTTON"}, f"what a foot item is {where}")
+                if len(cells) < 3:
+                    # The cells' own padding differs by the rule between them.
+                    s.expect(max(c["width"] for c in cells) - min(c["width"] for c in cells) <= 1.5
+                             and abs(sum(c["width"] for c in cells) - (f["right"] - f["left"])) <= 0.5,
+                             f"the cells do not share the foot's width {where}: {[c['width'] for c in cells]}")
+                for c in cells:
+                    kind = c["cls"].split()[1]
+                    s.eq(c["ink"], {"short": amber, "open": blue, "prior": amber}[kind], f"the ink of {kind} {where}")
+                    if kind == "short":
+                        # What came, a break, what is owed: the mark a short-paid day wears.
+                        s.expect(c["rule"][:2] == [24, 3] and green in c["rule"][3] and amber in c["rule"][3],
+                                 f"the rule under the shortfall {where}: {c['rule']}")
+                    else:
+                        s.eq(c["rule"][2:], [CLEAR, "none"], f"a rule under {kind} {where}")
+            s.resize(390)
+        s.page.emulate_media(color_scheme="dark")
+    # All three in place: nothing in the keys, the calendar, the list or the
+    # foot is underlined, under a calendar lens and under a list lens.
+    s.eq(s.page.evaluate(UNDERLINED_JS), [], "underlined on the calendar")
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq(s.page.evaluate(UNDERLINED_JS), [], "underlined under 未結算")
+    s.tap('.lkey[data-lens="received"]')
+    s.expect(s.list_rows(), "no rows in the list to judge")
+    s.eq(s.page.evaluate(UNDERLINED_JS), [], "underlined on the list")
+    s.eq(s.totals(), [named, queue, prior], "the foot under a list")
+    s.tap('.lkey[data-lens="fare"]')
+    # None of them: one plain line that is not a control.
+    serve(0, False, False)
+    s.eq(s.totals(), ["全部啱數"], "the foot with nothing to act on")
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        for width in PHONE_WIDTHS:
+            s.resize(width)
+            f = s.foot_look()
+            line = f["cells"][0]
+            s.eq((len(f["cells"]), line["tag"], line["ink"], line["ground"], f["lined"], f["wide"]),
+                 (1, "DIV", s.token("--green"), CLEAR, 0, False), f"the plain line at {width} ({scheme})")
+            heights.add(f["height"])
+        s.resize(390)
+    s.page.emulate_media(color_scheme="dark")
+    s.eq(s.count(".foot button") + s.count(".foot .fkey"), 0, "controls or cells beside the plain line")
+    s.eq(len(heights), 1, f"the foot's height from none to three items: {sorted(heights)}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.the-keys-and-the-foot-add-up-to-the-months-fare")
+def settle_identity(s: Session) -> None:
+    """本月車費 = 已收 + 等過數 + 未結算 + 收少咗, in cents, read off the
+    screen for each month the seed reaches: the four keys and the foot's
+    shortfall, which is absent where there is none."""
+    cur = s.today.replace(day=1)
+    s.open_settle()
+    shorts = []
+    for m in (cur, add_months(cur, -1), add_months(cur, -2)):
+        s.to_month(m)
+        key = {name: cents(s.text(f'.lkey[data-lens="{name}"] .v')) for name, _ in TOTAL_KEYS}
+        short = cents(s.text(".foot [data-short] .v")) if s.count(".foot [data-short]") else 0
+        s.eq(key["fare"], key["received"] + key["awaiting"] + key["unsettled"] + short,
+             f"the keys and the foot's shortfall of {month_key(m)} against its fare: {key}, {short}")
+        s.eq(short, round(s.api("GET", settle_path(m))["month_totals"]["short"] * 100), f"the foot's shortfall of {month_key(m)} against the server's")
+        shorts.append(short)
+    s.eq(sorted(shorts), [0, 0, 38000], "the months holding the seed's shortfall")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.three-foot-items-hold-on-one-line")
+def settle_foot_narrow(s: Session) -> None:
+    """Three items at their longest (five-digit amounts with cents, twelve
+    credits, a statement named by a two-digit month and day): whole on one
+    line at both phone widths, set smaller together where they must be."""
+    stress_foot(s.ctx, s.today)
+    s.open_settle()
+    s.to_month(date.fromisoformat(foot_month(s.today) + "-01"))
+    long = money2(FOOT_LONG)
+    s.eq(s.totals(), [f"收少咗 · 12/29 結算{long}", f"入數未對 12 筆{long}", f"之前月份未清{long}"], "the foot's items")
+    sizes = {}
+    for scheme in SCHEMES:
+        s.page.emulate_media(color_scheme=scheme)
+        for width in PHONE_WIDTHS:
+            s.resize(width)
+            f = foot_holds(s, 3, f"at their longest at {width} ({scheme})")
+            sizes[width] = (f["cells"][0]["size"], f["cells"][0]["labelSize"])
+            s.eq(round(f["cells"][0]["size"] / f["cells"][0]["labelSize"], 2), round(15 / 10.5, 2),
+                 f"the figures and the labels are not set smaller together at {width}")
+    s.eq(sizes[390], (15, 10.5), "the sizes at 390, where there is room")
+    s.expect(12 <= sizes[340][0] <= 15, f"the figures' size at 340: {sizes[340]}")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.foot-items-lead-where-they-say")
+def settle_foot_taps(s: Session) -> None:
+    """The shortfall opens the 已收 list, the unmatched credits their queue,
+    and the earlier months' money the calendar of whole fares on the earliest
+    month holding any, loaded if the strip does not hold it."""
+    cur = s.today.replace(day=1)
+    s.open_settle()
+    s.to_month(s.back(26))
+    month = s.view_month()
+    s.tap(".foot [data-short]")
+    s.eq((s.pressed(), s.count("#settle-list"), s.count(".cal"), s.view_month()), (["received"], 1, 0, month),
+         "the 已收 list of the same month after the shortfall was tapped")
+    s.eq(s.list_rows()[0]["id"], s.t["batch"]["short"], "the statement paid short leads that list")
+    s.expect(not s.sheet_open(), "the shortfall opened a sheet")
+    # The foot stands under a list as well, and its items still lead on.
+    s.tap(".foot [data-credits]")
+    s.eq(s.title(), "入數未對", "the queue from the foot under a list")
+    s.close_sheets()
+    # Under a list, back on the current month, whose earlier months hold money.
+    s.tap(".date-btn")
+    earlier = s.api("GET", settle_path(cur))["earlier"]
+    target = date.fromisoformat(earlier["month"] + "-01")
+    s.expect(target < cur, f"the seed's earliest open month: {earlier}")
+    asked = len(s.requests)
+    s.tap(".foot [data-earlier]")
+    s.eq((s.pressed(), s.count(".cal"), s.count("#settle-list")), (["fare"], 1, 0), "本月車費 and the calendar after the earlier months were tapped")
+    s.eq((s.view_month(), s.top_week()), (earlier["month"], week_id(target)), "the calendar on the earliest month with open money")
+    s.expect(settle_path(target) in s.asked(asked) or settle_path(target) in s.asked(),
+             "the earliest month was never asked for")
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(target))["month_totals"]), "that month's keys")
+    # Nothing before the earliest month is open, so there the item is gone.
+    s.eq((s.totals(), s.count(".foot [data-earlier]")), (want_foot(s), 0), "the foot on the earliest month")
+    # From the calendar it lands on the same row.
+    s.tap(".date-btn")
+    s.eq(s.view_month(), month_key(cur), "back on the current month")
+    s.tap(".foot [data-earlier]")
+    s.eq((s.pressed(), s.view_month(), s.top_week()), (["fare"], earlier["month"], week_id(target)), "from the calendar")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.foot-states-nothing-the-server-withheld")
+def settle_foot_unknown(s: Session) -> None:
+    """A month still loading, a month whose totals the server withheld and a
+    month whose earlier-months figure it withheld: never a zero and never
+    全部啱數 for what is not known."""
+    cur = s.today.replace(day=1)
+    month = foot_month(s.today)
+    first = date.fromisoformat(month + "-01")
+    case = {"totals": True, "earlier": True, "credits": False, "short": False}
+
+    def book(body: dict, path: str) -> None:
+        if path != settle_path(first):
+            return
+        if not case["short"]:
+            foot_short(body, 0.0)
+        foot_earlier(body, 0.0, None)
+        if not case["totals"]:
+            body["month_totals"] = None
+        if not case["earlier"]:
+            body["earlier"] = None
+
+    def ledger(body: dict, path: str) -> None:
+        if not case["credits"]:
+            foot_credits(body, 0, 0.0)
+
+    def serve(**change) -> None:
+        case.update(totals=True, earlier=True, credits=False, short=False)
+        case.update(change)
+        s.tap(".tab", has_text="滴滴")
+        s.tap(".tab", has_text="接送")
+        s.to_month(first)
+
+    rewrite(s.ctx, book, ledger)
+    # Before the first answer: a dash, in neither a state's colour nor a cell.
+    s.page = s.ctx.new_page()
+    s.page.set_default_timeout(TIMEOUT_MS)
+    s._watch(s.page)
+    s.hold(settle_path(cur))
+    s.page.goto(s.base + "/settle")
+    s.wait(lambda: s.holding(settle_path(cur)), "the first request for the month")
+    s.eq(s.totals(), ["—"], "the foot before the month has loaded")
+    waiting = s.foot_look()
+    s.eq((waiting["cells"][0]["tag"], waiting["cells"][0]["ink"]), ("DIV", s.token("--text-3")), "the dash")
+    s.release_all()
+    s.on(".cell[data-d]").first.wait_for()
+    s.settle()
+    # Everything known and nothing to act on, for the height and the contrast.
+    serve()
+    s.eq(s.totals(), ["全部啱數"], "the month with every figure stated")
+    height = s.foot_look()["height"]
+    s.eq(waiting["height"], height, "the foot's height, loading against loaded")
+    # The month's totals withheld: no shortfall item, and no claim.
+    serve(totals=False, short=True)
+    s.eq(s.keys_text(), key_texts(None), "the keys of the month with no totals")
+    s.eq((s.totals(), s.count(".foot [data-short]"), s.count(".foot button")), (["今個月計唔到準數"], 0, 0), "the foot with the month's totals withheld")
+    f = s.foot_look()
+    s.eq((f["cells"][0]["tag"], f["cells"][0]["ink"], f["height"]), ("DIV", s.token("--text-2"), height), "the line that says so")
+    serve(totals=False, short=True, credits=True)
+    s.eq(s.totals(), ["入數未對 3 筆$4,440.00"], "the items that can still be stated with the totals withheld")
+    # The earlier months' figure withheld: the item stands with a dash, in no
+    # state's colour, and leads nowhere, since no month is named.
+    serve(earlier=False)
+    s.eq((s.totals(), s.count(".foot button"), s.count(".foot [data-earlier]")), (["之前月份未清—"], 0, 0), "the foot with the earlier months withheld")
+    f = s.foot_look()
+    dash = f["cells"][0]
+    s.eq((dash["tag"], dash["ink"], dash["rule"][2:], f["height"]), ("DIV", s.token("--text-2"), [CLEAR, "none"], height), "the item with no figure")
+    serve(earlier=False, short=True, credits=True)
+    s.eq(s.totals(), [f"收少咗 · {md_slash(s.back(23))} 結算$380.00", "入數未對 3 筆$4,440.00", "之前月份未清—"], "the dash beside two stated items")
+    foot_holds(s, 3, "with the earlier months withheld")
+    s.eq([c["tag"] for c in s.foot_look()["cells"]], ["BUTTON", "BUTTON", "DIV"], "which of them are controls")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.foot-follows-the-month-and-the-platform")
+def settle_foot_follows(s: Session) -> None:
+    """The foot is the month's the header names: each month's own shortfall
+    and its own earlier-months figure, on the calendar and under a list."""
+    cur = s.today.replace(day=1)
+    prev, after = add_months(cur, -1), add_months(cur, 1)
+    s.open_settle()
+    here = want_foot(s)
+    s.eq(s.totals(), here, "the foot on the current month")
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.view_month(), s.totals()), (month_key(prev), want_foot(s)), "the foot after ←")
+    s.expect(s.totals() != here, "the seed gives two months the same foot")
+    # It follows the scroll, as the keys do. The strip grows as its end comes
+    # into reach, so the row may take more than one scroll.
+    for _ in range(4):
+        s.page.evaluate("""id => {
+          const header = [...document.querySelectorAll('.header')].find(e => e.getClientRects().length)
+            .getBoundingClientRect().bottom;
+          window.scrollBy(0, document.getElementById(id).getBoundingClientRect().top - header + 8);
+        }""", week_id(after + timedelta(days=7)))
+        s.settle()
+    s.eq((s.view_month(), s.totals()), (month_key(after), want_foot(s)), "the foot after scrolling into the next month")
+    s.tap(".date-btn")
+    s.eq((s.view_month(), s.totals()), (month_key(cur), here), "the foot after the month button")
+    # Under a list the month is paged, and the foot goes with it.
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.eq(s.totals(), here, "the foot under a list")
+    s.tap('[aria-label="前一個月"]')
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.view_month(), s.totals()), (month_key(add_months(cur, -2)), want_foot(s)), "the foot of a month paged to under a list")
+    # Another platform has its own months and its own ledger.
+    s.tap(".tab", has_text="滴滴")
+    s.eq((s.view_month(), s.totals()), (month_key(cur), want_foot(s, "didi")), "another platform's foot")
+    s.expect(s.totals() != here, "the seed gives two platforms the same foot")
+    s.tap('[aria-label="前一個月"]')
+    s.eq((s.view_month(), s.totals()), (month_key(prev), want_foot(s, "didi")), "another platform's foot after ←")
     s.eq(s.writes, [], "writes")
 
 
@@ -3336,9 +3703,8 @@ def settle_unsettled_lens_focus(s: Session) -> None:
     relation = sorted(s.back(n).isoformat() for n in (27, 26, 25))
     s.focus_on("short", ".sheet.show .up-sec")
     s.eq((s.lit(), s.count(".foot .fline")), (relation, 1), "the focus and its line")
-    usual = 3
     s.tap('.lkey[data-lens="unsettled"]')
-    s.eq((s.pressed(), s.count(".foot .fline"), len(s.totals())), (["unsettled"], 0, usual), "the key and the foot after choosing 未結算 over a focus")
+    s.eq((s.pressed(), s.count(".foot .fline"), s.totals()), (["unsettled"], 0, want_foot(s)), "the key and the foot after choosing 未結算 over a focus")
     strip = lens_strip(s)
     s.expect(not any(strip[d][0] for d in relation), "the statement's days are still lit under the lens")
     s.eq([d for d, v in strip.items() if v[0] == v[1] or v[2] != v[0]], [], "days neither lit nor receded under the lens")
@@ -3409,6 +3775,46 @@ def money2(n: float) -> str:
     return ("−" if n < 0 else "") + f"${abs(n):,.2f}"
 
 
+def statement_name(b: dict, batches: list) -> str:
+    """A statement's name: its date, numbered when an earlier one among
+    `batches` shares it."""
+    same = sorted(x["id"] for x in batches if x["settled_on"] == b["settled_on"])
+    name = (md_slash(date.fromisoformat(b["settled_on"])) + " " if b["settled_on"] else "") + "結算"
+    return name + (f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else "")
+
+
+def foot_texts(book: dict, ledger: dict, month: str) -> list:
+    """What the foot says for one month, from that month's answer from
+    /api/settle and the platform's from /api/credits: each item's label and
+    figure run together, in order, or the one line that stands for none. An
+    item is there only when its figure is above zero, or was withheld."""
+    out = []
+    totals, earlier = book["month_totals"], book["earlier"]
+    if totals and totals["short"] > 0:
+        short = [b for b in book["settlements"]
+                 if b["state"] == "partial" and any(month_key(d) == month for d in batch_days(b))]
+        which = " · " + statement_name(short[0], book["settlements"]) if len(short) == 1 else f" {len(short)} 張" if short else ""
+        out.append("收少咗" + which + money2(totals["short"]))
+    waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
+    if waiting:
+        out.append(f"入數未對 {len(waiting)} 筆" + money2(ledger["sums"]["open"]))
+    if earlier is None:
+        out.append("之前月份未清—")
+    elif earlier["open"] > 0:
+        out.append("之前月份未清" + money2(earlier["open"]))
+    if out:
+        return out
+    return ["全部啱數" if totals else "今個月計唔到準數"]
+
+
+def want_foot(s: Session, platform: str = "ride") -> list:
+    """What the foot should say now: for the month the header names, from
+    what the server answers at this moment."""
+    month = s.view_month()
+    return foot_texts(s.api("GET", settle_path(date.fromisoformat(month + "-01"), platform)),
+                      s.api("GET", "/api/credits?platform=" + platform), month)
+
+
 def batch_days(b: dict) -> list:
     """The days a statement covers: its legs', and those of the 舉牌 lines it
     paid ahead of a held-back trip."""
@@ -3448,9 +3854,7 @@ def listed(batches: list, lens: str, month: str) -> list:
 
 def row_text(b: dict, lens: str, month: str, batches: list, today: date) -> dict:
     """What a statement's row says, part by part."""
-    same = sorted(x["id"] for x in batches if x["settled_on"] == b["settled_on"])
-    name = (md_slash(date.fromisoformat(b["settled_on"])) + " " if b["settled_on"] else "") + "結算"
-    name += f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else ""
+    name = statement_name(b, batches)
     days = batch_days(b)
     sub = [f"{day_runs(days, month)} · {len(b['orders'])} 程"]
     if lens == "awaiting":
@@ -4059,7 +4463,7 @@ def settle_allocate(s: Session) -> None:
     s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => e.dataset.credit)"),
          [str(c["partial"]), str(c["group"])], "queue rows after 對")
     s.close_sheets()
-    s.eq(s.totals()[-1], "入數未對 2 筆$3170", "totals after 對")
+    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the foot after 對")
     s.reach(s.cell(19))
     s.eq((s.cell_state(19), s.cell_state(18)), (("received", "900"), ("received", "390")), "the days of the batch just paid")
     s.page.wait_for_timeout(2500)
@@ -4114,7 +4518,7 @@ def settle_unlink(s: Session) -> None:
     s.eq(s.texts(".sheet.show .hero > div")[2], "等過數", "the batch with its money taken back")
     s.eq(s.count(".sheet.show .xbtn"), 0, "allocations left on the batch")
     s.close_sheets()
-    s.eq(s.totals()[-1], "入數未對 3 筆$6220", "totals after 解除")
+    s.eq(s.queue_text(), "入數未對 3 筆$6,220.00", "the foot after 解除")
     s.eq(len(s.writes), 1, "writes")
 
 
@@ -4690,7 +5094,7 @@ def settle_live(s: Session) -> None:
     s.wait(lambda: s.cell_state(19)[0] == "received", "the day to follow a change made elsewhere")
     s.settle()
     s.eq((s.scroll_y(), s.top_week()), (at, top), "the strip's position after a live update")
-    s.eq(s.totals()[-1], "入數未對 2 筆$3170", "the totals after a live update")
+    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the foot after a live update")
     # An open sheet follows too.
     s.open_batch("awaiting")
     s.eq(s.texts(".sheet.show .hero > div")[2], "已收齊 · " + md_slash(s.back(14)), "the batch, collected")
@@ -4961,7 +5365,7 @@ def views_hidden_settle(s: Session) -> None:
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
     s.go_settle()
     s.eq(s.cell_state(19)[0], "received", "the batch paid while the view was hidden")
-    s.eq(s.totals()[-1], "入數未對 2 筆$3170", "the credit matched while the view was hidden")
+    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the credit matched while the view was hidden")
     s.eq(s.strip_problems(), [], "the strip's cells")
     # The row is laid out exactly as a page that never left would lay it out.
     drawn = s.page.eval_on_selector("#" + row, "e => e.innerHTML")

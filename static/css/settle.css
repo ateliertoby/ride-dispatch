@@ -275,31 +275,72 @@
   .slist .empty { padding: 28px 0; text-align: left; }
 
   /* ---- foot ----
-     What is still to be done, over all time: the money no statement has
-     claimed, the money statements are waiting on, and the bank money no
-     statement accounts for. The last is the way into its queue, so it is a
-     control as tall as the foot, underlined, in the colour that money is
-     drawn in on the strip. */
-  /* Three figures share the foot's one line, exact to the cent: when they
-     are too long for it at the size the day view's are set in, all three are
-     set smaller together. --n is their length in character cells, written on
-     the element; 28px is the two gaps between them. */
-  .foot-in { container-type: inline-size; }
-  .foot .v { font-size: min(17px, calc((100cqi - 28px) / (var(--n, 1) * .65))); white-space: nowrap; }
-  .foot .k { white-space: nowrap; }
-  .foot .queue {
-    background: none; border: none; cursor: pointer; font: inherit;
-    margin-block: -10px -12px; padding: 10px 0 12px; min-height: 61px;
+     Only what needs the operator to act, as ruled cells in the manner of the
+     total keys: a small label over a figure, a hairline between cells. A
+     cell is known as a control by that shape; nothing in the foot is
+     underlined. The foot is one height whatever it holds, the height of a
+     key, so it covers the same part of the calendar in every state. */
+  .foot-in {
+    padding: 0; gap: 0; align-items: stretch; min-height: 52px; container-type: inline-size;
+    /* What the cells' padding and the rules between them take of the width. */
+    --pad: calc(2 * var(--gutter));
   }
-  .foot .queue .v { color: var(--blue); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
-  .foot .queue:active .v { color: var(--text); }
+  .foot-in[data-n="2"] { --pad: calc(2 * var(--gutter) + 15px); }
+  .foot-in[data-n="3"] { --pad: calc(2 * var(--gutter) + 30px); }
+  /* One or two cells share the width equally; three take the width each
+     one's content needs, since equal thirds would cut the longest. */
+  .fkey {
+    flex: 1 1 0; min-width: 0; min-height: 52px; padding: 8px 7px 7px;
+    background: none; border: none; border-left: 1px solid var(--line); border-radius: 0;
+    text-align: left;
+  }
+  button.fkey { cursor: pointer; }
+  button.fkey:active { background: var(--surface-press); }
+  .fkey:first-child { padding-left: var(--gutter); border-left: none; }
+  .fkey:last-child { padding-right: var(--gutter); }
+  .foot-in[data-n="3"] .fkey { flex: 1 1 auto; }
+  /* Labels and figures stay on one line, exact to the cent: when they are
+     too long for it, all of them are set smaller together, never wrapped or
+     cut. --w is the width the cells need at full size, in px, written on the
+     element; the room left after --pad, less 2px of slack, over that width
+     is how much smaller. Where the figures are what is too long this is the
+     total keys' rule. */
+  .foot .fkey .k {
+    margin: 0; line-height: 14px; white-space: nowrap;
+    font-size: min(10.5px, calc((100cqi - var(--pad) - 2px) * 10.5 / var(--w, 1)));
+  }
+  .foot .fkey .v {
+    display: block; line-height: 20px; white-space: nowrap;
+    font-size: min(15px, calc((100cqi - var(--pad) - 2px) * 15 / var(--w, 1)));
+  }
+  /* The cents, and a figure inside a label, are in another size or face
+     than the line they stand on. No line height of their own, or their box
+     would hang past the line's and make the cell taller. */
+  .fkey :is(.ct, .k .num) { line-height: 0; }
+  .fkey .ct { font-size: .7em; }
+  /* Money from earlier months is owed and has to be chased, so it takes the
+     colour of money owed; it mixes states, so it carries no state rule. A
+     figure the server could not state is a dash and takes no state's
+     colour. */
+  .foot .fkey:is(.short, .prior) .v { color: var(--amber); }
+  .foot .fkey.open .v { color: var(--blue); }
+  .foot .fkey.unknown .v { color: var(--text-2); }
+  /* With no item, one plain line: not a cell and not a control. Green only
+     where it says everything is in order; a month still loading shows a
+     dash in the ink a coordinate has. */
+  .fnote {
+    flex: 1; align-self: center; padding: 0 var(--gutter);
+    font-size: 13px; line-height: 20px; color: var(--text-2);
+  }
+  .fnote.ok { color: var(--green); }
+  .fnote.wait { color: var(--text-3); }
   /* While a statement's days are lit the foot names it instead: one line of
      parts that wraps between two parts where it must, never inside one, and
      the key that puts the focus down, a thumb's size. */
-  .fline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+  .fline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 4px var(--gutter); }
   .fline .ft { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; }
   .fx {
-    flex-shrink: 0; width: 44px; height: 44px; margin: -2px -12px -4px 0; padding: 0;
+    flex-shrink: 0; width: 44px; height: 44px; margin: 0 -12px 0 0; padding: 0;
     background: none; border: none; border-radius: 3px; cursor: pointer;
     font-family: var(--mono); font-size: 16px; line-height: 1; color: var(--text-2);
   }
