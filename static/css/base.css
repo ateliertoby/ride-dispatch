@@ -76,18 +76,18 @@
     --sheet-bg: #fbfaf6;
     --key-bg: #e9e6dd;
     --key-press: #dcd9cf;
-    --text: #121316;
-    --text-2: #5c5f66;
-    --text-3: #9a9b9d;
+    --text: #232428;
+    --text-2: #494c52;
+    --text-3: #696b70;
     --line: #d6d3c9;
-    --amber: #a86400;
+    --amber: #935700;
     --red: #c8281e;
-    --green: #0f8a4b;
-    --scrim: rgba(18,19,22,.4);
+    --green: #0d753f;
+    --scrim: rgba(35,36,40,.4);
     --on-solid: #fbfaf6;
-    --banner-bg: #f6e4b9;  --banner-fg: #a86400;
+    --banner-bg: #f6e4b9;  --banner-fg: #935700;
     --paid-bg: #d3ecdb;
-    --blue: #1f6fd6;  --blue-bg: #e3eefb;
+    --blue: #1c64c1;  --blue-bg: #e3eefb;
   }
 }
 html { -webkit-text-size-adjust: 100%; }
