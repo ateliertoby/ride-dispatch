@@ -83,6 +83,7 @@ python scripts/e2e.py                          # behaviour, driven through a rea
 python scripts/e2e.py --only day.add           # the checks whose name begins with this
 python scripts/e2e.py --jobs 1                 # one check at a time (default: one worker per core, at most 8)
 python scripts/e2e.py --timings                # and where the time went, with the slowest checks
+python scripts/e2e.py --today-set 2026-10-08,2026-10-31   # once for each day, through the same workers
 python scripts/shots.py --out /tmp/shots       # a screenshot of every state, dark and light
 python scripts/shots.py --out /tmp/shots --only stress   # the states whose name begins with this
 python scripts/shots.py --out /tmp/new --compare /tmp/shots   # and a pixel count of what changed

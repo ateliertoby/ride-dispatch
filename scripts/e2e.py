@@ -4,6 +4,7 @@
     python scripts/e2e.py --only day.add     checks whose name begins with this
     python scripts/e2e.py --list             name the checks and stop
     python scripts/e2e.py --jobs 1           one after another (default: several side by side)
+    python scripts/e2e.py --today-set 2026-10-08,2026-10-31    once for each of these days
     python scripts/e2e.py --timings          and say where the time went
 
 Playwright WebKit as an iPhone 14. Every check gets a server of its own on a
@@ -11,7 +12,9 @@ freshly seeded synthetic database (scripts/seed_demo_db.py) with both clocks
 pinned to 14:00, so checks do not depend on each other or on when they run.
 That is also what lets them run side by side: --jobs N runs them in N
 processes, each with its own browser and its own range of ports, and reports
-them in the same order as a run made one after another.
+them in the same order as a run made one after another. The seed's days fall
+differently around the first of a month from one --today to the next, and
+--today-set runs several of them through the same workers at once.
 Each prints PASS or FAIL; the exit status is non-zero if any failed.
 
 The shell's service worker is kept out of every check but those about it
@@ -6899,11 +6902,19 @@ def print_timings(timings: dict, launch: float, wall: float) -> None:
               f" poll {t['poll']:.1f}s, setup {t['setup']:.1f}s)")
 
 
+def days_of(text: str) -> list:
+    """The days named in a comma-separated list, each once, in the order given."""
+    return list(dict.fromkeys(date.fromisoformat(part.strip()) for part in text.split(",") if part.strip()))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--only", default="", metavar="PREFIX", help="checks whose name begins with this")
-    ap.add_argument("--today", type=date.fromisoformat, default=date.today(),
+    ap.add_argument("--today", type=date.fromisoformat,
                     help="the day the data and both clocks are built around (default: today)")
+    ap.add_argument("--today-set", type=days_of, metavar="DAY,DAY,...",
+                    help="run the checks once for each of these days, all drawing on the same --jobs"
+                         " workers; prints the failures and one line per day")
     ap.add_argument("--list", action="store_true", help="name the checks and stop")
     ap.add_argument("--jobs", type=int, default=default_jobs(), metavar="N",
                     help="run the checks in N processes side by side, each with a browser, servers and"
@@ -6920,46 +6931,52 @@ def main() -> None:
         return
     if not wanted:
         raise SystemExit(f"no check begins with {args.only!r}")
+    if args.today and args.today_set:
+        ap.error("--today and --today-set are two ways to say the same thing")
+    days = args.today_set or [args.today or date.today()]
+    many = len(days) > 1
+    if args.jobs < 1:
+        ap.error("--jobs must be at least 1")
 
-    from playwright.sync_api import sync_playwright
+    # Every check on every day is one task, named by its day and its name,
+    # and reported in this order whatever order they finish in.
+    order = [(day.isoformat(), c["name"]) for day in days for c in wanted]
+    checks = {c["name"]: c for c in wanted}
+    outcomes, timings = {}, {}
     failed = total = 0
-    timings = {}
     began = time.monotonic()
 
-    def report(ok: bool, label: str, problem: str = "") -> None:
+    def done(key: tuple, problem, spent) -> None:
         nonlocal failed, total
-        total += 1
-        failed += not ok
-        print(("PASS  " if ok else "FAIL  ") + label + ("" if ok else "\n      " + problem), flush=True)
+        outcomes[key] = problem
+        if spent:
+            timings[f"{key[1]} ({key[0]})" if many else key[1]] = spent
+        while total < len(order) and order[total] in outcomes:
+            day, name = order[total]
+            problem = outcomes[order[total]]
+            total += 1
+            failed += problem is not None
+            if problem is not None:
+                print(f"FAIL  {name}" + (f"  ({day})" if many else "") + "\n      " + problem, flush=True)
+            elif not many:
+                print("PASS  " + name, flush=True)
+            if many and total % len(wanted) == 0:
+                bad = sum(outcomes[(day, c["name"])] is not None for c in wanted)
+                print(f"{day}  {len(wanted)} checks, {bad} failed", flush=True)
 
-    jobs = min(args.jobs, len(wanted))
-    if jobs < 1:
-        ap.error("--jobs must be at least 1")
+    jobs = min(args.jobs, len(order))
     if jobs == 1:
+        from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             browser = p.webkit.launch()
             launch = time.monotonic() - began
-            for chk in wanted:
-                problem, timings[chk["name"]] = run(p, browser, chk, args.today)
-                report(problem is None, chk["name"], problem or "")
+            for day, name in order:
+                done((day, name), *run(p, browser, checks[name], date.fromisoformat(day)))
             browser.close()
     else:
-        names = [c["name"] for c in wanted]
-        outcomes = {}
-
-        def done(name: str, problem, spent) -> None:
-            # Reported in the registry's order, each as soon as every check
-            # before it has been.
-            outcomes[name] = problem
-            if spent:
-                timings[name] = spent
-            while total < len(names) and names[total] in outcomes:
-                problem = outcomes[names[total]]
-                report(problem is None, names[total], problem or "")
-
-        first = sorted(wanted, key=lambda c: not c["long"])
-        launch = side_by_side([(c["name"], c["name"], args.today.isoformat()) for c in first], jobs, done)
-    print(f"{total} checks, {failed} failed")
+        first = sorted(order, key=lambda key: not checks[key[1]]["long"])
+        launch = side_by_side([(key, key[1], key[0]) for key in first], jobs, done)
+    print((f"{len(days)} days, " if many else "") + f"{total} checks, {failed} failed")
     if args.timings:
         print_timings(timings, launch, time.monotonic() - began)
     sys.exit(1 if failed else 0)
