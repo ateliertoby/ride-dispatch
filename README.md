@@ -81,12 +81,14 @@ node --test "tests/js/*.test.mjs"    # the browser modules that need no DOM (Nod
 pip install -r requirements-dev.txt && playwright install webkit
 python scripts/e2e.py                          # behaviour, driven through a real browser
 python scripts/e2e.py --only day.add           # the checks whose name begins with this
+python scripts/e2e.py --jobs 1                 # one check at a time (default: one worker per core, at most 8)
+python scripts/e2e.py --timings                # and where the time went, with the slowest checks
 python scripts/shots.py --out /tmp/shots       # a screenshot of every state, dark and light
 python scripts/shots.py --out /tmp/shots --only stress   # the states whose name begins with this
 python scripts/shots.py --out /tmp/new --compare /tmp/shots   # and a pixel count of what changed
 ```
 
-`requirements-dev.txt` is for development only; nothing in it is needed to run the app. Playwright and Pillow serve the two scripts. fonttools and brotli are there for `pyftsubset`, which rebuilds the two files in `static/fonts/` from the upstream B612 Mono TrueType files when the set of characters the app prints in that face changes (the set is the `unicode-range` in `static/css/base.css`). Both scripts start their own server on a free port against a synthetic database built by `scripts/seed_demo_db.py`, with the browser's clock and the server's pinned to 14:00 on one day (`--today`, today by default), so two runs for the same day give the same result and neither touches real data. They run in WebKit as an iPhone, the engine the installed app runs on.
+`requirements-dev.txt` is for development only; nothing in it is needed to run the app. Playwright and Pillow serve the two scripts. fonttools and brotli are there for `pyftsubset`, which rebuilds the two files in `static/fonts/` from the upstream B612 Mono TrueType files when the set of characters the app prints in that face changes (the set is the `unicode-range` in `static/css/base.css`). Both scripts start their own server on a free port against a synthetic database built by `scripts/seed_demo_db.py`, with the browser's clock and the server's pinned to 14:00 on one day (`--today`, today by default), so two runs for the same day give the same result and neither touches real data. `e2e.py` gives every check a server and a database of its own and runs them in several processes side by side, reporting them in the order they are registered. They run in WebKit as an iPhone, the engine the installed app runs on.
 
 ## Deploy
 

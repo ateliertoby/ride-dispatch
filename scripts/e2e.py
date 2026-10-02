@@ -3,11 +3,15 @@
     python scripts/e2e.py                    every check
     python scripts/e2e.py --only day.add     checks whose name begins with this
     python scripts/e2e.py --list             name the checks and stop
+    python scripts/e2e.py --jobs 1           one after another (default: several side by side)
     python scripts/e2e.py --timings          and say where the time went
 
 Playwright WebKit as an iPhone 14. Every check gets a server of its own on a
 freshly seeded synthetic database (scripts/seed_demo_db.py) with both clocks
 pinned to 14:00, so checks do not depend on each other or on when they run.
+That is also what lets them run side by side: --jobs N runs them in N
+processes, each with its own browser and its own range of ports, and reports
+them in the same order as a run made one after another.
 Each prints PASS or FAIL; the exit status is non-zero if any failed.
 
 The shell's service worker is kept out of every check but those about it
@@ -25,8 +29,11 @@ adds its own under its own name prefix.
 import argparse
 import contextlib
 import json
+import multiprocessing
 import os
+import queue
 import re
+import signal
 import sys
 import tempfile
 import time
@@ -39,7 +46,7 @@ sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
 from harness import (DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, TIMEOUT_MS, TIMEZONE,  # noqa: E402
-                     Driver, Server, copy_app, demo_now, foot_credits, foot_earlier, foot_month,
+                     Driver, Ports, Server, copy_app, demo_now, foot_credits, foot_earlier, foot_month,
                      foot_second_short, foot_short, month_before, new_context, paste_message,
                      rewrite, stress_foot, stress_strip)
 
@@ -47,7 +54,7 @@ CHECKS = []
 
 
 def check(name: str, clock: str = "fixed", still: bool = True,
-          workers: bool = False, copy: bool = False, desktop: bool = False):
+          workers: bool = False, copy: bool = False, desktop: bool = False, long: bool = False):
     """Register a check. `clock` is "fixed" (Date frozen, timers real) or
     "installed" (the check moves time itself). `still` turns the page's
     transitions and animations off, which is what every check wants unless
@@ -56,10 +63,13 @@ def check(name: str, clock: str = "fixed", still: bool = True,
     stub a request from the page and makes the server misbehave instead
     (Server.fault). `copy` serves the app from a throwaway copy the check may
     change, to stand for a deploy. `desktop` runs it in a wide window with a
-    pointer that hovers and no touch, so it clicks where the others tap."""
+    pointer that hovers and no touch, so it clicks where the others tap.
+    `long` says it takes several times as long as most. Checks run side by
+    side (--jobs) are handed out with these first, so that none of them is
+    still running alone after everything else has finished."""
     def register(fn):
         CHECKS.append({"name": name, "fn": fn, "clock": clock, "still": still,
-                       "workers": workers, "copy": copy, "desktop": desktop})
+                       "workers": workers, "copy": copy, "desktop": desktop, "long": long})
         return fn
     return register
 
@@ -1594,7 +1604,7 @@ def day_placeholders_fail(s: Session) -> None:
     s.settle()
 
 
-@check("day.status-block-turns-over-when-it-changes", still=False)
+@check("day.status-block-turns-over-when-it-changes", still=False, long=True)
 def day_turn_over(s: Session) -> None:
     s.open_day()
     oid = s.t["order"]["upcoming_hotel"]
@@ -2894,7 +2904,7 @@ def empty_day(s: Session) -> tuple:
     return x, y
 
 
-@check("settle.focus")
+@check("settle.focus", long=True)
 def settle_focus(s: Session) -> None:
     """A statement's days are lit from its sheet, the foot names it, and the
     rest of the calendar recedes by colour until the focus is put down."""
@@ -3135,7 +3145,7 @@ def settle_foot(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("settle.foot-holds-only-what-needs-action")
+@check("settle.foot-holds-only-what-needs-action", long=True)
 def settle_foot_items(s: Session) -> None:
     """Every combination of the three items, on the month the seed's
     shortfall is counted in, in both palettes at both phone widths: one or
@@ -3318,7 +3328,7 @@ def settle_foot_taps(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("settle.foot-states-nothing-the-server-withheld")
+@check("settle.foot-states-nothing-the-server-withheld", long=True)
 def settle_foot_unknown(s: Session) -> None:
     """A month still loading, a month whose totals the server withheld and a
     month whose earlier-months figure it withheld: never a zero and never
@@ -3465,7 +3475,7 @@ def settle_clean_month(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("settle.month-figure")
+@check("settle.month-figure", long=True)
 def settle_month_figure(s: Session) -> None:
     def head() -> list:
         return s.page.evaluate("""() => {
@@ -4186,7 +4196,7 @@ def settle_list_undated(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("settle.the-list-follows-month-platform-and-live-changes")
+@check("settle.the-list-follows-month-platform-and-live-changes", long=True)
 def settle_list_follows(s: Session) -> None:
     """Under a list the month is changed by the arrows and the month button
     alone; the strip keeps its months and its place and is back where it was,
@@ -4687,7 +4697,7 @@ def settle_refused(s: Session) -> None:
     s.settle()
 
 
-@check("settle.order-sheet")
+@check("settle.order-sheet", long=True)
 def settle_order_sheet(s: Session) -> None:
     s.open_settle()
     o = seed_demo_db._oid
@@ -4893,7 +4903,7 @@ def every_settle_sheet(s: Session, look) -> None:
     s.page.unroute("**/api/statements/read")
 
 
-@check("settle.sheets-are-flat-panels-at-every-width")
+@check("settle.sheets-are-flat-panels-at-every-width", long=True)
 def settle_sheet_panels(s: Session) -> None:
     """Each sheet is the flat panel the order's sheet is: a hairline at the
     top, no corner and no grab bar, scrolling inside itself, lying over the
@@ -5249,7 +5259,7 @@ def settle_timing_failed(s: Session) -> None:
     s.settle()
 
 
-@check("settle.expired-login-does-not-toast")
+@check("settle.expired-login-does-not-toast", long=True)
 def settle_auth_expired(s: Session) -> None:
     s.open_settle()
     s.allow("http 401", "status of 401")
@@ -5557,7 +5567,7 @@ def views_late_day(s: Session) -> None:
     s.eq(len(s.writes), 1, "writes")
 
 
-@check("views.order-sheet-follows-the-showing-view")
+@check("views.order-sheet-follows-the-showing-view", long=True)
 def views_order_host(s: Session) -> None:
     s.open_day()
     s.go_settle()
@@ -6095,7 +6105,7 @@ def auth_launch(s: Session) -> None:
     s.settle()
 
 
-@check("auth.dropped-stream-finds-the-expired-login", workers=True)
+@check("auth.dropped-stream-finds-the-expired-login", workers=True, long=True)
 def auth_stream(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -6172,7 +6182,7 @@ def live_again(s: Session, opened: int) -> None:
     s.settle()
 
 
-@check("stream.reopened-after-the-gateway-refused-it")
+@check("stream.reopened-after-the-gateway-refused-it", long=True)
 def stream_bad_gateway(s: Session) -> None:
     s.allow(*LOST_SERVER, "http 502", "status of 502", "request failed: GET /api/events")
     s.open_day()
@@ -6200,7 +6210,7 @@ def stream_bad_gateway(s: Session) -> None:
     s.eq(s.writes, [], "writes by the page")
 
 
-@check("stream.reopened-after-the-server-was-away")
+@check("stream.reopened-after-the-server-was-away", long=True)
 def stream_server_away(s: Session) -> None:
     s.allow(*LOST_SERVER)
     s.open_settle()
@@ -6253,7 +6263,7 @@ def stream_visible(s: Session) -> None:
     s.eq(s.writes, [], "writes")
 
 
-@check("stream.nothing-reopens-or-refreshes-with-the-login-expired")
+@check("stream.nothing-reopens-or-refreshes-with-the-login-expired", long=True)
 def stream_expired(s: Session) -> None:
     s.allow(*LOST_SERVER, *CUT_OFF)
     s.open_day()
@@ -6365,7 +6375,7 @@ def inventory_now_last(s: Session) -> None:
     s.eq(s.scroll_y(), 0, "scroll after the minute re-render")
 
 
-@check("inventory.day-rows-and-sheet")
+@check("inventory.day-rows-and-sheet", long=True)
 def inventory_day_rows(s: Session) -> None:
     """B2, B5, C9, D12, D13, D14, D15, D23, L8."""
     s.open_day()
@@ -6523,7 +6533,7 @@ def inventory_in_flight(s: Session) -> None:
     s.settle()
 
 
-@check("inventory.settle-details")
+@check("inventory.settle-details", long=True)
 def inventory_settle(s: Session) -> None:
     """G11, H10, H28, I5, I16, I18, I23, J5."""
     s.open_settle()
@@ -6667,15 +6677,15 @@ def inventory_styles(s: Session) -> None:
 
 # ---- running ----
 
-def run(playwright, browser, chk: dict, today: date) -> tuple:
-    """Run one check on a server of its own. Returns the problem, or None,
-    and where the time went, in seconds."""
+def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tuple:
+    """Run one check on a server of its own, on a port from `ports` if given.
+    Returns the problem, or None, and where the time went, in seconds."""
     began = time.monotonic()
     with contextlib.ExitStack() as stack:
         root = ROOT
         if chk["copy"]:
             root = copy_app(stack.enter_context(tempfile.TemporaryDirectory(prefix="ride-app-")))
-        server = Server(today, root)
+        server = Server(today, root, ports)
         url = stack.enter_context(server)
         if chk["clock"] == "installed":
             ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme="dark",
@@ -6710,6 +6720,111 @@ def run(playwright, browser, chk: dict, today: date) -> tuple:
     return problem, spent
 
 
+# ---- running side by side ----
+
+# A worker is a WebKit instance, a server and the script driving them. Most
+# of a check is spent waiting on the page rather than computing, so a worker
+# per core costs the checks nothing: on eight cores, eight workers take as
+# long over each check as one does. Past that, servers and browser contexts
+# are slower to start, and checks that time the page have less to spare.
+MAX_DEFAULT_JOBS = 8
+
+# Each worker's servers take their ports from a range of its own. Where a
+# run's ranges begin depends on its process id, so that two runs at once
+# seldom look for ports in the same place.
+PORT_BASE, PORT_SPAN, PORT_BLOCKS = 20000, 50, 64
+
+
+def default_jobs() -> int:
+    return max(1, min(MAX_DEFAULT_JOBS, os.cpu_count() or 1))
+
+
+def worker(index: int, first_port: int, todo, results) -> None:
+    """Run checks taken from `todo` until it gives None, in a process with a
+    browser of its own. Each task is (key, check name, the day as text);
+    what happened to it goes back on `results` under its key."""
+    # Ending by unwinding stops the server of the check in hand.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    from playwright.sync_api import sync_playwright
+    checks = {c["name"]: c for c in CHECKS}
+    ports = Ports(first_port, PORT_SPAN)
+    began = time.monotonic()
+    try:
+        with sync_playwright() as p:
+            browser = p.webkit.launch()
+            results.put(("up", index, time.monotonic() - began))
+            for key, name, today in iter(todo.get, None):
+                # A browser that has died would fail every check left in
+                # the queue, each in no time at all.
+                if not browser.is_connected():
+                    browser = p.webkit.launch()
+                results.put(("start", index, key))
+                try:
+                    problem, spent = run(p, browser, checks[name], date.fromisoformat(today), ports)
+                except Exception as e:      # its server or its context could not be made
+                    problem, spent = f"{type(e).__name__}: {e}".splitlines()[0], None
+                results.put(("done", index, key, problem, spent))
+            browser.close()
+    except KeyboardInterrupt:
+        pass
+
+
+def side_by_side(tasks: list, jobs: int, done) -> float:
+    """Run `tasks` in `jobs` processes, handing them out in the order given.
+    Each has a browser, servers, databases and ports of its own, and shares
+    nothing on disk with the others. `done(key, problem, spent)` is called
+    as each task ends, in whatever order they end. Returns the seconds the
+    workers spent launching their browsers."""
+    mp = multiprocessing.get_context("spawn")
+    todo, results = mp.Queue(), mp.Queue()
+    for task in tasks:
+        todo.put(task)
+    for _ in range(jobs):
+        todo.put(None)
+    base = PORT_BASE + os.getpid() % PORT_BLOCKS * 8 * PORT_SPAN
+    procs = [mp.Process(target=worker, args=(i, base + i * PORT_SPAN, todo, results)) for i in range(jobs)]
+    for proc in procs:
+        proc.start()
+    waiting = [key for key, _, _ in tasks]
+    running, gone, launch = {}, set(), 0.0
+
+    def end(key, problem, spent) -> None:
+        waiting.remove(key)
+        done(key, problem, spent)
+
+    try:
+        while waiting:
+            try:
+                msg = results.get(timeout=1)
+            except queue.Empty:
+                # A worker that has exited took the check it was running with
+                # it. Its last words may still be on their way, so it is
+                # given up on only the second time it is found gone.
+                dead = {i for i, proc in enumerate(procs) if not proc.is_alive()}
+                for i in dead & gone:
+                    if i in running:
+                        end(running.pop(i), f"the worker running it exited (code {procs[i].exitcode})", None)
+                if len(dead & gone) == jobs:
+                    for key in list(waiting):
+                        end(key, "no worker was left to run it", None)
+                gone = dead
+                continue
+            if msg[0] == "up":
+                launch += msg[2]
+            elif msg[0] == "start":
+                running[msg[1]] = msg[2]
+            else:
+                running.pop(msg[1], None)
+                end(*msg[2:])
+        for proc in procs:
+            proc.join(timeout=10)
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+    return launch
+
+
 def print_timings(timings: dict, launch: float, wall: float) -> None:
     """Where a run's time went. `timings` is check name -> what run() measured."""
     def total(key: str) -> float:
@@ -6732,6 +6847,10 @@ def main() -> None:
     ap.add_argument("--today", type=date.fromisoformat, default=date.today(),
                     help="the day the data and both clocks are built around (default: today)")
     ap.add_argument("--list", action="store_true", help="name the checks and stop")
+    ap.add_argument("--jobs", type=int, default=default_jobs(), metavar="N",
+                    help="run the checks in N processes side by side, each with a browser, servers and"
+                         " databases of its own; 1 runs them one after another in this process"
+                         f" (default: {default_jobs()}, from this machine's cores)")
     ap.add_argument("--timings", action="store_true",
                     help="after the report, say where the time went and name the slowest checks")
     args = ap.parse_args()
@@ -6755,13 +6874,33 @@ def main() -> None:
         failed += not ok
         print(("PASS  " if ok else "FAIL  ") + label + ("" if ok else "\n      " + problem), flush=True)
 
-    with sync_playwright() as p:
-        browser = p.webkit.launch()
-        launch = time.monotonic() - began
-        for chk in wanted:
-            problem, timings[chk["name"]] = run(p, browser, chk, args.today)
-            report(problem is None, chk["name"], problem or "")
-        browser.close()
+    jobs = min(args.jobs, len(wanted))
+    if jobs < 1:
+        ap.error("--jobs must be at least 1")
+    if jobs == 1:
+        with sync_playwright() as p:
+            browser = p.webkit.launch()
+            launch = time.monotonic() - began
+            for chk in wanted:
+                problem, timings[chk["name"]] = run(p, browser, chk, args.today)
+                report(problem is None, chk["name"], problem or "")
+            browser.close()
+    else:
+        names = [c["name"] for c in wanted]
+        outcomes = {}
+
+        def done(name: str, problem, spent) -> None:
+            # Reported in the registry's order, each as soon as every check
+            # before it has been.
+            outcomes[name] = problem
+            if spent:
+                timings[name] = spent
+            while total < len(names) and names[total] in outcomes:
+                problem = outcomes[names[total]]
+                report(problem is None, names[total], problem or "")
+
+        first = sorted(wanted, key=lambda c: not c["long"])
+        launch = side_by_side([(c["name"], c["name"], args.today.isoformat()) for c in first], jobs, done)
     print(f"{total} checks, {failed} failed")
     if args.timings:
         print_timings(timings, launch, time.monotonic() - began)
