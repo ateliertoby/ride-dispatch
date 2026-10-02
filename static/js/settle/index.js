@@ -461,9 +461,10 @@ function renderHeader() {
 // money in a month not on screen would otherwise be seen only by paging back
 // to look for it.
 //
-// Each item is { kind, label, amount, attr }. amount is null where the server
-// withheld the figure. attr is what makes the item a control, and is empty
-// where a tap has nowhere to lead.
+// Each item is { kind, label, name, amount, attr }. name is the part of the
+// label that may give way when the foot is short of room (see fitFoot), or
+// empty. amount is null where the server withheld the figure. attr is what
+// makes the item a control, and is empty where a tap has nowhere to lead.
 function footItems() {
   const items = [];
   const t = data.monthTotals[viewMonth] || null;
@@ -472,8 +473,8 @@ function footItems() {
     // a 舉牌 line in the month. One is named; several are counted.
     const on = data.settlements.filter(b =>
       b.state === 'partial' && batchSpan(b).some(d => monthKey(d) === viewMonth));
-    const which = on.length === 1 ? ' · ' + nameOf(on[0]) : on.length ? ' ' + on.length + ' 張' : '';
-    items.push({ kind: 'short', label: '收少咗' + which, amount: t.short, attr: ' data-short="1"' });
+    items.push({ kind: 'short', label: '收少咗' + (on.length > 1 ? ' ' + on.length + ' 張' : ''),
+                 name: on.length === 1 ? ' · ' + nameOf(on[0]) : '', amount: t.short, attr: ' data-short="1"' });
   }
   const open = openCredits();
   if (open.length) {
@@ -513,10 +514,15 @@ function footFigure(amount) {
 
 // Makes the foot's cells fit the foot. A label keeps the size it is read at
 // and nothing is wrapped or cut, so room is made in steps, and no step is
-// taken that is not needed: the labels give up their letter-spacing, then
-// the cells the padding between them, in two steps (data-fit, which the
-// stylesheet reads), and last the figures are set smaller, all together
-// (--fig), by as little as fits them under labels that stay as they are.
+// taken that is not needed (data-fit, which the stylesheet reads): the
+// labels give up their letter-spacing, then the cells part of the padding
+// between them, down to 4px. A label closer to the rule than that reads as
+// crowded against it, so before the padding goes further the shortfall's
+// label gives up the name of its statement, which the list the cell opens
+// states, and the steps are taken again from the first with the room that
+// leaves. Only then does the padding go down to 2px, and last the figures
+// are set smaller, all together (--fig), by as little as fits them under
+// labels that stay as they are.
 //
 // The cells are measured where they stand, as the focus line is: a label
 // mixes the text face, the figure face and marks pulled in by tight(), and
@@ -538,15 +544,25 @@ function fitFoot(foot) {
   };
   const cells = [...foot.children];
   let scale = 1;
-  for (const fit of ['0', '1', '2', '3']) {
+  // Whether one of these steps, tried in turn, is enough.
+  const fits = steps => steps.some(fit => {
     foot.dataset.fit = fit;
     scale = figureScale(room, cells.map(cell => {
       const cs = getComputedStyle(cell);
       return { pad: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth),
                label: widthOf(cell.querySelector('.k')), figure: widthOf(cell.querySelector('.v')) };
     }), cells.length < 3);
-    if (scale === 1) return;
+    return scale === 1;
+  });
+  if (fits(['0', '1', '2'])) return;
+  // Taken out, not hidden: the label then says exactly what is on screen to
+  // whatever reads it.
+  const name = foot.querySelector('[data-part="name"]');
+  if (name) {
+    name.remove();
+    if (fits(['0', '1', '2'])) return;
   }
+  if (fits(['3'])) return;
   // Labels too long for the foot even so are past what a figure can mend.
   if (scale) foot.style.setProperty('--fig', Math.floor(FOOT_FIGURE * scale * 20) / 20 + 'px');
 }
@@ -563,6 +579,7 @@ function renderFoot() {
     const tag = it.attr ? 'button' : 'div';
     return '<' + tag + ' class="fkey ' + it.kind + (it.kind === 'short' ? ' st-short' : '') +
       (it.amount === null ? ' unknown' : '') + '"' + it.attr + '><span class="k">' + figs(it.label) +
+      (it.name ? '<span data-part="name">' + figs(it.name) + '</span>' : '') +
       '</span><span class="v">' + footFigure(it.amount) + '</span><i class="mk"></i></' + tag + '>';
   }).join('');
   fitFoot(foot);

@@ -307,12 +307,14 @@
   /* Labels and figures stay on one line, exact to the cent, and a label
      keeps the size it is read at. When the cells are too long for the foot
      the script makes room in this order and stops at the first step that is
-     enough: the labels give up their letter-spacing (data-fit 1), the cells
-     the padding either side of the rules between them, part of it and then
-     all but enough to keep a label off the rule (data-fit 2 and 3), and
-     last the figures are set smaller, all together (--fig). The foot keeps
-     its gutters, so its first label stays under the first total key's.
-     Nothing is wrapped or cut. */
+     enough: the labels give up their letter-spacing (data-fit 1), then the
+     cells part of the padding either side of the rules between them
+     (data-fit 2). Before the padding goes under that, the shortfall's label
+     gives up the name of its statement and those steps are taken again;
+     only then is the padding all but enough to keep a label off the rule
+     (data-fit 3), and last the figures are set smaller, all together
+     (--fig). The foot keeps its gutters, so its first label stays under the
+     first total key's. Nothing is wrapped or cut. */
   .foot .fkey .k { margin: 0; line-height: 14px; white-space: nowrap; }
   .foot-in:not([data-fit="0"]) .fkey .k { letter-spacing: 0; }
   .foot-in:is([data-fit="2"], [data-fit="3"]) { --between: 4px; }

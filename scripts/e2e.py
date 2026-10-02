@@ -3654,28 +3654,44 @@ FOOT_ROOM_JS = """
 def settle_foot_narrow(s: Session) -> None:
     """Three items at their longest (five-digit amounts with cents, twelve
     credits, a statement named by a two-digit month and day): whole on one
-    line at both phone widths. The labels stay at the size they are read at
-    and give up their letter-spacing and the padding between the cells
-    where they must; only the figures are set smaller, and only after
-    that."""
+    line at both phone widths, with the labels at the size they are read at.
+    Where there is room the shortfall names its statement. Where there is
+    not, the name goes before a label is brought closer than 4px to the rule
+    beside it, and with the name gone nothing else has to give."""
     stress_foot(s.ctx, s.today)
     s.open_settle()
     s.to_month(date.fromisoformat(foot_month(s.today) + "-01"))
     long = money2(FOOT_LONG)
-    s.eq(s.totals(), [f"收少咗 · 12/28、30 結算{long}", f"入數未對 12 筆{long}", f"之前月份未清{long}"], "the foot's items")
-    sizes, made = {}, {}
+    rest = [f"入數未對 12 筆{long}", f"之前月份未清{long}"]
+    said, sizes, made = {}, {}, {}
     for scheme in SCHEMES:
         s.page.emulate_media(color_scheme=scheme)
         for width in PHONE_WIDTHS:
             s.resize(width)
             f = foot_holds(s, 3, f"at their longest at {width} ({scheme})")
+            said[width] = s.totals()
             sizes[width] = (f["cells"][0]["size"], f["cells"][0]["labelSize"])
             made[width] = s.page.evaluate(FOOT_ROOM_JS)
-    s.eq(sizes[390], (15, 12), "the sizes at 390, where there is room")
-    s.eq(made[390], ["0", "0.96px", 7], "the letter-spacing and the padding at 390, where there is room")
-    s.eq(sizes[340][1], 12, "the labels' size at 340")
-    s.eq(made[340], ["3", "normal", 2], "what the labels and the cells gave up at 340")
-    s.expect(12 <= sizes[340][0] < 15, f"the figures' size at 340: {sizes[340]}")
+            s.expect(made[width][2] >= 4, f"a label {made[width][2]}px from the rule at {width} ({scheme})")
+    s.eq(said[390], [f"收少咗 · 12/28、30 結算{long}"] + rest, "the foot's items at 390, where the name fits")
+    s.eq(sizes[390], (15, 12), "the sizes at 390")
+    s.eq(made[390], ["0", "0.96px", 7], "the letter-spacing and the padding at 390")
+    s.eq(said[340], [f"收少咗{long}"] + rest, "the foot's items at 340, where the name gives way")
+    s.eq(sizes[340], (15, 12), "the sizes at 340")
+    s.eq(made[340], ["0", "0.96px", 7], "the letter-spacing and the padding at 340, the name gone")
+    # The rest of the order, at widths between and under the two: the name
+    # stays while 4px of padding is enough to hold it, and the padding goes
+    # under that only once the name has gone and the room is still short,
+    # which takes a window narrower than any phone.
+    s.page.emulate_media(color_scheme="dark")
+    for width, name, room in ((360, " · 12/28、30 結算", ["2", "normal", 4]), (280, "", ["3", "normal", 2])):
+        s.resize(width)
+        foot_holds(s, 3, f"at their longest at {width}")
+        s.eq((s.totals()[0], s.page.evaluate(FOOT_ROOM_JS)), (f"收少咗{name}{long}", room), f"the shortfall's label and its room at {width}")
+    s.resize(340)
+    # The cell still opens the list that names the statement.
+    s.tap(".foot [data-short]")
+    s.eq((s.pressed(), s.list_rows()[0]["name"]), (["received"], "12/28、30 結算"), "the list the bare label opens")
     s.eq(s.writes, [], "writes")
 
 
