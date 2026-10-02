@@ -36,32 +36,37 @@
 /* Dark is the base palette; light is a media-query override, so the page
    follows the OS with no toggle and no stored preference. */
 :root {
-  --bg: #0b0c0e;
-  --surface: #131519;
-  --surface-press: #1a1d22;
-  --sheet-bg: #131519;
-  --key-bg: #1c1f25;
-  --key-press: #262a31;
-  --text: #f3f1ea;
-  --text-2: #9a9da4;
-  --text-3: #5d6068;
-  --line: #24272d;
-  --amber: #ffb224;
-  --red: #ff5a4f;
-  --green: #35d07f;
+  /* Contrast floors every value here and in the light block holds, against
+     both --bg and --surface: --text 11:1 and no more than about 13.5:1 on
+     --bg (brighter ink on a dark ground blooms), --text-2 6.5:1, --text-3
+     4.5:1 and at least 2 below --text-2, the status colours 4.5:1 as text,
+     --on-solid 4.5:1 on each of them. --line is about 1.5:1 on --bg. */
+  --bg: #17181b;
+  --surface: #1f2125;
+  --surface-press: #26282d;
+  --sheet-bg: #1f2125;
+  --key-bg: #292c31;
+  --key-press: #33363d;
+  --text: #dddad2;
+  --text-2: #abadb2;
+  --text-3: #868990;
+  --line: #363940;
+  --amber: #e0a23c;
+  --red: #ec6a60;
+  --green: #4cc487;
   --scrim: rgba(0,0,0,.6);
   /* Text on a solid status block. */
-  --on-solid: #0b0c0e;
+  --on-solid: #17181b;
   /* Figures (times, flight numbers, money) are set in the mono face; the
      second family is the metric-matched stand-in declared below. */
   --mono: "B612 Mono", "B612 Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
   --han: -apple-system, BlinkMacSystemFont, "PingFang HK", "PingFang TC", "Noto Sans HK", "Microsoft JhengHei", "Segoe UI", sans-serif;
-  --banner-bg: rgba(255,178,36,.14);  --banner-fg: #ffb224;
-  --paid-bg: rgba(53,208,127,.16);
+  --banner-bg: rgba(224,162,60,.14);  --banner-fg: #e0a23c;
+  --paid-bg: rgba(76,196,135,.15);
   /* Colour ranks what is owed attention, loudest first: amber = the platform
      still owes money, blue = bank money in but not matched to a statement,
      neutral = waiting on someone else, dimmed green = finished business. */
-  --blue: #5aa9ff;  --blue-bg: rgba(90,169,255,.16);
+  --blue: #6aa8ee;  --blue-bg: rgba(106,168,238,.16);
 }
 @media (prefers-color-scheme: light) {
   :root {
