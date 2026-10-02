@@ -693,6 +693,31 @@ def test_settle_returns_straddling_batch_whole(client):
     assert [o["order_id"] for o in data["settlements"][0]["orders"]] == ["JUN30", "JUL01"]
 
 
+def test_settle_carries_the_month_totals_and_what_earlier_months_hold(client):
+    """The header keys and the foot are built on these, so the page never adds
+    up the same money a second way."""
+    from ride_dispatch.db import allocate
+    seed_ride("JUN", scheduled="2026-06-20 09:00:00", price=300.0, banner=0.0)
+    seed_ride("R1")
+    seed_ride("R2", scheduled="2026-07-02 09:00:00", price=300.0, banner=0.0)
+    seed_ride("R3", scheduled="2026-07-03 09:00:00", price=200.5, banner=0.0)
+    seed_ride("R4", scheduled="2026-07-04 09:00:00", price=80.0, banner=0.0)
+    seed_ride("FUTURE", scheduled="2999-07-05 09:00:00", price=900.0, banner=0.0)
+    create_batch(["R1"], confirmed=540)
+    short = create_batch(["R3", "R4"], confirmed=280.5)
+    allocate(web.DB_PATH, seed_credit(amount=200.5), short)
+    data = settle(client)
+    totals = data["month_totals"]
+    assert totals == {"fare": 1120.5, "received": 200.5, "awaiting": 540.0,
+                      "unsettled": 300.0, "short": 80.0}
+    assert round(totals["fare"] * 100) == sum(
+        round(totals[k] * 100) for k in ("received", "awaiting", "unsettled", "short"))
+    assert data["earlier"] == {"open": 300.0, "month": "2026-06"}
+    assert settle(client, month="2026-06")["earlier"] == {"open": 0.0, "month": None}
+    # A booking not yet driven is in no total of its own month either.
+    assert settle(client, month="2999-07")["month_totals"]["fare"] == 0.0
+
+
 def test_settle_rejects_bad_query(client):
     assert client.get("/api/settle?month=2026-13&platform=ride").status_code == 400
     assert client.get("/api/settle?month=2026-07-01&platform=ride").status_code == 400

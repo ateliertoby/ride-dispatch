@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from .parser import Order
 from .ingest import banner_fee, pickup_point
+from .month_totals import split_month
 from .service import PLATFORMS, needs_departure_reminder, owed_of, platform_of
 from .statement import leg_amount
 
@@ -1385,6 +1386,72 @@ def list_credits(db_path: str, platform: str) -> list[dict]:
         return credits
 
 
+def _derived_batches(conn, settlement_ids: list[int]) -> list[dict]:
+    """Whole batches by id, oldest first: members, allocations, lines, state."""
+    if not settlement_ids:
+        return []
+    members = _settlement_orders(conn, settlement_ids)
+    allocations = _batch_allocations(conn, settlement_ids)
+    adjustments = _batch_adjustments(conn, settlement_ids)
+    rows = conn.execute(
+        "SELECT * FROM settlements WHERE id IN "
+        f"({', '.join('?' * len(settlement_ids))}) ORDER BY id",
+        settlement_ids,
+    ).fetchall()
+    batches = []
+    for row in rows:
+        batch = _settlement_dict(row)
+        batch["orders"] = members[row["id"]]
+        batches.append(_derive_batch(batch, allocations[row["id"]], adjustments[row["id"]]))
+    return batches
+
+
+def _batches_for(conn, orders: list[dict], known: list[dict]) -> dict[int, dict]:
+    """Every batch split_month needs for `orders`, by id.
+
+    A 舉牌 paid ahead rides on a batch its order is not a member of, so the
+    batches the orders are on are not enough: the carrier is loaded as well.
+    """
+    by_id = {b["id"]: b for b in known}
+    wanted = {o[key] for o in orders for key in ("settlement_id", "ahead_batch") if o[key]}
+    for batch in _derived_batches(conn, sorted(wanted - set(by_id))):
+        by_id[batch["id"]] = batch
+    return by_id
+
+
+def _earlier_open(conn, month: str, platform: str, open_ids: list[int], cutoff: str) -> dict:
+    """What the months before `month` still hold, and the earliest that does.
+
+    The sum of unsettled, awaiting and short over those months, by the same
+    split the month's own totals use, so this figure and the months it points
+    at cannot disagree.  Only orders that can hold open money are read: those
+    on no batch, those on a batch still owed money, and those a batch still
+    owed money paid ahead of.  Everything else is received and adds nothing.
+    """
+    marks = ", ".join("?" * len(open_ids))
+    rows = conn.execute(
+        f"SELECT {_SETTLE_ORDER_COLS} FROM orders "
+        "WHERE coalesce(status,'active') = 'active' AND scheduled_time < ? AND scheduled_time < ? "
+        f"AND (settlement_id IS NULL OR settlement_id IN ({marks}) OR order_id IN "
+        f"(SELECT a.order_ref FROM settlement_adjustments a WHERE a.ahead = 1 "
+        f"AND a.settlement_id IN ({marks})))",
+        (f"{month}-01", cutoff, *open_ids, *open_ids),
+    ).fetchall()
+    by_month: dict[str, list[dict]] = {}
+    for row in rows:
+        if platform_of(row["service_type"]) == platform:
+            by_month.setdefault(row["scheduled_time"][:7], []).append(dict(row))
+    batches = _batches_for(conn, [o for orders in by_month.values() for o in orders], [])
+    total, earliest = 0.0, None
+    for key in sorted(by_month):
+        split = split_month(by_month[key], batches, cutoff)
+        held = split["unsettled"] + split["awaiting"] + split["short"]
+        if held > CENT:
+            total += held
+            earliest = earliest or key
+    return {"open": round(total, 2), "month": earliest}
+
+
 def get_settle_month(db_path: str, month: str, platform: str,
                      now: datetime | None = None) -> dict:
     """Everything the settle page draws for one month of one platform.
@@ -1393,6 +1460,11 @@ def get_settle_month(db_path: str, month: str, platform: str,
     month — a batch can straddle months and the day sheet labels it by its
     full date range.  counts and totals deliberately span all time: the point
     of the page is clearing old days, which the month on screen would hide.
+
+    month_totals is the month alone: its orders already driven, split by where
+    their money has got to (month_totals.split_month).  earlier is what a view
+    by month would otherwise hide — the money still open in every month before
+    this one, and the earliest month holding any.
     """
     cutoff = _now_str(now)
     with _conn(db_path) as conn:
@@ -1405,21 +1477,8 @@ def get_settle_month(db_path: str, month: str, platform: str,
         orders = [dict(r) for r in month_rows if platform_of(r["service_type"]) == platform]
 
         settlement_ids = sorted({o["settlement_id"] for o in orders if o["settlement_id"]})
-        settlements = []
-        if settlement_ids:
-            members = _settlement_orders(conn, settlement_ids)
-            allocations = _batch_allocations(conn, settlement_ids)
-            adjustments = _batch_adjustments(conn, settlement_ids)
-            rows = conn.execute(
-                "SELECT * FROM settlements WHERE id IN "
-                f"({', '.join('?' * len(settlement_ids))}) ORDER BY id",
-                settlement_ids,
-            ).fetchall()
-            for row in rows:
-                batch = _settlement_dict(row)
-                batch["orders"] = members[row["id"]]
-                settlements.append(
-                    _derive_batch(batch, allocations[row["id"]], adjustments[row["id"]]))
+        settlements = _derived_batches(conn, settlement_ids)
+        month_totals = split_month(orders, _batches_for(conn, orders, settlements), cutoff)
 
         counts = {p: 0 for p in PLATFORMS}
         unsettled = 0.0
@@ -1436,15 +1495,18 @@ def get_settle_month(db_path: str, month: str, platform: str,
         # written from a completed allocation and would agree, but only one of
         # the two can be the definition, and the allocations are it.
         awaiting = 0.0
+        open_ids = []
         for row in conn.execute(
-            "SELECT s.confirmed_amount - coalesce(sum(a.amount), 0) AS outstanding "
+            "SELECT s.id, s.confirmed_amount - coalesce(sum(a.amount), 0) AS outstanding "
             "FROM settlements s LEFT JOIN credit_allocations a ON a.settlement_id = s.id "
             "WHERE s.platform = ? GROUP BY s.id",
             (platform,),
         ):
             if row["outstanding"] > CENT:
                 awaiting += row["outstanding"]
+                open_ids.append(row["id"])
         awaiting = round(awaiting, 2)
+        earlier = _earlier_open(conn, month, platform, open_ids, cutoff)
 
     unallocated = unallocated_credits(db_path, platform)
 
@@ -1452,6 +1514,8 @@ def get_settle_month(db_path: str, month: str, platform: str,
         "now": cutoff,
         "counts": counts,
         "totals": {"unsettled": unsettled, "awaiting": awaiting},
+        "month_totals": month_totals,
+        "earlier": earlier,
         "credits": {"unallocated": len(unallocated),
                     "unallocated_sum": round(sum(c["remaining"] for c in unallocated), 2)},
         "orders": orders,

@@ -7,7 +7,7 @@ import pytest
 from ride_dispatch import db as db_module
 from ride_dispatch.db import (
     init_db, save_order, update_price, cancel_order, create_settlement, delete_settlement,
-    get_settlement, get_settle_month, open_batches, insert_credit, allocate,
+    get_settlement, get_settle_month, open_batches, insert_credit, allocate, mark_unpaid,
     settlement_candidates, statement_image_path, image_extension,
 )
 from ride_dispatch.parser import Order
@@ -509,3 +509,176 @@ def test_create_stores_a_png_under_its_own_extension(db_path):
     assert not os.path.exists(statement_image_path(db_path, sid, "jpg"))
     assert delete_settlement(db_path, sid) is True
     assert not os.path.exists(path)
+
+
+# ---- month totals and what earlier months still hold ----
+
+def credit(db_path, ref, amount, value_date="2026-08-26"):
+    return insert_credit(db_path, {"ref": ref, "platform": "ride", "amount": amount,
+                                   "currency": "HKD", "value_date": value_date,
+                                   "payer": "A B**** C***** L", "memo": "SUPPLIERPAY",
+                                   "email_id": None, "received_at": None, "recorded_at": None})
+
+
+def identity_holds(t):
+    return round(t["fare"] * 100) == sum(
+        round(t[k] * 100) for k in ("received", "awaiting", "unsettled", "short"))
+
+
+def seed_every_state(db_path):
+    """One August with a leg in each state, and a booking not yet driven."""
+    seed(db_path, "LOOSE", "2026-08-20 09:00:00", 210.0)
+    seed(db_path, "WAIT1", "2026-08-21 09:00:00", 280.0)
+    seed(db_path, "WAIT2", "2026-08-21 12:00:00", 300.5)
+    seed(db_path, "PAID", "2026-08-22 09:00:00", 250.0)
+    seed(db_path, "SHORT1", "2026-08-23 09:00:00", 400.0)
+    seed(db_path, "SHORT2", "2026-08-23 12:00:00", 80.0)
+    seed(db_path, "FUTURE", "2026-08-27 09:00:00", 999.0)
+    create_settlement(db_path, "ride", ["WAIT1", "WAIT2"], 580.5, "2026-08-24", now=NOW)
+    paid = create_settlement(db_path, "ride", ["PAID"], 250.0, "2026-08-24", now=NOW)
+    short = create_settlement(db_path, "ride", ["SHORT1", "SHORT2"], 480.0, "2026-08-25", now=NOW)
+    allocate(db_path, credit(db_path, "R-PAID", 250.0), paid)
+    allocate(db_path, credit(db_path, "R-SHORT", 400.0), short)
+    return short
+
+
+def test_settle_month_splits_the_month_by_where_its_money_is(db_path):
+    short = seed_every_state(db_path)
+    mark_unpaid(db_path, short, ["SHORT2"])
+    data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["month_totals"] == {"fare": 1520.5, "received": 650.0, "awaiting": 580.5,
+                                    "unsettled": 210.0, "short": 80.0}
+    assert identity_holds(data["month_totals"])
+    assert data["earlier"] == {"open": 0.0, "month": None}
+
+
+def test_a_short_statement_with_no_leg_ticked_is_still_short_by_what_it_is_owed(db_path):
+    seed_every_state(db_path)
+    totals = get_settle_month(db_path, "2026-08", "ride", now=NOW)["month_totals"]
+    assert totals == {"fare": 1520.5, "received": 650.0, "awaiting": 580.5,
+                      "unsettled": 210.0, "short": 80.0}
+
+
+def test_month_totals_leave_the_all_time_totals_as_they_were(db_path):
+    """Other readers use them, and they answer a different question: what a
+    batch is still owed, not what its orders are worth."""
+    seed_every_state(db_path)
+    data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["totals"] == {"unsettled": 210.0, "awaiting": 660.5}
+    assert data["counts"] == {"ride": 1, "didi": 0, "uber": 0, "foodpanda": 0}
+
+
+def test_month_totals_count_one_platform(db_path):
+    seed(db_path, "A1", "2026-08-20 09:00:00", 210.0)
+    seed(db_path, "D1", "2026-08-20 10:00:00", 150.0, service_type="滴滴")
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["month_totals"]["fare"] == 210.0
+    assert get_settle_month(db_path, "2026-08", "didi", now=NOW)["month_totals"]["fare"] == 150.0
+
+
+def test_an_empty_month_has_zero_totals(db_path):
+    data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["month_totals"] == {"fare": 0.0, "received": 0.0, "awaiting": 0.0,
+                                    "unsettled": 0.0, "short": 0.0}
+    assert data["earlier"] == {"open": 0.0, "month": None}
+
+
+def test_earlier_is_an_older_unsettled_order(db_path):
+    seed(db_path, "OLD", "2026-07-15 09:00:00", 300.0)
+    seed(db_path, "A1", "2026-08-20 09:00:00", 210.0)
+    data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["earlier"] == {"open": 300.0, "month": "2026-07"}
+    assert data["month_totals"]["unsettled"] == 210.0
+    # The month itself and anything after it are not earlier.
+    assert get_settle_month(db_path, "2026-07", "ride", now=NOW)["earlier"] == {"open": 0.0, "month": None}
+    assert get_settle_month(db_path, "2026-09", "ride", now=NOW)["earlier"] == {"open": 510.0, "month": "2026-07"}
+
+
+def test_earlier_adds_up_what_every_earlier_month_would_show(db_path):
+    """Unsettled, awaiting and short, over every month before the one asked
+    for, named by the earliest month that still holds any of it."""
+    seed(db_path, "MAY", "2026-05-10 09:00:00", 120.0)
+    create_settlement(db_path, "ride", ["MAY"], 120.0, "2026-05-12", now=NOW)
+    seed(db_path, "JUN1", "2026-06-10 09:00:00", 400.0)
+    seed(db_path, "JUN2", "2026-06-11 09:00:00", 80.0)
+    short = create_settlement(db_path, "ride", ["JUN1", "JUN2"], 480.0, "2026-06-12", now=NOW)
+    allocate(db_path, credit(db_path, "R-JUN", 400.0), short)
+    seed(db_path, "JUL", "2026-07-15 09:00:00", 300.0)
+    seed(db_path, "DIDI", "2026-07-16 09:00:00", 150.0, service_type="滴滴")
+    seed(db_path, "AUG", "2026-08-20 09:00:00", 210.0)
+    data = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert data["earlier"] == {"open": 500.0, "month": "2026-05"}
+    by_month = sum(
+        t["unsettled"] + t["awaiting"] + t["short"]
+        for t in (get_settle_month(db_path, m, "ride", now=NOW)["month_totals"]
+                  for m in ("2026-05", "2026-06", "2026-07")))
+    assert data["earlier"]["open"] == round(by_month, 2)
+
+
+def test_earlier_skips_months_that_are_fully_received(db_path):
+    seed(db_path, "JUN", "2026-06-10 09:00:00", 400.0)
+    paid = create_settlement(db_path, "ride", ["JUN"], 400.0, "2026-06-12", now=NOW)
+    allocate(db_path, credit(db_path, "R-JUN", 400.0), paid)
+    seed(db_path, "JUL", "2026-07-15 09:00:00", 300.0)
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["earlier"] == {
+        "open": 300.0, "month": "2026-07"}
+
+
+def seed_straddling_short(db_path):
+    seed(db_path, "JUL31", "2026-07-31 20:00:00", 250.25)
+    seed(db_path, "AUG01", "2026-08-01 09:00:00", 600.0)
+    short = create_settlement(db_path, "ride", ["JUL31", "AUG01"], 850.25, "2026-08-03", now=NOW)
+    allocate(db_path, credit(db_path, "R-STRADDLE", 600.0), short)
+    return short
+
+
+def test_a_straddling_short_statement_is_short_in_the_month_of_its_unpaid_leg(db_path):
+    short = seed_straddling_short(db_path)
+    mark_unpaid(db_path, short, ["JUL31"])
+    august = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert august["month_totals"] == {"fare": 600.0, "received": 600.0, "awaiting": 0.0,
+                                      "unsettled": 0.0, "short": 0.0}
+    assert august["earlier"] == {"open": 250.25, "month": "2026-07"}
+    july = get_settle_month(db_path, "2026-07", "ride", now=NOW)
+    assert july["month_totals"] == {"fare": 250.25, "received": 0.0, "awaiting": 0.0,
+                                    "unsettled": 0.0, "short": 250.25}
+    assert july["earlier"] == {"open": 0.0, "month": None}
+
+
+def test_a_straddling_short_statement_with_no_tick_is_short_in_its_last_month(db_path):
+    """Until a leg is named the shortfall sits with the statement's latest
+    order, so the earlier month does not report money the later one shows."""
+    seed_straddling_short(db_path)
+    august = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert august["month_totals"] == {"fare": 600.0, "received": 349.75, "awaiting": 0.0,
+                                      "unsettled": 0.0, "short": 250.25}
+    assert august["earlier"] == {"open": 0.0, "month": None}
+    july = get_settle_month(db_path, "2026-07", "ride", now=NOW)
+    assert july["month_totals"] == {"fare": 250.25, "received": 250.25, "awaiting": 0.0,
+                                    "unsettled": 0.0, "short": 0.0}
+    assert get_settle_month(db_path, "2026-09", "ride", now=NOW)["earlier"] == {
+        "open": 250.25, "month": "2026-08"}
+
+
+def test_the_part_paid_ahead_follows_its_own_batch_across_months(db_path):
+    """The 舉牌 rode on an August statement that is still waiting, while its
+    July trip sits on no statement: August loads a batch none of its own
+    orders is on, and July's money is open twice over."""
+    seed(db_path, "B1", "2026-07-30 22:00:00", 300.0, service_type="接机", additional_services="举牌")
+    seed(db_path, "A1", "2026-08-02 10:00:00", 210.0)
+    held = next(o for o in settlement_candidates(db_path, ["2026-07-30"], now=NOW)
+                if o["order_id"] == "B1")
+    banner = held["banner_fee"]
+    assert banner > 0
+    create_settlement(db_path, "ride", ["A1"], 210.0 + banner, "2026-08-05", now=NOW,
+                      adjustments=[{"order_ref": "B1", "date": "2026-07-30", "amount": banner,
+                                    "ahead": True}])
+    july = get_settle_month(db_path, "2026-07", "ride", now=NOW)["month_totals"]
+    assert july == {"fare": 300.0 + banner, "received": 0.0, "awaiting": banner,
+                    "unsettled": 300.0, "short": 0.0}
+    august = get_settle_month(db_path, "2026-08", "ride", now=NOW)
+    assert august["earlier"] == {"open": 300.0 + banner, "month": "2026-07"}
+    # Once the trip is on a paid statement, only the line paid ahead is open.
+    trip = create_settlement(db_path, "ride", ["B1"], 300.0, "2026-08-10", now=NOW)
+    allocate(db_path, credit(db_path, "R-TRIP", 300.0), trip)
+    assert get_settle_month(db_path, "2026-08", "ride", now=NOW)["earlier"] == {
+        "open": banner, "month": "2026-07"}
