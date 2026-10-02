@@ -4,9 +4,15 @@
 
 Every value is invented. Rows are written through ride_dispatch.db's own
 functions, the ones the bot and the web app use, so the database is one the
-application could have produced. Dates are offsets from `today`, and nothing
-else varies, so the same `today` always gives the same database: screenshots
-taken from two builds can be compared pixel for pixel.
+application could have produced. Dates are offsets from `today`, or days of
+the months before today's, and nothing else varies, so the same `today` always
+gives the same database: screenshots taken from two builds can be compared
+pixel for pixel.
+
+Most rows are placed by offset, so which month a statement falls in depends
+on the date. What has to be true of a month whatever the date is placed by
+the calendar instead (_months_back): a statement whose legs lie either side of
+a month's first day, and a month of one platform with nothing left to do.
 
 PATH must not exist yet. The script never opens a database it did not create.
 """
@@ -43,8 +49,12 @@ def _oid(n: int) -> str:
 
 # What the screenshot and end-to-end scripts aim at. Ids are AUTOINCREMENT on a
 # fresh database, so creation order fixes them; seed() checks that it did.
-BATCH = {"paid": 1, "short": 2, "awaiting": 3, "held_back": 4, "ahead": 5, "group": 6}
-CREDIT = {"paid": 1, "short": 2, "exact": 3, "partial": 4, "archived": 5, "group": 6}
+BATCH = {"paid": 1, "short": 2, "awaiting": 3, "held_back": 4, "ahead": 5, "group": 6,
+         "straddle": 7, "clean": 8}
+CREDIT = {"paid": 1, "short": 2, "exact": 3, "partial": 4, "archived": 5, "group": 6,
+          "straddle": 7, "clean": 8}
+# The platform each of them is on, where it is not the ride platform.
+PLATFORM = {"clean": "uber"}
 ORDER = {
     "done_pickup": _oid(1),
     "landed_banner": _oid(2),
@@ -62,6 +72,27 @@ def day(today: date, back: int) -> str:
     return (today - timedelta(days=back)).isoformat()
 
 
+def month_start(today: date, back: int) -> date:
+    """The first day of the month `back` months before today's."""
+    m = today.year * 12 + today.month - 1 - back
+    return date(m // 12, m % 12 + 1, 1)
+
+
+# How many months before today's the calendar-placed rows lie. The rows placed
+# by offset reach 38 days back, which is never earlier than the 22nd of the
+# month two before today's, so the first three weeks of that month and all of
+# the month before it are free of them.
+STRADDLE_MONTHS_BACK = 2
+CLEAN_MONTHS_BACK = 2
+
+
+def straddle_days(today: date) -> list:
+    """The four service days of the statement that straddles two months: the
+    last two days of one month and the first two of the next."""
+    first = month_start(today, STRADDLE_MONTHS_BACK)
+    return [first + timedelta(days=n) for n in (-2, -1, 0, 1)]
+
+
 def targets(today: date) -> dict:
     """Names for the rows a script has to find, without opening the database."""
     return {
@@ -73,6 +104,14 @@ def targets(today: date) -> dict:
         "batched_day": day(today, 26),
         # A day whose legs no batch has claimed.
         "loose_day": day(today, 1),
+        # A day with one leg on a statement and one on none.
+        "mixed_day": day(today, 5),
+        # The month a statement reaches into from the month before it.
+        "straddle_month": month_start(today, STRADDLE_MONTHS_BACK).isoformat()[:7],
+        # A month of a platform with every fare collected, nothing unmatched
+        # and nothing open before it.
+        "clean": {"platform": PLATFORM["clean"],
+                  "month": month_start(today, CLEAN_MONTHS_BACK).isoformat()[:7]},
         # A day each batch covers: where its sheet is reached from.
         "batch_day": {"paid": day(today, 34), "short": day(today, 26), "awaiting": day(today, 19),
                       "held_back": day(today, 12), "ahead": day(today, 6), "group": day(today, 8)},
@@ -127,6 +166,11 @@ class _Seeder:
             db.update_price(self.path, order_id, price)
         return order_id
 
+    def back(self, d: date) -> int:
+        """A date as the number of days before today, which is how every row
+        is placed."""
+        return (self.today - d).days
+
     def quick(self, kind: str, back: int, hhmm: str, price: float, toll: float = 0.0) -> str:
         service = {"didi": "滴滴", "uber": "Uber", "foodpanda": "foodpanda"}[kind]
         order_id = f"{kind}_{day(self.today, back).replace('-', '')}{hhmm.replace(':', '')}_demo"
@@ -135,7 +179,7 @@ class _Seeder:
         return order_id
 
     def batch(self, key: str, order_ids: list[str], confirmed: float, settled_back: int, **kw) -> int:
-        sid = db.create_settlement(self.path, "ride", order_ids, confirmed,
+        sid = db.create_settlement(self.path, PLATFORM.get(key, "ride"), order_ids, confirmed,
                                    day(self.today, settled_back), now=self.now, **kw)
         if sid != BATCH[key]:
             raise RuntimeError(f"batch {key} got id {sid}, expected {BATCH[key]}")
@@ -143,7 +187,7 @@ class _Seeder:
 
     def credit(self, key: str, amount: float, back: int) -> int:
         cid = db.insert_credit(self.path, {
-            "ref": f"DEMO-REF-{CREDIT[key]:04d}", "platform": "ride", "amount": amount,
+            "ref": f"DEMO-REF-{CREDIT[key]:04d}", "platform": PLATFORM.get(key, "ride"), "amount": amount,
             "currency": "HKD", "value_date": day(self.today, back),
             "payer": "DEMO PLATFORM LTD", "memo": "SUPPLIERPAY",
             "email_id": None, "received_at": None, "recorded_at": None,
@@ -185,6 +229,37 @@ def _neighbours(s: _Seeder) -> None:
     s.ride(12, "送机", 1, "16:30", 400, flight="UO622", place=WANCHAI)
     s.ride(21, "接机", -1, "11:45", 490, flight="HX237", place=MONGKOK, exit_minutes=35)
     s.ride(22, "送机", -1, "19:00", 410, flight="CX0731", place=TST)
+
+
+def _months_back(s: _Seeder) -> dict:
+    """The orders placed by the calendar, in months before today's; returns
+    the legs each of their statements will hold. The statements themselves
+    are written after the ledger's, so the ids scripts aim at stay as they
+    are."""
+    # Four legs either side of a month's first day, settled as one statement.
+    a, b, c, d = (s.back(x) for x in straddle_days(s.today))
+    straddle = [s.ride(901, "接机", a, "09:10", 470, flight="CX0488", place=TST),
+                s.ride(902, "送机", b, "16:20", 400, place=WANCHAI),
+                s.ride(903, "接机", c, "10:30", 480, flight="UO623", place=MONGKOK),
+                s.ride(904, "接站", d, "14:00", 360, place=TST)]
+    # One month of another platform, every trip of it on one statement.
+    first = month_start(s.today, CLEAN_MONTHS_BACK)
+    clean = [s.quick("uber", s.back(first + timedelta(days=5)), "09:30", 180, 20),
+             s.quick("uber", s.back(first + timedelta(days=12)), "21:10", 152.5),
+             s.quick("uber", s.back(first + timedelta(days=19)), "13:40", 240, 25)]
+    return {"straddle": straddle, "clean": clean}
+
+
+def _months_back_settled(s: _Seeder, legs: dict) -> None:
+    """The statements over those orders, each collected in full."""
+    first = month_start(s.today, STRADDLE_MONTHS_BACK)
+    s.batch("straddle", legs["straddle"], 1710, s.back(first + timedelta(days=4)))
+    db.allocate(s.path, s.credit("straddle", 1710, s.back(first + timedelta(days=6))), BATCH["straddle"])
+    # Nothing of this platform is open before this month and no credit of it
+    # is unmatched, so the month has nothing left to do.
+    first = month_start(s.today, CLEAN_MONTHS_BACK)
+    s.batch("clean", legs["clean"], 617.5, s.back(first + timedelta(days=23)))
+    db.allocate(s.path, s.credit("clean", 617.5, s.back(first + timedelta(days=25))), BATCH["clean"])
 
 
 def _ledger(s: _Seeder) -> None:
@@ -250,6 +325,9 @@ def _ledger(s: _Seeder) -> None:
     ahead = [s.ride(501, "接机", 6, "09:30", 515, flight="CX0488", place=WANCHAI),
              s.ride(502, "送机", 6, "17:00", 395, place=TST),
              s.ride(503, "接机", 5, "12:20", 475, flight="UO623", place=SHATIN)]
+    # A leg of the same day the statement left out, which no later one has
+    # taken: the day has money on a statement and money on none.
+    s.ride(504, "送机", 5, "18:40", 430, place=WANCHAI)
     s.batch("ahead", ahead, 1425, 2, adjustments=[
         {"order_ref": ORDER["held_trip"], "date": day(s.today, 3), "amount": 40.0, "ahead": True}])
 
@@ -277,7 +355,9 @@ def seed(path: str, today: date) -> dict:
     s = _Seeder(path, today)
     # Oldest first, so the price suggestion has history by the time today's
     # orders exist and ids follow the calendar.
+    legs = _months_back(s)
     _ledger(s)
+    _months_back_settled(s, legs)
     _neighbours(s)
     _today(s)
     return targets(today)

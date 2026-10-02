@@ -1,0 +1,130 @@
+"""The synthetic database the screenshot and end-to-end scripts run on.
+
+It has to hold each form the settle page can take, from its own rows and at
+any date, and every month of it has to add up.
+"""
+import os
+import sys
+from datetime import date, datetime, time, timedelta
+
+import pytest
+
+from ride_dispatch import db
+from ride_dispatch.service import PLATFORMS
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+
+import seed_demo_db  # noqa: E402
+
+# Either side of a month's first and last day and of a year's end, a leap
+# day, and a day in the middle of a month.
+TODAYS = ["2026-10-02", "2026-10-08", "2026-10-15", "2026-10-31", "2026-11-01", "2026-12-31",
+          "2027-01-01", "2027-03-01", "2028-02-29", "2028-03-31"]
+PARTS = ("received", "awaiting", "unsettled", "short")
+
+
+class Seeded:
+    def __init__(self, path: str, today: date):
+        self.path = path
+        self.today = today
+        self.now = datetime.combine(today, time(seed_demo_db.DEMO_HOUR, 0))
+        self.t = seed_demo_db.seed(path, today)
+
+    def month(self, months_back: int, platform: str = "ride") -> dict:
+        key = seed_demo_db.month_start(self.today, months_back).isoformat()[:7]
+        return db.get_settle_month(self.path, key, platform, now=self.now)
+
+    def months(self, platform: str = "ride") -> list:
+        """Every month the seed reaches and the one after, oldest first."""
+        return [self.month(n, platform) for n in (3, 2, 1, 0, -1)]
+
+    def batches(self, platform: str = "ride") -> dict:
+        return {b["id"]: b for m in self.months(platform) for b in m["settlements"]}
+
+
+@pytest.fixture(params=TODAYS)
+def seeded(request, tmp_path):
+    return Seeded(str(tmp_path / "demo.db"), date.fromisoformat(request.param))
+
+
+def test_every_month_of_every_platform_adds_up(seeded):
+    for platform in PLATFORMS:
+        for month in seeded.months(platform):
+            totals = month["month_totals"]
+            assert totals is not None and month["earlier"] is not None
+            assert round(totals["fare"] * 100) == sum(round(totals[p] * 100) for p in PARTS)
+            assert all(totals[p] >= 0 for p in PARTS)
+
+
+def test_the_months_between_them_count_every_fare_already_driven(seeded):
+    from ride_dispatch.service import expected_of, platform_of
+    for platform in PLATFORMS:
+        fares = sum(m["month_totals"]["fare"] for m in seeded.months(platform))
+        driven = 0.0
+        for back in range(-2, 125):
+            for o in db.get_orders_by_date(seeded.path, seed_demo_db.day(seeded.today, back)):
+                if (o["status"] or "active") == "active" and platform_of(o["service_type"]) == platform \
+                        and o["scheduled_time"] < db._now_str(seeded.now):
+                    driven += expected_of(o)
+        assert round(fares * 100) == round(driven * 100)
+
+
+def test_unsettled_days_in_a_row_and_a_mixed_day(seeded):
+    orders = [o for m in seeded.months() for o in m["orders"]]
+
+    def on(back):
+        return [o for o in orders if o["scheduled_time"].startswith(seed_demo_db.day(seeded.today, back))]
+
+    for back in (3, 2, 1):
+        assert on(back) and all(o["settlement_id"] is None for o in on(back))
+    mixed = [o for o in orders if o["scheduled_time"].startswith(seeded.t["mixed_day"])]
+    assert {o["settlement_id"] for o in mixed} == {None, seed_demo_db.BATCH["ahead"]}
+
+
+def test_a_statement_paid_short_names_its_unpaid_leg(seeded):
+    short = seeded.batches()[seed_demo_db.BATCH["short"]]
+    assert (short["state"], short["outstanding"]) == ("partial", 380.0)
+    assert [o["order_id"] for o in short["orders"] if o["unpaid"]] == [seed_demo_db.ORDER["short_unpaid_leg"]]
+    assert sum(m["month_totals"]["short"] for m in seeded.months()) == 380.0
+
+
+def test_a_statement_straddles_two_months(seeded):
+    straddle = seeded.batches()[seed_demo_db.BATCH["straddle"]]
+    days = sorted({o["scheduled_time"][:10] for o in straddle["orders"]})
+    assert days == [d.isoformat() for d in seed_demo_db.straddle_days(seeded.today)]
+    assert len({d[:7] for d in days}) == 2 and days[2][:7] == seeded.t["straddle_month"]
+    assert straddle["state"] == "paid"
+    # Each month counts its own two legs and no more.
+    assert seeded.month(3)["month_totals"] == {
+        "fare": 870.0, "received": 870.0, "awaiting": 0.0, "unsettled": 0.0, "short": 0.0}
+
+
+def test_a_statement_with_days_apart_and_one_that_differs_from_its_fares(seeded):
+    from ride_dispatch.service import owed_of
+    batches = seeded.batches()
+    held = sorted({date.fromisoformat(o["scheduled_time"][:10])
+                   for o in batches[seed_demo_db.BATCH["held_back"]]["orders"]})
+    assert any(b - a > timedelta(days=1) for a, b in zip(held, held[1:]))
+    waiting = batches[seed_demo_db.BATCH["awaiting"]]
+    assert waiting["state"] == "awaiting"
+    assert round(waiting["confirmed_amount"] - sum(owed_of(o) for o in waiting["orders"]), 2) == -20.0
+
+
+def test_bank_credits_unmatched_and_put_away(seeded):
+    states = [c["state"] for c in db.list_credits(seeded.path, "ride")]
+    assert "open" in states and "partial" in states and "archived" in states
+
+
+def test_the_current_month_has_open_money_before_it(seeded):
+    earlier = seeded.month(0)["earlier"]
+    assert earlier["open"] > 0 and earlier["month"] < seeded.today.isoformat()[:7]
+
+
+def test_one_month_has_nothing_left_to_do(seeded):
+    clean = seeded.t["clean"]
+    month = db.get_settle_month(seeded.path, clean["month"], clean["platform"], now=seeded.now)
+    assert month["month_totals"] == {
+        "fare": 617.5, "received": 617.5, "awaiting": 0.0, "unsettled": 0.0, "short": 0.0}
+    assert month["earlier"] == {"open": 0.0, "month": None}
+    assert not [c for c in db.list_credits(seeded.path, clean["platform"]) if c["state"] in ("open", "partial")]
+    assert len(month["orders"]) == 3 and len(month["settlements"]) == 1

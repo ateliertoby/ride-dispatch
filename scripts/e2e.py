@@ -2754,6 +2754,9 @@ def settle_cells(s: Session) -> None:
     want = {38: ("unsettled", "450"), 1: ("unsettled", "940"), 3: ("unsettled", "980"), 0: ("unsettled", "1890"),
             27: ("short", "960"), 26: ("short", "840"), 25: ("short", "510"),
             19: ("awaiting", "900"), 18: ("awaiting", "390"), 6: ("awaiting", "910"),
+            # One leg on a statement awaiting its transfer and one on none:
+            # the worse state, and still the whole day's fare.
+            5: ("unsettled", "905"),
             34: ("received", "896.55"), 33: ("received", "480"), 12: ("received", "570"),
             -1: ("future", "900")}
     s.eq({n: s.cell_state(n) for n in want}, want, "the state and the figure of each seeded day")
@@ -3208,12 +3211,13 @@ def settle_foot_items(s: Session) -> None:
 @check("settle.the-keys-and-the-foot-add-up-to-the-months-fare")
 def settle_identity(s: Session) -> None:
     """本月車費 = 已收 + 等過數 + 未結算 + 收少咗, in cents, read off the
-    screen for each month the seed reaches: the four keys and the foot's
-    shortfall, which is absent where there is none."""
+    screen for each month the seed reaches, the earliest of them holding only
+    part of a statement: the four keys and the foot's shortfall, which is
+    absent where there is none."""
     cur = s.today.replace(day=1)
     s.open_settle()
     shorts = []
-    for m in (cur, add_months(cur, -1), add_months(cur, -2)):
+    for m in (cur, add_months(cur, -1), add_months(cur, -2), add_months(cur, -3)):
         s.to_month(m)
         key = {name: cents(s.text(f'.lkey[data-lens="{name}"] .v')) for name, _ in TOTAL_KEYS}
         short = cents(s.text(".foot [data-short] .v")) if s.count(".foot [data-short]") else 0
@@ -3221,7 +3225,7 @@ def settle_identity(s: Session) -> None:
              f"the keys and the foot's shortfall of {month_key(m)} against its fare: {key}, {short}")
         s.eq(short, round(s.api("GET", settle_path(m))["month_totals"]["short"] * 100), f"the foot's shortfall of {month_key(m)} against the server's")
         shorts.append(short)
-    s.eq(sorted(shorts), [0, 0, 38000], "the months holding the seed's shortfall")
+    s.eq(sorted(shorts), [0, 0, 0, 38000], "the months holding the seed's shortfall")
     s.eq(s.writes, [], "writes")
 
 
@@ -3398,6 +3402,41 @@ def settle_foot_follows(s: Session) -> None:
     s.expect(s.totals() != here, "the seed gives two platforms the same foot")
     s.tap('[aria-label="前一個月"]')
     s.eq((s.view_month(), s.totals()), (month_key(prev), want_foot(s, "didi")), "another platform's foot after ←")
+    s.eq(s.writes, [], "writes")
+
+
+@check("settle.a-month-with-nothing-left-to-do-says-so")
+def settle_clean_month(s: Session) -> None:
+    """The seeded month of a platform with every fare collected, no credit
+    unmatched and nothing open before it: the month's fare is all received,
+    its days are records, the foot is the one plain line, and each list says
+    what it holds."""
+    clean = s.t["clean"]
+    first = date.fromisoformat(clean["month"] + "-01")
+    s.open_settle()
+    s.tap(f'.tab[data-f="{clean["platform"]}"]')
+    s.to_month(first)
+    s.eq(s.keys_text(), ["本月車費$617.50", "已收$617.50", "等過數$0.00", "未結算$0.00"], "the keys of the clean month")
+    s.eq(s.keys_text(), key_texts(s.api("GET", settle_path(first, clean["platform"]))["month_totals"]), "the keys against the server's figures")
+    s.eq((s.totals(), s.count(".foot button") + s.count(".foot .fkey")), (["全部啱數"], 0), "the foot of the clean month")
+    s.eq(s.totals(), want_foot(s, clean["platform"]), "the foot against the server's figures")
+    days = s.page.eval_on_selector_all(
+        f'#grid .cell[data-d^="{clean["month"]}"]', "els => els.map(e => [+e.dataset.d.slice(8), e.className, e.querySelector('.amt').textContent])")
+    s.eq(days, [[6, "cell st-received", "200"], [13, "cell st-received", "152.50"], [20, "cell st-received", "265"]],
+         "the days of the clean month")
+    # No key but the fare's own wears a state's colour or rule.
+    keys = {k["lens"]: k for k in s.page.evaluate(KEYS_JS)}
+    s.eq([(keys[n]["ink"], keys[n]["rule"][1]) for n in ("received", "awaiting", "unsettled")],
+         [(s.token("--text-2"), CLEAR)] * 3, "the ink and rule of the keys with nothing owed")
+    s.tap('.lkey[data-lens="unsettled"]')
+    s.eq(s.count(f'#grid .cell.lit[data-d^="{clean["month"]}"]'), 0, "days lit under 未結算 in the clean month")
+    s.tap('.lkey[data-lens="awaiting"]')
+    s.eq((s.list_rows(), s.texts("#settle-list .empty")), ([], ["今個月冇等過數嘅結算單"]), "the waiting list of the clean month")
+    s.tap('.lkey[data-lens="received"]')
+    rows = s.list_rows()
+    s.eq([(r["id"], r["sub"][0], r["amount"], r["tags"], r["month"], r["gap"], r["receded"]) for r in rows],
+         [(s.t["batch"]["clean"], "6日、13日、20日 · 3 程", "$617.50", ["已收齊"], "", "", True)], "the collected list of the clean month")
+    s.eq(s.totals(), ["全部啱數"], "the foot under a list")
     s.eq(s.writes, [], "writes")
 
 
@@ -3655,6 +3694,10 @@ def settle_unsettled_lens(s: Session) -> None:
     s.eq((s.cell_state(19), s.cell_state(18)), (("unsettled", "390"), ("awaiting", "390")),
          "the mixed day and its statement's other day under 未結算")
     adds_up("with the mixed day in view")
+    # The seed's own mixed day, which nothing was rewritten for: of its 905,
+    # the 430 leg its day's statement left out.
+    s.eq((s.cell_state(5), lens_strip(s)[s.back(5).isoformat()][:3]), (("unsettled", "430"), (True, False, True)),
+         "the seeded mixed day under 未結算")
     strip = lens_strip(s)
     s.eq((strip[mixed_day.isoformat()][:3], strip[s.back(18).isoformat()][:3], strip[s.back(34).isoformat()][:3]),
          ((True, False, True), (False, True, False), (False, True, False)), "lit and receded: mixed, awaiting, collected")
@@ -3956,7 +3999,8 @@ def settle_lists(s: Session) -> None:
     # Every seeded statement was listed, each under the key its state belongs
     # to: the one paid short is with the money that came, not with the waiting.
     s.eq((sorted(set(seen["awaiting"])), sorted(set(seen["received"]))),
-         (sorted([b["awaiting"], b["ahead"], b["group"]]), sorted([b["paid"], b["short"], b["held_back"]])),
+         (sorted([b["awaiting"], b["ahead"], b["group"]]),
+          sorted([b["paid"], b["short"], b["held_back"], b["straddle"]])),
          "the seeded statements under each key")
 
     # The month of the statement paid short, under 已收: it leads, it is not
@@ -4051,45 +4095,36 @@ def settle_list_layout(s: Session) -> None:
 
 @check("settle.a-statement-across-two-months-says-its-part-of-each")
 def settle_list_straddle(s: Session) -> None:
-    """A collected statement with one leg in the month before its others:
-    listed in both months, its days written with their months, and in each
-    its part of that month."""
-    kept = seed_demo_db._oid(402)
-    moved = seed_demo_db._oid(401)
-    # The month the statement's other legs begin in, and a day three days
-    # before that month.
-    home = s.back(12).replace(day=1)
-    early = home - timedelta(days=3)
-
-    def change(body: dict, path: str) -> None:
-        for x in body["settlements"]:
-            if x["id"] == s.t["batch"]["held_back"]:
-                for o in x["orders"]:
-                    if o["order_id"] == moved:
-                        o["scheduled_time"] = early.isoformat() + o["scheduled_time"][10:]
-
-    def served(d: date) -> dict:
-        body = s.api("GET", settle_path(d))
-        change(body, settle_path(d))
-        return body
-
-    rewrite_settle(s, change)
-    s.open_settle()
-    books = {month_key(m): served(m) for m in (home, early, add_months(home, 1), s.today)}
+    """The seeded statement whose legs lie either side of a month's first
+    day: listed in both months, its days written with their months, and in
+    each its part of that month, which is what that month's key counts."""
+    home = date.fromisoformat(s.t["straddle_month"] + "-01")
+    early = add_months(home, -1)
+    days = seed_demo_db.straddle_days(s.today)
+    s.eq([month_key(d) for d in days], [month_key(early)] * 2 + [month_key(home)] * 2, "the months the seeded legs are in")
+    books = {month_key(m): s.api("GET", settle_path(m)) for m in (home, early)}
     batches = list({x["id"]: x for body in books.values() for x in body["settlements"]}.values())
-    batch = [x for x in batches if x["id"] == s.t["batch"]["held_back"]][0]
-    s.expect(kept in [o["order_id"] for o in batch["orders"]], "the seeded statement lost a leg")
+    batch = [x for x in batches if x["id"] == s.t["batch"]["straddle"]][0]
+    s.open_settle()
     s.tap('.lkey[data-lens="received"]')
-    for m in (home, early):
+    for m, part in ((home, 84000), (early, 87000)):
         s.to_month(m)
         month = month_key(m)
         row = [r for r in s.list_rows() if r["id"] == batch["id"]]
         s.expect(row, f"the statement is not listed in {month}")
         want = row_text(batch, "received", month, batches, s.today)
         s.eq(statements(row), [want], f"the statement's row in {month}")
-        s.expect(want["month"].startswith("其中本月 $") and "/" in want["sub"][0], f"the check expected no part and bare days: {want}")
-        s.eq(cents(row[0]["month"].replace("其中本月 ", "")), month_part(batch, month), f"its part of {month}, in cents")
-    s.eq(month_part(batch, month_key(early)), 44000, "the part of the month holding the one leg moved there")
+        s.eq(want["sub"][0], f"{md_slash(days[0])}–{md_slash(days[-1])} · 4 程", "its days, each end with its month")
+        s.eq((row[0]["amount"], cents(row[0]["month"].replace("其中本月 ", "")), month_part(batch, month)),
+             ("$1,710.00", part, part), f"the statement's own figure and its part of {month}, in cents")
+    # The earlier month holds nothing else, so the part is the whole of its key.
+    s.eq(cents(s.text('.lkey[data-lens="received"] .v')), 87000, "the 已收 key of the month holding two of its legs alone")
+    # On the calendar each month's days carry their own fares, collected.
+    s.tap('.lkey[data-lens="fare"]')
+    s.eq([s.page.eval_on_selector(f'.cell[data-d="{d.isoformat()}"]', "e => [e.className, e.querySelector('.amt').textContent]")
+          for d in days],
+         [["cell st-received", "470"], ["cell st-received", "400"], ["cell st-received", "480"], ["cell st-received", "360"]],
+         "the statement's four days on the strip")
     s.eq(s.writes, [], "writes")
 
 
@@ -4503,7 +4538,9 @@ def settle_allocate_all(s: Session) -> None:
     s.eq(len(s.texts(".sheet.show .sum-row.link")), 2, "the batches it paid")
     s.close_sheets()
     s.reach(s.cell(9))
-    s.eq([s.cell_state(n)[0] for n in (9, 8, 6, 5)], ["received"] * 4, "the days of both batches")
+    # The last of them also holds a leg its statement left out, which no
+    # transfer has paid for.
+    s.eq([s.cell_state(n)[0] for n in (9, 8, 6, 5)], ["received"] * 3 + ["unsettled"], "the days of both batches")
     s.eq(len(s.writes), 1, "writes")
 
 
