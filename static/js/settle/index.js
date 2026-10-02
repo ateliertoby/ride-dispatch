@@ -16,7 +16,7 @@ import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
 import { packLanes } from '../lanes.js';
-import { keyFigure } from './days.js';
+import { cellFigure, dayRunsLabel, dayState, keyFigure, statementName } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -67,10 +67,10 @@ let BATCH_OF = new Map();
 // Which batches have their order list unfolded. Page state rather than DOM
 // state, so an SSE repaint mid-read does not fold the list away.
 let foldOpen = new Set();
-// Which money relation the strip is lighting: null, or { kind, id } naming a
-// batch or a credit. Page state rather than DOM state, because the relation
-// outlives the paint that drew it -- a month arriving under the scroll, or an
-// SSE repaint, must not drop what the operator is reading.
+// Which statement's days the strip is lighting: null, or { kind: 'batch', id }.
+// Page state rather than DOM state, because the relation outlives the paint
+// that drew it -- a month arriving under the scroll, or an SSE repaint, must
+// not drop what the operator is reading.
 let focus = null;
 
 // The operator works one platform for a stretch, so reopening lands where he
@@ -111,18 +111,6 @@ function isSettleable(o) {
 }
 function ordersOn(dateStr) {
   return data.orders.filter(o => orderDate(o) === dateStr);
-}
-// Two numbers per day: what it earned, and how much of that no statement has
-// claimed. Amber is the second one; a day fully on statements shows its total
-// muted, because the bar under it carries the state.
-function dayInfo(dateStr) {
-  const list = ordersOn(dateStr);
-  let total = 0, loose = 0;
-  for (const o of list) {
-    total += expectedOf(o);
-    if (!batchOf(o.order_id)) loose += owedOf(o);
-  }
-  return { n: list.length, total, loose };
 }
 
 // ---- figures ----
@@ -264,8 +252,8 @@ function remerge(book) {
     monthTotals[key] = p.month_totals || null;
     for (const o of p.orders) orders.push(o);
     // Orders are scoped to their month server-side, but a batch straddling a
-    // boundary comes back whole in both months' payloads, so it has to be
-    // taken once or its bar would be drawn twice.
+    // boundary comes back whole in both months' payloads, so it is taken
+    // once.
     for (const b of p.settlements) {
       if (seen.has(b.id)) continue;
       seen.add(b.id);
@@ -373,9 +361,9 @@ function reportPerf() {
 // holds is refetched at once, because a batch or a credit can have moved in any
 // of them, and a half-refreshed strip would show the same batch in two states.
 async function load(seed) {
-  // A hidden view neither asks nor draws: the strip has no width to lay labels
-  // out in, the document's scroll position is the other view's, and the order
-  // sheet is drawn through the other view's host. Showing the view loads.
+  // A hidden view neither asks nor draws: the document's scroll position is
+  // the other view's, and the order sheet is drawn through the other view's
+  // host. Showing the view loads.
   if (!showing) return;
   const keys = loadedMonths();
   if (!keys.length) keys.push(seed || todayMonth());
@@ -452,23 +440,56 @@ function renderHeader() {
     '<span class="d">' + tight(viewMonth.slice(0, 4) + '·' + viewMonth.slice(5, 7)) + '</span>' +
     '<span class="w">' + (viewMonth === todayMonth() ? '<b>今個月</b>' : '&nbsp;') + '</span>';
   renderLens();
+  renderFoot();
+}
+
+function renderFoot() {
+  const foot = byId('settle-foot');
+  // A focus takes the foot: the lit days say which, and this line says what.
+  if (focus) { foot.innerHTML = focusLineHtml(); return; }
   // Totals span the whole book, not the months the strip has loaded: old
   // unsettled days are exactly the ones the operator is here to clear. The
   // server computes them, so the tabs and the calendar cannot disagree about
   // the same money.
   // Only what is still to be done: a matched or archived credit is finished
-  // business and is read off the calendar by its value date instead.
+  // business.
   const open = openCredits();
-  const figs = [money(data.totals.unsettled), '$' + $(data.totals.awaiting)]
+  const vals = [money(data.totals.unsettled), '$' + $(data.totals.awaiting)]
     .concat(open.length ? ['$' + $(ledger.sums.open)] : []).map(tight);
-  const foot = byId('settle-foot');
   // The stylesheet sizes the figures so that all of them fit the one line.
-  foot.style.setProperty('--n', figs.reduce((n, f) => n + +cellsOf(f), 0).toFixed(2));
+  foot.style.setProperty('--n', vals.reduce((n, f) => n + +cellsOf(f), 0).toFixed(2));
   foot.innerHTML =
-    '<div class="warn"><span class="k">未結算</span><span class="v">' + figs[0] + '</span></div>' +
-    '<div><span class="k">等過數</span><span class="v">' + figs[1] + '</span></div>' +
+    '<div class="warn"><span class="k">未結算</span><span class="v">' + vals[0] + '</span></div>' +
+    '<div><span class="k">等過數</span><span class="v">' + vals[1] + '</span></div>' +
     (open.length ? '<button class="tot queue" data-credits="1"><span class="k">入數未對 ' + open.length +
-      ' 筆</span><span class="v">' + figs[2] + '</span></button>' : '');
+      ' 筆</span><span class="v">' + vals[2] + '</span></button>' : '');
+}
+
+// A statement's name. Its place among the loaded statements confirmed on the
+// same date decides whether the name is numbered.
+function nameOf(b) {
+  const same = data.settlements.filter(x => x.settled_on === b.settled_on)
+    .map(x => x.id).sort((a, z) => a - z);
+  return statementName(b, same.indexOf(b.id));
+}
+
+// The focused statement in one line: its name, the days it lights, its legs,
+// its figure and where its money has got to. A batch the strip no longer
+// holds is known only from the ledger, which carries neither its statement
+// date nor the day it was collected, so the line says less of it.
+function focusLineHtml() {
+  const b = batchById(focus.id);
+  const known = b || ledger.credits.flatMap(c => c.batches).find(x => x.id === focus.id);
+  if (!known) return '';
+  const amount = keyFigure(known.confirmed_amount);
+  const state = b ? batchTag(b)
+    : known.state === 'paid' ? '已收'
+    : known.state === 'partial' ? '差 $' + $(known.outstanding) : '等過數';
+  return '<div class="fline"><span class="ft">' +
+    parts([b ? nameOf(b) : '結算', dayRunsLabel(batchDatesOf(focus.id), viewMonth),
+           (b ? b.orders.length : known.orders) + ' 程', amount.dollars + '.' + amount.cents]) +
+    ' · <span class="pt bs ' + known.state + '">' + figs(state) + '</span></span>' +
+    '<button class="fx" data-unfocus="1" aria-label="取消">&#10005;</button></div>';
 }
 
 // The four totals of the month the header names, for the platform chosen.
@@ -530,30 +551,44 @@ function cellsOf(html) {
   return (text.length - off).toFixed(2);
 }
 
+// How much of a short-paid day's rule is drawn as money that came: the share
+// of its statement that has arrived. Of the rule's 24px, 3px is the break
+// between the two parts and neither part is under 6px, so both are seen
+// however lopsided the share.
+function shortGot(orders) {
+  const b = orders.map(o => batchOf(o.order_id)).find(x => x && x.state === 'partial');
+  const share = b && b.confirmed_amount > 0 ? b.received / b.confirmed_amount : 0;
+  return Math.min(15, Math.max(6, Math.round(21 * share)));
+}
+
+// A day says three things and no more: its date, what the whole day is worth,
+// and by a rule under that figure where its money has got to.
 function cellHtml(dateStr) {
   const day = +dateStr.slice(8);
   // The 1st carries its month, because a week row is not a month and there is
   // no heading above it to read the month off.
   const num = day === 1 ? mdSlash(dateStr) : String(day);
-  const info = dayInfo(dateStr);
+  const orders = ordersOn(dateStr);
+  const info = dayState(orders, batchOf, NOW);
   const today = dateStr === TODAY ? ' today' : '';
   // Only an empty day is inert; every day holding work opens, past or future.
   if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + tight(num) + '</span></button>';
-  const future = dateStr > TODAY;
-  const cls = future ? 'future' : (info.loose > 0 ? 'unsettled' : 'done');
-  const amt = future ? info.total : (info.loose > 0 ? info.loose : info.total);
-  const fig = tight(money(amt));
-  return '<button class="cell' + today + '" data-d="' + dateStr + '">' +
-    '<span class="d">' + tight(num) + '</span><span class="amt ' + cls + '" style="--n:' + cellsOf(fig) + '">' +
-    fig + '</span></button>';
+  const f = cellFigure(info.total);
+  const dollars = tight(f.dollars), cts = f.cents ? tight('.' + f.cents) : '';
+  // The figure's length in cells of the dollars' size: the cents are set at
+  // .7 of it (.ct in the stylesheet).
+  const n = +cellsOf(dollars) + (cts ? +cellsOf(cts) * 0.7 : 0);
+  const got = info.state === 'short' ? ' style="--got:' + shortGot(orders) + 'px"' : '';
+  return '<button class="cell st-' + info.state + today + '" data-d="' + dateStr + '">' +
+    '<span class="d">' + tight(num) + '</span><span class="amt" style="--n:' + n.toFixed(2) + '">' +
+    dollars + (cts ? '<span class="ct">' + cts + '</span>' : '') + '</span><i class="mk"' + got + '></i></button>';
 }
 
 // Every week of the loaded run, end to end, with no month break in it: from the
 // Sunday of the week holding the 1st of the earliest month to the Saturday of
 // the week holding the last day of the latest. Every cell is a real date, so a
-// week row can span two months and a bar across the boundary stays one bar. The
-// edge weeks reach into months not loaded yet; those days draw as empty and
-// fill in when their month arrives.
+// week row can span two months. The edge weeks reach into months not loaded
+// yet; those days draw as empty and fill in when their month arrives.
 function stripWeeks() {
   const keys = loadedMonths();
   if (!keys.length) return [];
@@ -790,26 +825,19 @@ function eventHtml(e, lane) {
 
 function renderCalendar() {
   const grid = byId('grid');
-  const m = calMetrics(grid);
   const weeks = stripWeeks();
   const html = weeks.map((week, wi) => {
-    const events = weekEvents(week);
-    reserve(events, m);
-    const lanes = packLanes(events);
     const start = wi > 0 && weekMonth(week) !== weekMonth(weeks[wi - 1]);
     return '<div class="wkblock' + (start ? ' mstart' : '') + '" id="' + weekId(week[0]) +
-      '"><div class="grid">' + week.map(cellHtml).join('') + '</div>' +
-      (lanes.length ? '<div class="lane">' +
-        lanes.map((lane, li) => lane.map(e => eventHtml(e, li)).join('')).join('') + '</div>' : '') +
-      '</div>';
+      '"><div class="grid">' + week.map(cellHtml).join('') + '</div></div>';
   }).join('');
   const anchor = takeAnchor();
   grid.innerHTML = html;
   putAnchor(anchor);
   const mon = monthAtTop();
   if (mon) viewMonth = mon;
-  // A month arriving under the scroll draws bars and days of a relation the
-  // operator is already reading, so the paint ends by restating it.
+  // A month arriving under the scroll draws days of a statement the operator
+  // is already reading, so the paint ends by restating it.
   paintFocus();
   pokeEdges();
 }
@@ -860,10 +888,9 @@ function pinWeek(id) {
   if (el && Math.abs(el.getBoundingClientRect().top - stripTop()) >= 1) pinId = id;
 }
 
-// A repaint rebuilds every week row, and rows above the viewport change height
-// whenever a month is prepended or a lane appears -- which would slide the
-// strip out from under the operator. The fix is an anchor: where the top row
-// sat before the paint, put it back after.
+// A repaint rebuilds every week row, and a month prepended adds rows above the
+// viewport -- which would slide the strip out from under the operator. The fix
+// is an anchor: where the top row sat before the paint, put it back after.
 //
 // A strip only a month or two long is barely taller than the screen, so the
 // scroll that would hold it still runs out of document. What could not be
@@ -880,11 +907,11 @@ function takeAnchor() {
   const el = topRow();
   if (!el) return null;
   const top = el.getBoundingClientRect().top;
-  // A top row sitting below the strip's top line has page chrome above it --
-  // the colour key at the head of the page, which only the untouched strip is
-  // ever short enough to show. Growth at the top displaces that chrome, so
-  // such a row is pinned to the line. Anywhere else the row is where the
-  // operator scrolled it to, and goes back exactly there.
+  // A top row sitting below the strip's top line has the head of the page
+  // above it, which only the untouched strip is ever short enough to show.
+  // Growth at the top displaces it, so such a row is pinned to the line.
+  // Anywhere else the row is where the operator scrolled it to, and goes back
+  // exactly there.
   if (top <= edge) return { id: el.id, off: top, pin: false };
   pinId = el.id;
   return { id: el.id, off: edge, pin: true };
@@ -933,22 +960,21 @@ function pokeEdges() {
 }
 
 // ---- focus ----
-// A credit chip sits on the day the bank paid, the batch it paid for sits on
-// the days that were driven, and nothing on the strip says the two are the same
-// money. Focus is that statement: one end is named, and everything not part of
-// the relation recedes.
+// A statement covers days that can be weeks apart on the strip, and nothing in
+// a day's cell says which statement it went onto. Focus is that statement: one
+// batch is named, its days are lit and every other day recedes.
 //
 // The relation is read off the ledger rather than off the loaded months,
 // because that is the only place an end outside them appears: a credit carries
 // every batch it went into, and each of those carries its own days.
 //
-// It is the whole connected run of allocations, not one hop out from the end
-// named. Two credits paying one batch are one money statement, and a statement
-// has to read the same from every end of it -- entering at either chip or at
-// the bar must light the identical set, or the operator is being told the sum
-// depends on where he looked. Closing over the edges buys that invariance at
-// the cost of a long chain lighting entirely, which is what a chain of money
-// crossing over itself is.
+// It is the whole connected run of allocations, not the named batch alone. Two
+// batches paid by one credit are one money statement, and a statement has to
+// read the same from every end of it -- entering at either batch must light
+// the identical set, or the operator is being told the sum depends on where he
+// looked. Closing over the edges buys that invariance at the cost of a long
+// chain lighting entirely, which is what a chain of money crossing over itself
+// is.
 
 // A batch's days wherever the page holds them: the ledger carries them for
 // every batch some credit paid, whatever the strip has loaded; the book carries
@@ -990,46 +1016,33 @@ function focusSets() {
 }
 
 // Lit and dim are set on what the paint has already laid out rather than woven
-// into the markup: a focus is taken and dropped by a pointer moving across the
-// strip, and rebuilding every week row for that would fight the scroll anchor.
-// One place decides, so a month painted later and a hover both read the same.
+// into the markup, so a focus is taken and dropped without rebuilding every
+// week row, which would fight the scroll anchor. One place decides, so a month
+// painted later reads the same.
 function paintFocus() {
   const s = focus ? focusSets() : null;
-  const grid = byId('grid');
-  // The two ends of the same statement, so they are set together: with no
-  // focus down neither is set and the strip is back to its own strengths.
-  const mark = (el, held) => {
-    el.classList.toggle('lit', !!s && held);
-    el.classList.toggle('dim', !!s && !held);
-  };
-  grid.querySelectorAll('[data-bar]').forEach(el =>
-    mark(el, s && s.batches.has(+el.dataset.bar)));
-  grid.querySelectorAll('[data-chip]').forEach(el =>
-    mark(el, s && s.credits.has(+el.dataset.chip)));
   // An empty day already reads as a calendar coordinate rather than money, so
   // it is left alone: dimming it again would only separate it from the other
   // empty days.
-  grid.querySelectorAll('.cell[data-d]').forEach(el =>
-    mark(el, s && s.dates.has(el.dataset.d)));
+  byId('grid').querySelectorAll('.cell[data-d]').forEach(el => {
+    const held = !!s && s.dates.has(el.dataset.d);
+    el.classList.toggle('lit', held);
+    el.classList.toggle('dim', !!s && !held);
+  });
 }
 
-function focusTarget(el) {
-  const bar = el.closest('[data-bar]');
-  if (bar) return { kind: 'batch', id: +bar.dataset.bar };
-  const chip = el.closest('[data-chip]');
-  if (chip) return { kind: 'credit', id: +chip.dataset.chip };
-  return null;
-}
 function isFocus(t) { return !!focus && focus.kind === t.kind && focus.id === t.id; }
 function setFocus(t) {
   if (isFocus(t)) return;
   focus = t;
   paintFocus();
+  renderFoot();
 }
 function clearFocus() {
   if (!focus) return;
   focus = null;
   paintFocus();
+  renderFoot();
 }
 // A focus is a claim that something exists. A batch undone or a credit archived
 // elsewhere leaves the claim pointing at nothing, and a paint off it would dim
@@ -1075,45 +1088,38 @@ function farDates(s) {
   }
   return dates;
 }
+// Whether a cell can be read where it is: below the sticky header and above
+// the fixed foot.
 function onScreen(el) {
   const r = el.getBoundingClientRect();
-  // Everything above the strip's top line is behind the sticky header.
-  return r.bottom > stripTop() && r.top < window.innerHeight;
+  return r.bottom > stripTop() && r.top < root.querySelector('.foot').getBoundingClientRect().top;
 }
 
-// Nothing of the far end on screen means the relation was stated and cannot be
-// seen, so the strip goes to the nearest row carrying it. Only then: a strip
-// already showing the answer must not be moved out from under the operator, and
-// a credit nothing has been allocated to has no far end to go to at all.
-//
-// Asked for by the tap that names a relation, never by a pointer resting on
-// one: scrolling under a stationary pointer takes the element out from under it
-// and cancels the very focus that asked for the scroll.
-async function revealFocus() {
-  const want = focus;
-  const s = focusSets();
-  const dates = farDates(s);
-  if (!dates.length) return;
-  for (const el of farNodes()) if (onScreen(el)) return;
-  const rows = [...new Set(dates.map(weekIdOf))]
-    .map(id => byId(id)).filter(Boolean);
-  if (rows.length) {
-    const edge = stripTop();
-    rows.sort((a, b) => Math.abs(a.getBoundingClientRect().top - edge) -
-                        Math.abs(b.getBoundingClientRect().top - edge));
-    scrollToWeek(rows[0].id, true);
-    return;
-  }
-  // Every far day is outside the loaded strip, so the month holding the nearest
-  // one has to be brought in before there is a row to scroll to.
-  const mid = new Date(viewMonth + '-15T00:00:00').getTime();
-  const near = d => Math.abs(new Date(d + 'T00:00:00').getTime() - mid);
-  const d = dates.slice().sort((a, b) => near(a) - near(b))[0];
-  if (!await ensureMonth(monthKey(d))) return;
-  // The month arrives asynchronously, by which time the operator can have
-  // dropped the focus or moved to another one.
-  if (focus !== want) return;
-  pinWeek(weekIdOf(d));
+// A focus is put down from a sheet, which can have been reached from a day
+// far from the statement's own. None of the named statement's days on screen
+// means the relation was stated and cannot be seen, so the strip goes to the
+// nearest row carrying one. Only then: a strip already showing the answer
+// must not be moved out from under the operator. The days are always on the
+// strip, because a batch's sheet opens only once its month is loaded.
+function revealFocus() {
+  if (!focus) return;
+  const own = new Set(batchDatesOf(focus.id));
+  const cells = [...byId('grid').querySelectorAll('.cell.lit')].filter(el => own.has(el.dataset.d));
+  if (!cells.length || cells.some(onScreen)) return;
+  const edge = stripTop();
+  const rows = [...new Set(cells.map(el => el.closest('.wkblock')))];
+  rows.sort((a, b) => Math.abs(a.getBoundingClientRect().top - edge) -
+                      Math.abs(b.getBoundingClientRect().top - edge));
+  scrollToWeek(rows[0].id, true);
+}
+
+// The way into a focus: from a statement's sheet, back to the calendar with
+// that statement's days lit.
+function showOnCalendar(id) {
+  closeSheet();
+  setLens('fare');
+  setFocus({ kind: 'batch', id });
+  revealFocus();
 }
 
 // ---- sheet ----
@@ -1577,7 +1583,8 @@ function batchViewHtml(v) {
     '<div class="sum-rows">' + sums.join('') + '</div>' +
     adjustmentsHtml(b) +
     mid +
-    '<div class="sheet-acts"><button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
+    '<div class="sheet-acts"><button class="ghost-btn" data-focus="' + b.id + '">喺月曆睇</button>' +
+    '<button class="ghost-btn danger" data-undo="' + b.id + '">撤銷結算</button>' +
     '<button class="ghost-btn" data-back="1">收埋</button></div>';
 }
 
@@ -1645,9 +1652,9 @@ function creditViewHtml(v) {
     '<div class="sheet-acts"><button class="ghost-btn" data-back="1">收埋</button></div>';
 }
 
-// Only the work queue is a list: a matched or archived credit is found on the
-// calendar by its value date, so listing it again would only bury the ones
-// still waiting for a statement.
+// Only the work queue is a list: a matched credit is reached from the batch it
+// paid, so listing it again would only bury the ones still waiting for a
+// statement.
 function queueViewHtml() {
   const open = openCredits();
   return sheetHead('入數未對', figs(platLabel(curPlat) + ' · ' + open.length + ' 筆 $' + $(ledger.sums.open))) +
@@ -1888,15 +1895,6 @@ async function shiftMonth(n) {
   const key = addMonths(viewMonth, n);
   if (await ensureMonth(key)) scrollToMonth(key);
 }
-// Where a pointer exists, resting it on a bar or a chip is the whole ask and
-// moving off is the answer given back. Both tests are needed: hover is a
-// capability rather than a width, and a screen without one still synthesises a
-// mouse pointerover after every scroll, which would drop the focus the tap
-// above had just put down.
-const hoverMQ = window.matchMedia('(hover: hover)');
-function hovering(e) { return hoverMQ.matches && e.pointerType !== 'touch'; }
-let calResizeT = null;
-
 // ---- unpaid tick interaction ----
 // The tick state lives in the DOM: toggling repaints only the section rather
 // than the whole sheet, so scroll position and the rest of the view survive.
@@ -2035,42 +2033,18 @@ export const settleView = {
       if (key) setLens(key.dataset.lens);
     });
     byId('settle-foot').addEventListener('click', e => {
+      if (e.target.closest('[data-unfocus]')) { clearFocus(); return; }
       if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
     });
-    // The whole calendar area, not just the week rows: the legend and the padding
-    // around the strip answer nothing else, so a tap there is the way out of a
-    // focus.
-    const cal = root.querySelector('.cal');
-    cal.addEventListener('click', e => {
-      const t = focusTarget(e.target);
-      if (t) {
-        // The first ask is for the relation, the second for the sheet. A pointer
-        // has already made the first by resting there, so its click opens straight
-        // away; a finger cannot rest, so its first tap lights and its second opens.
-        if (!isFocus(t)) { setFocus(t); revealFocus(); return; }
-        openView({ kind: t.kind, id: t.id });
-        return;
-      }
+    // The whole calendar area, not just the week rows: an empty day and the
+    // padding around the strip answer nothing else, so a tap there is the way
+    // out of a focus.
+    root.querySelector('.cal').addEventListener('click', e => {
       // A day opens on one tap whatever is focused: settling is the work this page
       // exists for and it does not gain a step.
       const cell = e.target.closest('.cell');
       if (cell && cell.dataset.d) { openDay(cell.dataset.d); return; }
       clearFocus();
-    });
-    cal.addEventListener('pointerover', e => {
-      if (!hovering(e)) return;
-      const t = focusTarget(e.target);
-      if (t) setFocus(t); else clearFocus();
-    });
-    cal.addEventListener('pointerleave', e => { if (hovering(e)) clearFocus(); });
-    document.fonts.ready.then(fontsChanged);
-    document.fonts.addEventListener('loadingdone', fontsChanged);
-    // Column width and font size are measured, so a rotation or a resized window
-    // has to re-reserve every label against the new geometry.
-    window.addEventListener('resize', () => {
-      clearTimeout(calResizeT);
-      // A hidden strip has no width to measure; showing it lays it out again.
-      calResizeT = setTimeout(() => { if (showing) renderCalendar(); }, 150);
     });
     byId('settle-scrim').addEventListener('click', closeSheet);
     byId('settle-sheet').addEventListener('click', e => {
@@ -2080,6 +2054,8 @@ export const settleView = {
       // treat the tap as a toggle.
       const cp = e.target.closest('[data-copy]');
       if (cp) { copyId(cp.dataset.copy); return; }
+      const onCal = e.target.closest('[data-focus]');
+      if (onCal) { showOnCalendar(+onCal.dataset.focus); return; }
       const undo = e.target.closest('[data-undo]');
       if (undo) { pushView({ kind: 'undo', id: +undo.dataset.undo }); return; }
       const undoGo = e.target.closest('[data-undogo]');

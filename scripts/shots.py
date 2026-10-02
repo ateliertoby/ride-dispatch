@@ -12,8 +12,8 @@ rule; `stress-sheet-…` is its sheets with seven-figure amounts and a bank
 reference longer than a line;
 `stress-<width>-…` is the day view with long names, every mark and wide
 fares at each width it is laid out for, and `stress-settle-…` is the settle
-strip with seven-figure labels, a week of five lanes, a batch in three runs
-across a month boundary and a credit that paid three batches. A comparison prints the number of differing
+view with a five-digit fare with cents in a day's cell and seven-figure
+totals in the foot. A comparison prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -152,30 +152,33 @@ class Shooter(Driver):
         self.open("/settle", ".cell[data-d]")
 
     def reach(self, selector: str) -> None:
-        """Bring a mark onto the strip and its week row to the top of it. A
-        tap on a mark that is behind the header scrolls to it first, while
+        """Bring a day onto the strip and its week row to the top of it. A
+        tap on a day that is behind the header scrolls to it first, while
         the strip may still be growing above it, and where that comes to rest
         depends on timing; put there beforehand, the tap moves nothing."""
         super().reach(selector)
         self.to_top(selector)
 
-    def open_mark(self, selector: str, ready: str) -> None:
-        """A bar or chip: the first tap lights its relation, the second opens it."""
+    def day_sheet(self, day: str = "") -> None:
         self.settle_page()
-        self.reach(selector)
-        self.tap(selector)
-        self.tap(selector)
-        self.on(ready).first.wait_for()
-
-    def batch_sheet(self, key: str) -> None:
-        self.open_mark(f'[data-bar="{self.t["batch"][key]}"]', ".sheet.show .hero")
-
-    def day_sheet(self) -> None:
-        self.settle_page()
-        cell = f'.cell[data-d="{self.t["batched_day"]}"]'
+        cell = f'.cell[data-d="{day or self.t["batched_day"]}"]'
         self.reach(cell)
         self.tap(cell)
         self.on(".sheet.show .orow").first.wait_for()
+
+    def batch_sheet(self, key: str) -> None:
+        """A batch's sheet, from a day it covers: the day's sheet, then its
+        link to the batch."""
+        self.day_sheet(self.t["batch_day"][key])
+        self.tap(f'.sheet.show .blink[data-bl="{self.t["batch"][key]}"]')
+        self.on(".sheet.show .hero").first.wait_for()
+
+    def credit_sheet(self, key: str) -> None:
+        """An unmatched credit's sheet, through the queue in the foot."""
+        self.settle_page()
+        self.tap(".foot [data-credits]")
+        self.tap(f'.sheet.show .qrow[data-credit="{self.t["credit"][key]}"]')
+        self.on(".sheet.show .hero").first.wait_for()
 
 
 def states() -> dict:
@@ -277,12 +280,10 @@ def states() -> dict:
         if not s.suffix:
             s.save("settle-full", full_page=True)
 
-    def settle_focus_bar(s):
-        s.settle_page()
-        bar = f'[data-bar="{s.t["batch"]["short"]}"]'
-        s.reach(bar)
-        s.tap(bar)
-        s.save("settle-focus-bar")
+    def settle_focus_cells(s):
+        s.batch_sheet("short")
+        s.tap(".sheet.show [data-focus]")
+        s.save("settle-focus-cells")
 
     def settle_day_sheet(s):
         s.day_sheet()
@@ -336,7 +337,7 @@ def states() -> dict:
         s.save("settle-batch-ahead")
 
     def settle_credit_sheet(s):
-        s.open_mark(f'[data-chip="{s.t["credit"]["exact"]}"]', ".sheet.show .hero")
+        s.credit_sheet("exact")
         s.save("settle-credit-sheet")
 
     def settle_queue(s):
@@ -399,13 +400,13 @@ def states() -> dict:
                 s.ctx.unroute("**/api/credits?*")
             s.ctx.route("**/api/credits?*", credits)
             try:
-                s.open_mark(f'[data-chip="{s.t["credit"]["partial"]}"]', ".sheet.show .hero")
+                s.credit_sheet("partial")
                 s.save(f"stress-sheet-credit-{width}")
             finally:
                 s.ctx.unroute("**/api/credits?*")
         return run
 
-    def settle_stressed(width, focus):
+    def settle_stressed(width):
         def run(s):
             # Tall enough for two months of the strip above the fixed foot.
             s.viewport = {"width": width, "height": 1500}
@@ -413,9 +414,7 @@ def states() -> dict:
             try:
                 s.settle_page()
                 s.tap('[aria-label="前一個月"]')
-                if focus:
-                    s.tap(f'[data-chip="{s.t["credit"]["group"]}"]')
-                s.save(f"stress-settle-{'focus-' if focus else ''}{width}")
+                s.save(f"stress-settle-{width}")
             finally:
                 s.ctx.unroute("**/api/settle?*")
                 s.ctx.unroute("**/api/credits?*")
@@ -452,7 +451,7 @@ def states() -> dict:
         "day-add-toll": day_add_toll, "day-add-confirm": day_add_confirm,
         "day-paste-preview": day_paste_preview, "day-paste-amend": day_paste_amend,
         "day-paste-locked": day_paste_locked,
-        "settle": settle, "settle-focus-bar": settle_focus_bar,
+        "settle": settle, "settle-focus-cells": settle_focus_cells,
         "settle-day-sheet": settle_day_sheet, "settle-order-sheet": settle_order_sheet,
         "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
@@ -465,8 +464,7 @@ def states() -> dict:
             | {f"{name}-{WIDE}": wide_of(fn) for name, fn in wide.items() if name.startswith("settle")}
             | {f"stress-sheet-{w}": sheets_stressed(w) for w in (NARROW, 390)}
             | {f"stress-{w}": stressed(w) for w in STRESS_WIDTHS}
-            | {f"stress-settle-{'focus-' if f else ''}{w}": settle_stressed(w, f)
-               for w in (NARROW, 390) for f in (False, True)})
+            | {f"stress-settle-{w}": settle_stressed(w) for w in (NARROW, 390)})
 
 
 def shoot(base_url: str, out: str, today: date, only: str) -> None:

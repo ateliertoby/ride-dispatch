@@ -73,6 +73,9 @@ def targets(today: date) -> dict:
         "batched_day": day(today, 26),
         # A day whose legs no batch has claimed.
         "loose_day": day(today, 1),
+        # A day each batch covers: where its sheet is reached from.
+        "batch_day": {"paid": day(today, 34), "short": day(today, 26), "awaiting": day(today, 19),
+                      "held_back": day(today, 12), "ahead": day(today, 6), "group": day(today, 8)},
     }
 
 

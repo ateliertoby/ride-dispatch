@@ -78,13 +78,21 @@
   .lkey:active { background: var(--surface-press); }
 
   /* ---- state: a rule under the figure ----
-     Where a figure's money has got to: thick is money no statement has
-     claimed, a hairline is money waiting on its transfer, none is money in or
-     a figure with nothing to chase. A state mark, not a sign that something
-     can be tapped. The mark keeps its place when it draws nothing, so a key
-     is the same height in every state. */
+     Where a figure's money has got to, for a total key and for a day of the
+     calendar alike, which is what makes the keys the calendar's legend: thick
+     is money no statement has claimed, thick in two parts is a statement paid
+     short, a hairline is money waiting on its transfer, none is money in or a
+     figure with nothing to chase. A state mark, not a sign that something can
+     be tapped. The mark keeps its place when it draws nothing, so a key or a
+     day is the same height in every state. */
   .mk { display: block; width: 24px; height: 3px; }
   .st-unsettled .mk { background: var(--amber); }
+  /* What came, a break, what is still owed. --got is the first part's
+     length, written on the element. */
+  .st-short .mk {
+    background: linear-gradient(90deg, var(--green) var(--got, 6px),
+      transparent 0 calc(var(--got, 6px) + 3px), var(--amber) 0);
+  }
   .st-awaiting .mk { height: 1px; margin-block: 1px; background: var(--text-2); }
   /* The received total is the receded state, yet it is a key like the other
      three: quieter ink, same weight. */
@@ -117,8 +125,8 @@
      hold the end of one month and the start of the next, and money settled on
      the last day of a month is paid in the one after it.
      A ruled sheet, not a set of cards: a week is a row between two hairlines
-     that run the width of the screen, a day is a column of it, and day
-     numbers, amounts and bars all start on their column's left edge. */
+     that run the width of the screen, a day is a column of it, and the date,
+     the figure and its rule all start on their column's left edge. */
   /* The last week and the sentinel under it have to clear the fixed foot. */
   .cal { padding: 0 var(--gutter) 72px; }
   /* minmax(0, 1fr): WebKit lets a grid track grow past its share when an item
@@ -135,20 +143,19 @@
      row runs out to the screen's edges and pads itself back in, so the rule
      is the screen's width and the columns are not. */
   .wkblock {
-    margin-inline: calc(-1 * var(--gutter)); padding: 0 var(--gutter) 6px;
+    margin-inline: calc(-1 * var(--gutter)); padding: 0 var(--gutter) 5px;
     border-bottom: 1px solid var(--line);
   }
-  /* Where one month gives way to the next. The strip carries no month heading
-     -- that is the point: a batch straddling the boundary stays one bar -- so
-     the break is a stronger hairline, and the 1st names its month in its own
-     corner label. */
+  /* Where one month gives way to the next. The strip carries no month
+     heading, so the break is a stronger hairline, and the 1st names its month
+     in its own corner label. */
   .wkblock:has(+ .mstart) { border-bottom-color: var(--text-3); }
   .cell {
-    min-height: 44px; border: none; border-radius: 0; cursor: pointer;
+    min-height: 48px; border: none; border-radius: 0; cursor: pointer;
     padding: 7px 0 3px; min-width: 0;
-    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    display: flex; flex-direction: column; align-items: flex-start;
     font-family: var(--mono); color: inherit; text-align: left;
-    /* The amount is sized against the column (see .amt). */
+    /* The figure is sized against the column (see .amt). */
     container-type: inline-size;
     /* What the cell's ground is drawn in when it is lit; drawn past the box
        by half the column gap, so lit neighbours make one band. */
@@ -162,24 +169,36 @@
      of what reads as blank calendar -- which is where a tap lands to put a
      focus down. */
   .cell.none { cursor: default; pointer-events: none; }
-  .cell .d { font-size: 11px; line-height: 14px; color: var(--text-2); letter-spacing: -.01em; }
+  /* The date is a coordinate: small, regular, faint. With work on the day it
+     still has to be read; without, it only marks the place. */
+  .cell .d { font-size: 10px; line-height: 13px; color: var(--text-3); letter-spacing: -.01em; }
   .cell.none .d { color: var(--text-4); }
-  /* Exact to the cent and never cut: a figure too long for its column at the
-     size the others are set in is set smaller, by as much as it takes. --n is
-     the figure's length in character cells, written on the element; a cell
-     of the figure face is .65em wide, less the letter-spacing, and the column
-     gives up 3px so that two long figures side by side do not read as one. */
+  /* The one money figure of the day: what the whole day is worth, with no
+     currency sign and no thousands mark, since the grid is all money and the
+     column is too narrow to spend on either. Exact to the cent and never cut:
+     a figure too long for its column at the size the others are set in is set
+     smaller, by as much as it takes. --n is the figure's length in character
+     cells of the dollars' size, written on the element, with the cents
+     counted at their own smaller size; a cell of the figure face is .65em
+     wide, less the letter-spacing, and the column gives up 3px so that two
+     long figures side by side do not read as one. */
   .cell .amt {
-    --size: 10.5px;
+    --size: 13px; margin-top: 2px; font-weight: 700; color: var(--text);
     font-size: min(var(--size), calc((100cqi - 3px) / (var(--n, 1) * .64)));
-    line-height: 16px; letter-spacing: -.01em; white-space: nowrap;
+    line-height: 18px; letter-spacing: -.01em; white-space: nowrap;
   }
-  /* One rule: amber is money no statement has claimed yet. Money already on a
-     statement is a record, so it recedes and the bar under the cell carries
-     its state instead. A future day has nothing to claim yet, so it recedes
-     too. */
-  .cell .amt.unsettled { color: var(--amber); font-weight: 700; }
-  .cell .amt.done, .cell .amt.future { color: var(--text-3); }
+  /* The cents are part of the figure and never dropped, but they are not
+     what it is read by. No line height of their own, or the smaller box
+     would hang below the line and make the day taller. */
+  .cell .ct { font-size: .7em; line-height: 0; }
+  /* Amber is money no statement has claimed yet. Money that is in is a
+     record, and a day still to be driven has nothing to claim, so both
+     recede. */
+  .cell.st-unsettled .amt { color: var(--amber); }
+  .cell:is(.st-received, .st-future) .amt { color: var(--text-3); font-weight: 400; }
+  /* The rule stands 2px under the figure whatever its thickness. */
+  .cell .mk { margin-top: 2px; }
+  .cell.st-awaiting .mk { margin-block: 3px 1px; }
   /* Today: the number as an inverse block. Pulled out by its own padding so
      the digits stay on the column's edge. */
   .cell.today .d {
@@ -274,22 +293,29 @@
   .cchip.short { --mk: var(--amber); border-color: var(--amber); color: var(--amber); font-weight: 700; }
 
   /* ---- focus ----
-     One money relation at a time: a bank credit and the batches it paid, or a
-     batch and the credits that paid it. The two ends can be weeks apart on the
-     strip and are rarely on screen together, so the link is drawn by opening a
-     gap around the relation rather than by a connector that would have nothing
-     to run along. The gap is opened from both sides: everything unrelated
-     recedes, the relation itself lifts.
+     One statement at a time: its days are lit, every other day recedes. The
+     days can be weeks apart on the strip, so the link is drawn by opening a
+     gap around them rather than by a connector that would have nothing to
+     run along. The gap is opened from both sides: everything unrelated
+     recedes, the statement's own days lift.
 
-     Receding is by colour, not opacity: a faded figure in amber or green
-     cannot be read on the light ground, and a receded figure is still money
-     the operator reads at a glance. A receded mark gives up its fill and its
-     colour and keeps its figure in the ink the page uses for secondary text;
-     one that was already a record takes the fainter ink, so a record stays
-     quieter than an open one and nothing is made louder by being pushed
-     away. */
+     Receding is by colour, not opacity: a faded figure in amber cannot be
+     read on the light ground, and a receded figure is still money the
+     operator reads at a glance. A receded day gives up its weight, its
+     colour and its rule's colour; one with money no statement has claimed
+     keeps the ink the page uses for secondary text, so open money stays
+     louder than a record and nothing is made louder by being pushed away. */
   .cell.dim .amt { color: var(--text-3); font-weight: 400; }
-  .cell.dim .amt.unsettled { color: var(--text-2); }
+  .cell.dim.st-unsettled .amt { color: var(--text-2); }
+  .cell.dim:is(.st-unsettled, .st-short, .st-awaiting) .mk { background: var(--line); }
+  /* A lit day takes the panel ground; today keeps its block, which is drawn
+     on the number. */
+  .cell.lit { --band: var(--surface); }
+  .cell.lit:not(.today) .d { color: var(--text); }
+  /* A bar or chip is an object on the lane rather than a surface, so it lifts
+     by an outline in the colour it already wears -- state, never a hue of
+     its own. */
+  .bar.lit, .cchip.lit { outline: 1px solid var(--mk); outline-offset: 1px; }
   /* !important: a part-paid bar carries its split fill inline. */
   .bar.dim {
     background: none !important; box-shadow: inset 0 0 0 1px var(--line);
@@ -299,14 +325,6 @@
   .bar.paid.dim { color: var(--text-3); }
   .cchip.dim { border-color: var(--line); color: var(--text-3); font-weight: 400; }
   .cchip.open.dim, .cchip.short.dim { color: var(--text-2); }
-  /* A lit day takes the panel ground; today keeps its block, which is drawn
-     on the number. */
-  .cell.lit { --band: var(--surface); }
-  .cell.lit .d { color: var(--text); }
-  /* A bar or chip is an object on the lane rather than a surface, so it lifts
-     by an outline in the colour it already wears -- state, never a hue of
-     its own. */
-  .bar.lit, .cchip.lit { outline: 1px solid var(--mk); outline-offset: 1px; }
 
   /* The colour key: a swatch drawn the way the mark is, and what it says. */
   .legend {
@@ -344,6 +362,17 @@
   }
   .foot .queue .v { color: var(--blue); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
   .foot .queue:active .v { color: var(--text); }
+  /* While a statement's days are lit the foot names it instead: one line of
+     parts that wraps between two parts where it must, never inside one, and
+     the key that puts the focus down, a thumb's size. */
+  .fline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+  .fline .ft { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; }
+  .fx {
+    flex-shrink: 0; width: 44px; height: 44px; margin: -2px -12px -4px 0; padding: 0;
+    background: none; border: none; border-radius: 3px; cursor: pointer;
+    font-family: var(--mono); font-size: 16px; line-height: 1; color: var(--text-2);
+  }
+  .fx:active { background: var(--surface-press); color: var(--text); }
 
   /* ---- sheets ----
      A sheet here is a page of a ledger, drawn as the order's own sheet is: a
@@ -654,7 +683,7 @@
   :where(.view-settle) {
       .cell { min-height: 76px; padding: 10px 0 8px; }
       .cell .d { font-size: 12px; line-height: 16px; }
-      .cell .amt { --size: 14px; line-height: 20px; }
+      .cell .amt { --size: 16px; line-height: 22px; }
       .bar, .cchip { height: 22px; font-size: 13px; }
       .lane { grid-auto-rows: 22px; }
       .foot-in { max-width: 640px; }

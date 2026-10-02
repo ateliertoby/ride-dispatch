@@ -415,16 +415,19 @@ class Driver:
             self.tap(f'{host} .key[data-k="{d}"]')
 
 
-# ---- the settle strip under stress ----
+# ---- the settle view under stress ----
 
 LONG_AMOUNT = 1234567.89
+# The longest figure a day's cell is expected to hold whole.
+LONG_FARE = 12345.67
 
 
 def stress_settle(body: dict, today: date) -> None:
-    """Rewrite one month's answer from /api/settle so the strip carries what
-    strains its lanes: seven-figure amounts with cents on a short-paid and an
-    awaiting batch, and a batch whose days are three separate runs either
-    side of the first of today's month."""
+    """Rewrite one month's answer from /api/settle so the view carries what
+    strains it: a five-digit fare with cents on one day, seven-figure amounts
+    with cents on a short-paid and an awaiting batch and in the totals, and a
+    batch whose days are three separate runs either side of the first of
+    today's month."""
     first = today.replace(day=1)
     runs = [first - timedelta(days=3), first - timedelta(days=1), first + timedelta(days=1)]
     for b in body["settlements"]:
@@ -436,14 +439,16 @@ def stress_settle(body: dict, today: date) -> None:
             b["adjustments"] = []
             for o, d in zip(b["orders"], runs):
                 o["scheduled_time"] = d.isoformat() + o["scheduled_time"][10:]
+    for o in body["orders"]:
+        if o["order_id"] == seed_demo_db._oid(801):
+            o["price"] = LONG_FARE
     body["totals"].update(unsettled=LONG_AMOUNT, awaiting=1048576.5)
 
 
 def stress_credits(body: dict, today: date) -> None:
     """Rewrite the answer from /api/credits to match: five more unmatched
-    credits with seven-figure amounts, all on one day of a week that already
-    holds bars, so that week needs a lane for each; and today's credit paid
-    into three batches."""
+    credits with seven-figure amounts, and today's credit paid into three
+    batches."""
     like = next(c for c in body["credits"] if c["id"] == seed_demo_db.CREDIT["exact"])
     for i in range(5):
         body["credits"].append(dict(like, id=901 + i, ref=f"DEMO-REF-09{i}", amount=LONG_AMOUNT - i,
