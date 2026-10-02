@@ -88,13 +88,19 @@ export function dayRunsLabel(dates, monthKey) {
   }).join('、');
 }
 
-// How much of a statement falls in one month. Counted from its orders' own
-// values, not from the statement's figure, so it agrees with the month totals
-// the server splits the same way.
+// How much of a statement falls in one month, as the server's month totals
+// count it: each leg at what this statement is owed for it, in the month the
+// leg was driven, and each 舉牌 the statement paid ahead of a held-back trip
+// in the month of that trip. Counted from the legs, not from the statement's
+// figure, and not at a leg's whole fare: the part of it an earlier statement
+// paid ahead is that statement's.
 export function inMonthPart(batch, monthKey) {
   let sum = 0;
   for (const o of batch.orders) {
-    if (orderDate(o).slice(0, 7) === monthKey) sum += cents(expectedOf(o));
+    if (orderDate(o).slice(0, 7) === monthKey) sum += cents(owedOf(o));
+  }
+  for (const a of batch.adjustments || []) {
+    if (a.ahead && a.date.slice(0, 7) === monthKey) sum += cents(a.amount);
   }
   return sum / 100;
 }

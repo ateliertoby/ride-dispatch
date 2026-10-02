@@ -194,6 +194,27 @@ test('inMonthPart follows the orders, not the statement figure', () => {
   assert.equal(inMonthPart(batch, '2026-10'), 380);
 });
 
+test('inMonthPart counts a leg at what its own statement is owed for it', () => {
+  // 40 of the 520 arrived on an earlier statement, which counts it.
+  const batch = { id: 10, state: 'awaiting', confirmed_amount: 480,
+                  orders: [leg('k1', '2026-10-05 09:00', 480, { banner_fee: 40, paid_ahead: 40 })] };
+  assert.equal(inMonthPart(batch, '2026-10'), 480);
+});
+
+test('inMonthPart counts a 舉牌 the statement paid ahead in the month of its trip', () => {
+  const batch = {
+    id: 11, state: 'awaiting', confirmed_amount: 940,
+    orders: [leg('m1', '2026-09-29 09:00', 500), leg('m2', '2026-09-30 09:00', 400)],
+    adjustments: [
+      { order_ref: 'm9', date: '2026-10-02', amount: 40, ahead: true },
+      // A line of the statement's own that belongs to no trip's fare.
+      { order_ref: 'm8', date: '2026-10-03', amount: -25 },
+    ],
+  };
+  assert.equal(inMonthPart(batch, '2026-09'), 900);
+  assert.equal(inMonthPart(batch, '2026-10'), 40);
+});
+
 test('waitedDays counts whole calendar days since the statement date', () => {
   assert.equal(waitedDays({ settled_on: '2026-10-09' }, '2026-10-22'), 13);
   assert.equal(waitedDays({ settled_on: '2026-10-22' }, '2026-10-22'), 0);
