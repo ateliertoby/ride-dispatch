@@ -14,7 +14,10 @@ reference longer than a line;
 fares at each width it is laid out for, `stress-settle-…` is the settle
 view with a five-digit fare with cents in a day's cell and seven-figure
 amounts in the foot, and `stress-foot-…` is its foot with three items at
-their longest. A comparison prints the number of differing
+their longest. The settle view's forms are the seed's own rows; only the
+foot with exactly one, two or three items is arranged by rewriting an
+answer, because which month holds how many depends on the date. A comparison
+prints the number of differing
 pixels per file and exits non-zero unless every file matches exactly.
 
 By default the script seeds a database (scripts/seed_demo_db.py), serves the
@@ -188,10 +191,13 @@ class Shooter(Driver):
             self.tap('[aria-label="前一個月"]')
         raise RuntimeError(f"the list never reached {want}")
 
-    def month_of(self, month: str) -> None:
-        """The settle view on a month ('YYYY-MM'), paged back to by the
-        arrow: the month button is read until it names that month."""
+    def month_of(self, month: str, platform: str = "") -> None:
+        """The settle view on a month ('YYYY-MM') of the platform it opens
+        on, or of another, paged back to by the arrow: the month button is
+        read until it names that month."""
         self.settle_page()
+        if platform:
+            self.tap(f'.tab[data-f="{platform}"]')
         want = month[:4] + "·" + month[5:7]
         for _ in range(8):
             if self.on(".date-btn").first.text_content().startswith(want):
@@ -331,6 +337,21 @@ def states() -> dict:
         s.on(".slist .brow").first.wait_for()
         s.save("settle-received")
 
+    def settle_straddle(s):
+        # The month a collected statement reaches into from the one before:
+        # its row says how much of it is this month's.
+        s.statement_list("received", s.t["straddle_month"] + "-01")
+        s.on(".slist .brow").first.wait_for()
+        s.save("settle-received-straddle")
+
+    def settle_clean(s):
+        # A month with every fare collected and nothing else to act on.
+        s.month_of(s.t["clean"]["month"], s.t["clean"]["platform"])
+        s.save("settle-clean")
+        # The page remembers the platform it was left on, and every state
+        # shot after this one opens in the same browser context.
+        s.tap('.tab[data-f="ride"]')
+
     def settle_archived(s):
         s.statement_list("received", s.t["batch_day"]["short"])
         s.tap(".slist [data-archived]")
@@ -341,7 +362,8 @@ def states() -> dict:
         """The foot holding exactly the items named, on the month the seed's
         shortfall is counted in: whether the statement paid short stays so,
         how many of the seed's unmatched credits stay so, and whether an
-        earlier month still holds open money."""
+        earlier month still holds open money. The foot with none is the
+        seed's own clean month."""
         def run(s):
             today = date.fromisoformat(s.t["today"])
             month = foot_month(today)
@@ -546,8 +568,8 @@ def states() -> dict:
         "day-paste-locked": day_paste_locked,
         "settle": settle, "settle-focus-cells": settle_focus_cells, "settle-unsettled": settle_unsettled,
         "settle-awaiting": settle_awaiting, "settle-received": settle_received,
-        "settle-archived": settle_archived,
-        "settle-foot-clean": settle_foot("settle-foot-clean", False, 0, False),
+        "settle-received-straddle": settle_straddle, "settle-archived": settle_archived,
+        "settle-clean": settle_clean,
         "settle-foot-one": settle_foot("settle-foot-one", True, 0, False),
         "settle-foot-two": settle_foot("settle-foot-two", True, 3, False),
         "settle-foot-three": settle_foot("settle-foot-three", True, 3, True),
