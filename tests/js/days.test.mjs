@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  dayState, cellFigure, statementName, dayRunsLabel, inMonthPart, waitedDays,
+  dayState, cellFigure, keyFigure, statementName, dayRunsLabel, inMonthPart, waitedDays,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -111,6 +111,27 @@ test('cellFigure puts a minus sign before a day the fines outweigh', () => {
   // U+2212 MINUS SIGN, as money() writes it.
   assert.deepEqual(cellFigure(-97.38), { dollars: '−97', cents: '38' });
   assert.deepEqual(cellFigure(-0.5), { dollars: '−0', cents: '50' });
+});
+
+test('keyFigure writes $, the thousands comma and always two cents', () => {
+  assert.deepEqual(keyFigure(19103.5), { dollars: '$19,103', cents: '50' });
+  assert.deepEqual(keyFigure(5320), { dollars: '$5,320', cents: '00' });
+  assert.deepEqual(keyFigure(940), { dollars: '$940', cents: '00' });
+  assert.deepEqual(keyFigure(0), { dollars: '$0', cents: '00' });
+  assert.deepEqual(keyFigure(1008.05), { dollars: '$1,008', cents: '05' });
+  assert.deepEqual(keyFigure(1234567.89), { dollars: '$1,234,567', cents: '89' });
+  assert.deepEqual(keyFigure(999.99), { dollars: '$999', cents: '99' });
+  assert.deepEqual(keyFigure(1000), { dollars: '$1,000', cents: '00' });
+});
+
+test('keyFigure is exact to the cent through float noise', () => {
+  assert.deepEqual(keyFigure(0.1 + 0.2), { dollars: '$0', cents: '30' });
+  assert.deepEqual(keyFigure(999.9999999999999), { dollars: '$1,000', cents: '00' });
+});
+
+test('keyFigure puts the minus sign outside the symbol', () => {
+  // U+2212 MINUS SIGN, as money() writes it.
+  assert.deepEqual(keyFigure(-1097.38), { dollars: '−$1,097', cents: '38' });
 });
 
 test('statementName is the statement date, numbered when a date is shared', () => {

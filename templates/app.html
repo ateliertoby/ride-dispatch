@@ -54,6 +54,15 @@
     </div>
   </div>
   <div class="tabs" id="settle-tabs" role="group" aria-label="平台"></div>
+  <!-- Written here, not by the script, so the header has its full height
+       before the first answer lands: the strip is placed against its bottom
+       edge. -->
+  <div class="lens" id="settle-lens" role="group" aria-label="本月總數">
+    <button class="lkey on" data-lens="fare" aria-pressed="true"><span class="k">本月車費</span><span class="v">&mdash;</span><i class="mk"></i></button>
+    <button class="lkey st-received" data-lens="received" aria-pressed="false"><span class="k">已收</span><span class="v">&mdash;</span><i class="mk"></i></button>
+    <button class="lkey st-received" data-lens="awaiting" aria-pressed="false"><span class="k">等過數</span><span class="v">&mdash;</span><i class="mk"></i></button>
+    <button class="lkey st-received" data-lens="unsettled" aria-pressed="false"><span class="k">未結算</span><span class="v">&mdash;</span><i class="mk"></i></button>
+  </div>
   <div class="cols wk" aria-hidden="true"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
 </div>
 <div class="cal">

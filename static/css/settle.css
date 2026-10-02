@@ -21,10 +21,65 @@
      tops, the browser scrolls by whole pixels, and a fraction left over at
      each paint would add up to a row. */
   .date-btn .w { line-height: 18px; }
-  .wk { line-height: 14px; color: var(--text-4); }
+  /* The weekday head is the top of the panel the chosen total key opens
+     into, so it takes that panel's ground. */
+  .wk { line-height: 14px; color: var(--text-4); background: var(--surface); }
   /* Reading is ~2 s of OCR on top of the upload, so the control says it is
      working rather than looking like a tap that missed. */
   .icon-btn:disabled { opacity: .5; cursor: default; }
+}
+/* ---- the month's totals, as keys ----
+   A different kind of control from the platform tabs over them: the tabs are
+   words on the ground with a rule under the chosen one; these are figures in
+   ruled cells, and the chosen one takes the panel's ground. No rule marks the
+   chosen key, because a rule under a figure is already the state mark the
+   keys are the legend of. */
+:where(.view-settle) {
+  /* The four figures share one line, exact to the cent: when they are too
+     long for it they are set smaller together, never wrapped or cut. --n is
+     their summed length in character cells, written on the element; a cell
+     of the figure face is .65em wide, and 80px is the keys' padding and the
+     rules between them. */
+  .lens { display: flex; border-top: 1px solid var(--line); container-type: inline-size; }
+  .lkey {
+    flex: 1 1 auto; min-width: 0; min-height: 52px; padding: 8px 7px 7px;
+    background: none; border: none; border-left: 1px solid var(--line); border-radius: 0;
+    text-align: left; cursor: pointer;
+  }
+  .lkey:first-child { padding-left: var(--gutter); border-left: none; }
+  .lkey:last-child { padding-right: var(--gutter); }
+  .lkey .k {
+    display: block; font-size: 10.5px; line-height: 14px; letter-spacing: .14em;
+    color: var(--text-3); white-space: nowrap;
+  }
+  .lkey .v {
+    display: block; font-family: var(--mono); font-weight: 700; line-height: 20px; white-space: nowrap;
+    font-size: min(15px, calc((100cqi - 80px) / (var(--n, 1) * .65)));
+  }
+  /* The cents are part of the figure and never dropped, but they are not
+     what it is read by. */
+  .lkey .ct { font-size: .7em; }
+  /* The chosen key opens into the column head under it: the hairline between
+     them is covered, so the choice reads from the shape as well as from the
+     ground, which alone is faint in the dark palette. Positioned, so that
+     what covers the hairline is painted over the head and not under it. */
+  .lkey.on { background: var(--surface); box-shadow: 0 1px 0 var(--surface); position: relative; }
+  .lkey.on .k { color: var(--text); font-weight: 600; }
+  .lkey:active { background: var(--surface-press); }
+
+  /* ---- state: a rule under the figure ----
+     Where a figure's money has got to: thick is money no statement has
+     claimed, a hairline is money waiting on its transfer, none is money in or
+     a figure with nothing to chase. A state mark, not a sign that something
+     can be tapped. The mark keeps its place when it draws nothing, so a key
+     is the same height in every state. */
+  .mk { display: block; width: 24px; height: 3px; }
+  .st-unsettled .mk { background: var(--amber); }
+  .st-awaiting .mk { height: 1px; margin-block: 1px; background: var(--text-2); }
+  /* The received total is the receded state, yet it is a key like the other
+     three: quieter ink, same weight. */
+  .lkey.st-received .v { color: var(--text-2); }
+  .lkey.st-unsettled .v { color: var(--amber); }
 }
 /* The month button always holds its second span, empty when the month is not
    the current one. Below this width the two do not fit beside the keys, and

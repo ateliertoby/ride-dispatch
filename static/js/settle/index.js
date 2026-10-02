@@ -16,6 +16,7 @@ import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
 import { packLanes } from '../lanes.js';
+import { keyFigure } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -43,8 +44,10 @@ let loading = new Map();
 // question nobody is asking any more.
 let gen = 0;
 // The merged read of every loaded month, which is what the whole page below
-// works off.
-let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 }, now: '' };
+// works off. monthTotals is the one part that stays apart: 'YYYY-MM' -> that
+// month's own totals, or null where the server withheld them.
+let data = { orders: [], settlements: [], counts: {}, totals: { unsettled: 0, awaiting: 0 },
+             monthTotals: {}, now: '' };
 // The bank ledger, exactly what /api/credits returns: every credit of the
 // platform, whatever the strip has loaded.
 let ledger = { counts: { open: 0, partial: 0, done: 0, archived: 0 }, sums: { open: 0, done: 0 }, credits: [] };
@@ -52,6 +55,10 @@ let curPlat = 'ride';
 // The month the header names: the one the strip is showing, updated by the
 // scroll rather than by a paging button.
 let viewMonth = fmtDate(new Date()).slice(0, 7);
+// Which of the month's totals is chosen. It decides what the body under the
+// header shows, and is changed through setLens() and nowhere else.
+const LENSES = ['fare', 'received', 'awaiting', 'unsettled'];
+let lens = 'fare';
 // Settle-ability is decided against the server's clock, not the browser's, so
 // the page and the API agree on which legs are done.
 let NOW = '';
@@ -248,9 +255,13 @@ function loadedMonths() { return [...months.keys()].sort(); }
 function remerge(book) {
   const orders = [];
   const settlements = [];
+  const monthTotals = {};
   const seen = new Set();
   for (const key of loadedMonths()) {
     const p = months.get(key);
+    // A month's totals are that month's alone, so each is kept under its own
+    // key rather than taken from the freshest payload.
+    monthTotals[key] = p.month_totals || null;
     for (const o of p.orders) orders.push(o);
     // Orders are scoped to their month server-side, but a batch straddling a
     // boundary comes back whole in both months' payloads, so it has to be
@@ -263,7 +274,7 @@ function remerge(book) {
   }
   // counts, totals and the clock span all time, so any payload carries them and
   // the freshest one wins.
-  data = { orders, settlements, counts: book.counts, totals: book.totals, now: book.now };
+  data = { orders, settlements, counts: book.counts, totals: book.totals, monthTotals, now: book.now };
   NOW = data.now;
   TODAY = NOW.slice(0, 10);
   reindex();
@@ -440,6 +451,7 @@ function renderHeader() {
   byId('monthBtn').innerHTML =
     '<span class="d">' + tight(viewMonth.slice(0, 4) + '·' + viewMonth.slice(5, 7)) + '</span>' +
     '<span class="w">' + (viewMonth === todayMonth() ? '<b>今個月</b>' : '&nbsp;') + '</span>';
+  renderLens();
   // Totals span the whole book, not the months the strip has loaded: old
   // unsettled days are exactly the ones the operator is here to clear. The
   // server computes them, so the tabs and the calendar cannot disagree about
@@ -457,6 +469,45 @@ function renderHeader() {
     '<div><span class="k">等過數</span><span class="v">' + figs[1] + '</span></div>' +
     (open.length ? '<button class="tot queue" data-credits="1"><span class="k">入數未對 ' + open.length +
       ' 筆</span><span class="v">' + figs[2] + '</span></button>' : '');
+}
+
+// The four totals of the month the header names, for the platform chosen.
+// The keys themselves are in the document from the start; this fills them in.
+// A month the strip has not loaded and a month whose totals the server
+// withheld both show a dash: a zero would state a figure nobody has.
+function renderLens() {
+  const box = byId('settle-lens');
+  const t = data.monthTotals[viewMonth] || null;
+  let cells = 0;
+  for (const key of box.querySelectorAll('.lkey')) {
+    const name = key.dataset.lens;
+    let html = '—', n = 1;
+    if (t) {
+      const f = keyFigure(t[name]);
+      const dollars = tight(f.dollars), cts = tight('.' + f.cents);
+      html = dollars + '<span class="ct">' + cts + '</span>';
+      // The cents are set at .7 of the figure's size (.ct in the stylesheet).
+      n = +cellsOf(dollars) + +cellsOf(cts) * 0.7;
+    }
+    cells += n;
+    key.querySelector('.v').innerHTML = html;
+    // The rule and the colour of a state are worn only by a figure that has
+    // money in that state: amber on nothing owed would be a false alarm.
+    const owing = name !== 'fare' && name !== 'received' && t && t[name] > 0;
+    key.className = 'lkey' + (name === 'fare' ? '' : owing ? ' st-' + name : ' st-received') +
+      (name === lens ? ' on' : '');
+    key.setAttribute('aria-pressed', String(name === lens));
+  }
+  // The stylesheet sizes the four figures so that they share the one line.
+  box.style.setProperty('--n', cells.toFixed(2));
+}
+
+// The one place the lens changes, so whatever the body shows for a lens is
+// switched from here.
+function setLens(name) {
+  if (!LENSES.includes(name)) return;
+  lens = name;
+  renderLens();
 }
 
 function renderTabs() {
@@ -1979,6 +2030,10 @@ export const settleView = {
       // strip starts again where the operator would start reading it.
       refound(todayMonth());
     });
+    byId('settle-lens').addEventListener('click', e => {
+      const key = e.target.closest('.lkey');
+      if (key) setLens(key.dataset.lens);
+    });
     byId('settle-foot').addEventListener('click', e => {
       if (e.target.closest('[data-credits]')) openView({ kind: 'queue' });
     });
@@ -2087,6 +2142,9 @@ export const settleView = {
     useOrderHost(orderHost);
     navAt = tapAt();
     if (!started) { started = true; loadPlat(); watchEdges(); }
+    // Each visit starts from the month's whole fare: the lens is where the
+    // operator was looking, not a setting.
+    setLens('fare');
     // Loaded again on every showing: nothing was drawn while the view was
     // hidden, and the load ends by painting the open sheet.
     return load();

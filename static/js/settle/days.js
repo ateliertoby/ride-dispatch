@@ -49,6 +49,18 @@ export function cellFigure(amount) {
   };
 }
 
+// An amount as a total key writes it, outside the grid: $, the thousands
+// comma, and the cents always there, apart from the dollars because they are
+// set smaller. The sign goes outside the symbol, as money() puts it.
+export function keyFigure(amount) {
+  const c = cents(amount), abs = Math.abs(c);
+  return {
+    dollars: (c < 0 ? '−' : '') + '$' +
+      String(Math.trunc(abs / 100)).replace(/\B(?=(\d{3})+$)/g, ','),
+    cents: pad2(abs % 100),
+  };
+}
+
 // A statement is named by its own date, `settled_on`: the day it was
 // confirmed. `paid_on` is the bank's value date and names the transfer, not
 // the statement. `sameDayIndex` is the statement's place among those of one
