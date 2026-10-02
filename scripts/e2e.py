@@ -632,8 +632,10 @@ class Session(Driver):
         return self.text(".date-btn")
 
     def toast(self) -> str:
-        loc = self.page.locator(".toast.show")
-        return loc.first.text_content().strip() if loc.count() else ""
+        # Asked in one step: a toast that goes between being found and being
+        # read would leave the read waiting for it to come back.
+        return self.page.evaluate(
+            "() => { const e = document.querySelector('.toast.show'); return e ? e.textContent.trim() : ''; }")
 
     def toasts(self) -> list:
         """The words of every toast this tab has put up, oldest first: one
