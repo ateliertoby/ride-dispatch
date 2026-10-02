@@ -6794,7 +6794,10 @@ def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tup
 # per core costs the checks nothing: on eight cores, eight workers take as
 # long over each check as one does. Past that, servers and browser contexts
 # are slower to start, and checks that time the page have less to spare.
+# A worker also holds about 0.7 GB, which a machine short of memory would
+# have to page out, so the default leaves 2 GB of what is installed to each.
 MAX_DEFAULT_JOBS = 8
+WORKER_BYTES = 2 << 30
 
 # Each worker's servers take their ports from a range of its own. Where a
 # run's ranges begin depends on its process id, so that two runs at once
@@ -6803,7 +6806,11 @@ PORT_BASE, PORT_SPAN, PORT_BLOCKS = 20000, 50, 64
 
 
 def default_jobs() -> int:
-    return max(1, min(MAX_DEFAULT_JOBS, os.cpu_count() or 1))
+    try:
+        fits = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // WORKER_BYTES
+    except (ValueError, OSError, AttributeError):      # not a figure this system gives
+        fits = MAX_DEFAULT_JOBS
+    return max(1, min(MAX_DEFAULT_JOBS, os.cpu_count() or 1, fits))
 
 
 def worker(index: int, first_port: int, todo, results) -> None:
@@ -6925,7 +6932,7 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=default_jobs(), metavar="N",
                     help="run the checks in N processes side by side, each with a browser, servers and"
                          " databases of its own; 1 runs them one after another in this process"
-                         f" (default: {default_jobs()}, from this machine's cores)")
+                         f" (default: {default_jobs()}, from this machine's cores and memory)")
     ap.add_argument("--timings", action="store_true",
                     help="after the report, say where the time went and name the slowest checks")
     args = ap.parse_args()

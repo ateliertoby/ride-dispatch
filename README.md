@@ -81,7 +81,7 @@ node --test "tests/js/*.test.mjs"    # the browser modules that need no DOM (Nod
 pip install -r requirements-dev.txt && playwright install webkit
 python scripts/e2e.py                          # behaviour, driven through a real browser
 python scripts/e2e.py --only day.add           # the checks whose name begins with this
-python scripts/e2e.py --jobs 1                 # one check at a time (default: one worker per core, at most 8)
+python scripts/e2e.py --jobs 1                 # one check at a time (default: a worker per core and per 2 GB of memory, at most 8)
 python scripts/e2e.py --timings                # and where the time went, with the slowest checks
 python scripts/e2e.py --today-set 2026-10-08,2026-10-31   # once for each day, through the same workers
 python scripts/shots.py --out /tmp/shots       # a screenshot of every state, dark and light
