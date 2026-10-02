@@ -285,6 +285,14 @@ def states() -> dict:
         s.tap(".sheet.show [data-focus]")
         s.save("settle-focus-cells")
 
+    def settle_unsettled(s):
+        # From the short-paid statement's week down to today: days on a
+        # statement and days on none, side by side.
+        s.settle_page()
+        s.reach(f'.cell[data-d="{s.t["batch_day"]["short"]}"]')
+        s.tap('.lkey[data-lens="unsettled"]')
+        s.save("settle-unsettled")
+
     def settle_day_sheet(s):
         s.day_sheet()
         s.save("settle-day-sheet")
@@ -451,7 +459,7 @@ def states() -> dict:
         "day-add-toll": day_add_toll, "day-add-confirm": day_add_confirm,
         "day-paste-preview": day_paste_preview, "day-paste-amend": day_paste_amend,
         "day-paste-locked": day_paste_locked,
-        "settle": settle, "settle-focus-cells": settle_focus_cells,
+        "settle": settle, "settle-focus-cells": settle_focus_cells, "settle-unsettled": settle_unsettled,
         "settle-day-sheet": settle_day_sheet, "settle-order-sheet": settle_order_sheet,
         "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
