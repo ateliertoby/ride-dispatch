@@ -1319,6 +1319,54 @@ def test_fingerprint_tracks_settlements(client):
     assert web._fingerprint() != paid
 
 
+def _order_columns():
+    import sqlite3
+    conn = sqlite3.connect(web.DB_PATH)
+    try:
+        return [(r[1], r[2].upper()) for r in conn.execute("PRAGMA table_info(orders)")]
+    finally:
+        conn.close()
+
+
+def _set_column(order_id, column, value):
+    import sqlite3
+    conn = sqlite3.connect(web.DB_PATH)
+    conn.execute(f"UPDATE orders SET {column} = ? WHERE order_id = ?", (value, order_id))
+    conn.commit()
+    conn.close()
+
+
+def test_fingerprint_covers_every_column_of_an_order(client):
+    """A view can show any of them: an amendment that changes only an address
+    or a flight number has to reach another open device. The columns are read
+    from the table, so one added later is held here without being named."""
+    seed_ride("R1")
+    columns = [(name, kind) for name, kind in _order_columns() if name not in ("id", "order_id")]
+    assert {"pickup", "dropoff", "flight_number", "flight_scheduled", "penalty_fee",
+            "pickup_point", "passenger_name", "passenger_phone"} <= {name for name, _ in columns}
+    for name, kind in columns:
+        before = web._fingerprint()
+        _set_column("R1", name, "changed" if kind == "TEXT" else 987654)
+        assert web._fingerprint() != before, name
+
+
+def test_a_stream_reports_a_change_once_and_only_a_change(client):
+    seed_ride("R1")
+    watch = web._Watch()
+    try:
+        assert not watch.changed()
+        _set_column("R1", "dropoff", "another address")
+        assert watch.changed()
+        assert not watch.changed()
+        # A commit that leaves every value as it was is not a change.
+        _set_column("R1", "dropoff", "another address")
+        assert not watch.changed()
+        _set_column("R1", "flight_number", "ZZ0001")
+        assert watch.changed()
+    finally:
+        watch.close()
+
+
 def test_fingerprint_distinguishes_a_resettle(client):
     """Undo empties the book back to its pre-settlement fingerprint, so the
     batch id is what keeps a re-settle from looking like no change at all."""

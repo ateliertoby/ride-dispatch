@@ -768,44 +768,92 @@ def api_settlement_image(settlement_id):
     return send_file(path, mimetype=_IMAGE_MIMETYPES.get(ext, "application/octet-stream"))
 
 
-def _fingerprint():
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT count(*), coalesce(max(id),0), coalesce(sum(price),0), "
-        "count(case when status='cancelled' then 1 end), "
-        "coalesce(sum(tunnel_fee),0), coalesce(sum(parking_fee),0), coalesce(sum(banner_fee),0), "
-        "coalesce(sum(settlement_id),0), count(case when unpaid = 1 then 1 end), "
-        "coalesce(group_concat(coalesce(scheduled_time,'') || coalesce(flight_eta,'') || coalesce(flight_gate,'') || coalesce(flight_status,'')),'') FROM orders"
-    ).fetchone()
-    # max(id) rather than count alone: ids are AUTOINCREMENT, so undoing a batch
-    # and settling again is a visible change instead of a wash.
-    settle_row = conn.execute(
-        "SELECT count(*), coalesce(max(id),0), count(paid_on) FROM settlements"
-    ).fetchone()
-    # The ledger changes without any order or batch moving — a credit lands, a
-    # credit is archived, money is put against a batch — and an open settle
-    # page has to repaint for all of them.
-    credit_row = conn.execute(
-        "SELECT count(*), count(archived_reason) FROM bank_credits"
-    ).fetchone()
-    alloc_row = conn.execute(
-        "SELECT count(*), coalesce(sum(amount),0) FROM credit_allocations"
-    ).fetchone()
-    conn.close()
-    return "-".join(str(v) for v in (*row, *settle_row, *credit_row, *alloc_row))
+def _fingerprint(conn=None) -> str:
+    """Everything either view can show, as one string that differs when any
+    of it does.
+
+    The orders are hashed whole, every column of every row, so a column a
+    view starts to show is covered without being named here.  That reads the
+    whole table (tens of milliseconds at a few thousand rows), which is why a
+    stream asks for it only after something was committed (see _Watch).
+    """
+    own = conn is None
+    if own:
+        conn = sqlite3.connect(DB_PATH)
+    try:
+        orders = hashlib.blake2b(digest_size=8)
+        for row in conn.execute("SELECT * FROM orders ORDER BY id"):
+            orders.update(repr(row).encode())
+        # max(id) rather than count alone: ids are AUTOINCREMENT, so undoing a
+        # batch and settling again is a visible change instead of a wash.
+        settle_row = conn.execute(
+            "SELECT count(*), coalesce(max(id),0), count(paid_on) FROM settlements"
+        ).fetchone()
+        # The ledger changes without any order or batch moving — a credit
+        # lands, a credit is archived, money is put against a batch — and an
+        # open settle page has to repaint for all of them.
+        credit_row = conn.execute(
+            "SELECT count(*), count(archived_reason) FROM bank_credits"
+        ).fetchone()
+        alloc_row = conn.execute(
+            "SELECT count(*), coalesce(sum(amount),0) FROM credit_allocations"
+        ).fetchone()
+    finally:
+        if own:
+            conn.close()
+    return "-".join(str(v) for v in (orders.hexdigest(), *settle_row, *credit_row, *alloc_row))
+
+
+class _Watch:
+    """What one event stream compares from tick to tick.
+
+    `PRAGMA data_version` moves when any other connection commits, and
+    costs nothing to read, so it is asked first and the fingerprint is taken
+    only when it has moved.  It is a property of the connection that asks, so
+    the stream keeps one open for as long as it lasts.  A commit that leaves
+    everything a view shows as it was (the bot writing the same flight state
+    again) moves the version and not the fingerprint, and is not a change.
+    """
+
+    def __init__(self):
+        # The generator that owns this may be closed from another thread than
+        # the one that began it.
+        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        self.version = self._version()
+        self.print = _fingerprint(self.conn)
+
+    def _version(self) -> int:
+        return self.conn.execute("PRAGMA data_version").fetchone()[0]
+
+    def changed(self) -> bool:
+        # The version is read before the fingerprint: a commit landing between
+        # the two is then looked at again on the next tick, never missed.
+        version = self._version()
+        if version == self.version:
+            return False
+        self.version = version
+        current = _fingerprint(self.conn)
+        if current == self.print:
+            return False
+        self.print = current
+        return True
+
+    def close(self) -> None:
+        self.conn.close()
 
 
 @app.route("/api/events")
 def events():
     def stream():
         yield "data: connected\n\n"
-        last = _fingerprint()
-        while True:
-            time.sleep(2)
-            current = _fingerprint()
-            if current != last:
-                last = current
-                yield "data: refresh\n\n"
+        watch = _Watch()
+        try:
+            while True:
+                time.sleep(2)
+                if watch.changed():
+                    yield "data: refresh\n\n"
+        finally:
+            watch.close()
 
     return Response(
         stream(),
