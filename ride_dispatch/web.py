@@ -861,12 +861,18 @@ def _fingerprint(conn=None) -> str:
 class _Watch:
     """What one event stream compares from tick to tick.
 
-    `PRAGMA data_version` moves when any other connection commits, and
-    costs nothing to read, so it is asked first and the fingerprint is taken
-    only when it has moved.  It is a property of the connection that asks, so
-    the stream keeps one open for as long as it lasts.  A commit that leaves
-    everything a view shows as it was (the bot writing the same flight state
-    again) moves the version and not the fingerprint, and is not a change.
+    The fingerprint decides whether anything a view shows has changed.
+    `PRAGMA data_version` is only the gate that says when to look: it costs
+    nothing to read and moves when another connection's commit has modified
+    the database file, so it is asked first and the fingerprint is taken only
+    when it has moved.  It is a property of the connection that asks, so the
+    stream keeps one open for as long as it lasts.
+
+    The version says nothing about what was written.  A commit to a table no
+    view shows (a car park reading) moves it and leaves the fingerprint as it
+    was, and is not a change.  Which writes count as modifying the file is
+    SQLite's own business (an UPDATE that stores the values a row already
+    holds may dirty no page and move nothing), so nothing here relies on it.
     """
 
     def __init__(self):
