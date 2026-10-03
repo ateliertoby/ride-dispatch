@@ -48,7 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import seed_demo_db  # noqa: E402
-from harness import (DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, STABLE_JS, TIMEOUT_MS, TIMEZONE,  # noqa: E402
+from harness import (BOT_USERNAME, DEVICE, FOOT_LONG, LOGIN_PATH, LONG_AMOUNT, ROOT, STABLE_JS, TIMEOUT_MS, TIMEZONE,  # noqa: E402
                      Driver, Ports, Server, copy_app, demo_now, foot_credits, foot_earlier, foot_month,
                      foot_second_short, foot_short, month_before, new_context, paste_message,
                      rewrite, stress_foot, stress_strip)
@@ -1804,7 +1804,7 @@ def day_order_sheet(s: Session) -> None:
     widths = s.page.eval_on_selector_all(".sheet.show .pp-opt", "els => els.map(e => Math.round(e.getBoundingClientRect().width))")
     s.eq(len(set(widths)), 1, f"the points are equal segments: {widths}")
     s.eq(s.on(".sheet.show .tg-link").first.get_attribute("href"),
-         "https://t.me/agent_ride_bot?start=order_" + oid, "Telegram link")
+         f"https://t.me/{BOT_USERNAME}?start=order_" + oid, "Telegram link")
 
     # Money numpad.
     s.tap(".sheet.show .field-row", has_text="價錢")

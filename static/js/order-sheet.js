@@ -31,6 +31,12 @@ let host = null;
 // that view sets it when it is shown and before it opens an order.
 export function useOrderHost(h) { host = h; }
 
+// The Telegram bot this deployment runs, by its username, or '' when the
+// server names none. The document states it: it is not the same from one
+// deployment to the next, so it cannot be written in a file of the app.
+const botMeta = document.querySelector('meta[name="bot-username"]');
+const BOT = botMeta ? botMeta.content : '';
+
 // A figure in the mono face. Takes text, not markup.
 const num = text => '<span class="num">' + tight(esc(text)) + '</span>';
 
@@ -139,7 +145,7 @@ export function detailView(sheet) {
     host.head('<span class="hd-code">' + code + '</span> ' + num(orderTime(o)),
       host.subtitle ? host.subtitle(o) : num('#' + shortId(o.order_id))) +
     info + fields +
-    (p === 'ride' ? '<a class="tg-link" href="https://t.me/agent_ride_bot?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '') +
+    (p === 'ride' && BOT ? '<a class="tg-link" href="https://t.me/' + encodeURIComponent(BOT) + '?start=order_' + encodeURIComponent(o.order_id) + '">喺 Telegram 開</a>' : '') +
     (locked
       ? '<div class="cancel-note">' + BATCH_LOCKED_MSG + '先取消得</div>'
       : '<button class="cancel-link" onclick="rd.sheet.openCancelConfirm()">取消訂單</button>')

@@ -188,6 +188,46 @@ def test_the_version_follows_the_assets(client, static_copy):
     assert web.asset_version() == before
 
 
+def _bot_meta(client) -> str:
+    html = client.get("/").get_data(as_text=True)
+    return re.search(r'<meta name="bot-username" content="([^"]*)">', html).group(1)
+
+
+def test_the_document_names_the_configured_bot(client, monkeypatch):
+    """The order sheet links to the bot by its username, which is one
+    deployment's own: it comes from the environment, through the document."""
+    monkeypatch.delenv("TELEGRAM_BOT_USERNAME", raising=False)
+    assert _bot_meta(client) == ""
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "")
+    assert _bot_meta(client) == ""
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "@sample_ride_bot")
+    assert _bot_meta(client) == "sample_ride_bot"
+    # Not a username: nothing is linked to, and nothing reaches the markup.
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", 'x"><script>')
+    assert _bot_meta(client) == ""
+
+
+def test_no_bot_username_is_written_in_the_app(client):
+    """A username in a script would be the same in every deployment."""
+    v = web.asset_version()
+    for path in ("js/order-sheet.js", "js/shared.js", "js/day/index.js", "js/settle/index.js"):
+        script = client.get(f"/assets/{v}/{path}").get_data(as_text=True)
+        assert "t.me/" in script or path != "js/order-sheet.js"
+        assert not re.search(r"t\.me/[A-Za-z0-9_]", script), path
+
+
+def test_the_version_follows_the_configured_bot(client, monkeypatch):
+    """The worker keeps the document per version, so a document rendered with
+    another username has to be another version."""
+    monkeypatch.delenv("TELEGRAM_BOT_USERNAME", raising=False)
+    before = web.asset_version()
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "sample_ride_bot")
+    named = web.asset_version()
+    assert named != before
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "other_ride_bot")
+    assert web.asset_version() not in (before, named)
+
+
 def test_the_version_ignores_what_is_archived(client, static_copy):
     """Nothing loads an archived file and the worker does not precache it, so
     a change to one must not send every client the app again."""

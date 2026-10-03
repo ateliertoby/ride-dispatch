@@ -103,6 +103,20 @@ def _versioned_files():
         yield os.path.join(app.template_folder, name)
 
 
+_BOT_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{5,32}")
+
+
+def bot_username() -> str:
+    """The Telegram bot's username, for the order sheet's link to it, or ""
+    when none is configured or the value could not be one.
+
+    It differs from one deployment to the next, so it reaches the page
+    through the document and never through a file under the asset address.
+    """
+    name = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    return name if _BOT_USERNAME_RE.fullmatch(name) else ""
+
+
 def asset_version() -> str:
     """Content hash of everything the shell is made of.
 
@@ -123,6 +137,10 @@ def asset_version() -> str:
             h.update(os.path.relpath(path, app.root_path).encode())
             with open(path, "rb") as f:
                 h.update(f.read())
+        # What the document is rendered with is part of the document: the
+        # worker keeps a copy of it per version, and would otherwise go on
+        # serving the old value after the configuration changed.
+        h.update(bot_username().encode())
         _asset_version_cache = h.hexdigest()[:12]
     return _asset_version_cache
 
@@ -130,7 +148,8 @@ def asset_version() -> str:
 @app.context_processor
 def _asset_helpers():
     v = asset_version()
-    return {"asset_version": v, "asset": lambda path: f"/assets/{v}/{path}"}
+    return {"asset_version": v, "asset": lambda path: f"/assets/{v}/{path}",
+            "bot_username": bot_username()}
 
 
 @app.route("/")

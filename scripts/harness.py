@@ -31,6 +31,8 @@ sys.path.insert(0, ROOT)
 import seed_demo_db  # noqa: E402
 
 DEVICE = "iPhone 14"
+# The bot the served app says it runs: an invented username.
+BOT_USERNAME = "demo_ride_bot"
 SCHEMES = ("dark", "light")
 TIMEZONE = "Asia/Hong_Kong"
 TIMEOUT_MS = 10_000
@@ -81,6 +83,9 @@ def serve(app_root: str, db_path: str, port: int, now: str) -> None:
     """
     sys.path.insert(0, app_root)
     os.chdir(app_root)
+    # Set before the app is imported, which reads its environment file and
+    # leaves alone what is already set.
+    os.environ["TELEGRAM_BOT_USERNAME"] = BOT_USERNAME
     # Seeding has already loaded the package from this script's own checkout;
     # the import below must find the one under app_root.
     for name in [m for m in sys.modules if m.split(".")[0] == "ride_dispatch"]:
