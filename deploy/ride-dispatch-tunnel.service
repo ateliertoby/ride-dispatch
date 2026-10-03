@@ -6,8 +6,9 @@ Wants=network-online.target
 [Service]
 User=toby
 # Run by tunnel UUID: name resolution would need the account cert.pem, the
-# credentials file alone is enough for the UUID form.
-ExecStart=/usr/bin/cloudflared tunnel --config /home/toby/.cloudflared/ride-dispatch.yml run 61facf68-f804-49ce-be6f-71ad40fcbca9
+# credentials file alone is enough for the UUID form. Replace the zeros with
+# the tunnel's own UUID.
+ExecStart=/usr/bin/cloudflared tunnel --config /home/toby/.cloudflared/ride-dispatch.yml run 00000000-0000-0000-0000-000000000000
 Restart=always
 RestartSec=5
 
