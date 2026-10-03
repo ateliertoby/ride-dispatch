@@ -9,7 +9,7 @@ import pytest
 
 import ride_dispatch.bot as bot
 from ride_dispatch.db import (SETTLED_LOCK_MSG, cancel_order, create_settlement, get_order_by_id,
-                             save_or_revive_order, update_price)
+                             order_status, save_or_revive_order, update_price)
 from ride_dispatch.ingest import parking_fee, parse_any
 from ride_dispatch.parser import Order
 
@@ -236,6 +236,31 @@ def test_resend_of_a_settled_order_is_refused(db_path):
     assert msg.reply_text.call_args.args[0] == f"#{TC_SHORT} {SETTLED_LOCK_MSG}"
     assert bot.pending == {}
     assert get_order_by_id(db_path, TC_ID)["dropoff"] == "坑口地铁站A1出入口"
+
+
+def test_cancel_button_on_a_settled_order_is_refused_and_answered(db_path):
+    seed_live(db_path)
+    create_settlement(db_path, "ride", [TC_ID], 280.0, "2026-08-26",
+                      now=datetime(2026, 8, 26, 9, 0))
+    upd, ctx, q = _card_callback(f"cancel:{TC_ID}")
+    q.message.edit_text = AsyncMock()
+    asyncio.run(bot.handle_callback(upd, ctx))
+
+    assert q.message.reply_text.call_args.args[0] == f"#{TC_SHORT} {SETTLED_LOCK_MSG}"
+    q.answer.assert_awaited_once_with("冇取消到")
+    q.message.edit_text.assert_not_awaited()
+    assert order_status(db_path, TC_ID) == "active"
+
+
+def test_cancel_button_on_a_loose_order_cancels_it(db_path):
+    seed_live(db_path)
+    upd, ctx, q = _card_callback(f"cancel:{TC_ID}")
+    q.message.edit_text = AsyncMock()
+    asyncio.run(bot.handle_callback(upd, ctx))
+
+    q.message.edit_text.assert_awaited_once_with(f"已取消訂單 #{TC_SHORT}")
+    q.answer.assert_awaited_once_with("已取消")
+    assert order_status(db_path, TC_ID) == "cancelled"
 
 
 def test_update_button_writes_and_keeps_the_price(db_path):

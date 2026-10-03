@@ -376,7 +376,14 @@ async def handle_callback(update: Update, context):
 
     elif query.data.startswith("cancel:"):
         order_id = query.data.split(":", 1)[1]
-        cancel_order(DB_PATH, order_id)
+        try:
+            cancel_order(DB_PATH, order_id)
+        except ValueError as e:
+            # The order is on a statement. The buttons stay: the tap can be
+            # made again once the statement is undone.
+            await query.message.reply_text(f"#{order_id[-4:]} {e}")
+            await query.answer("冇取消到")
+            return
         await query.message.edit_text(f"已取消訂單 #{order_id[-4:]}")
         await query.answer("已取消")
 
