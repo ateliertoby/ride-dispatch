@@ -45,6 +45,7 @@ def db_path(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "DB_PATH", path)
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
     monkeypatch.setattr(bot, "FEED_PATH", str(tmp_path / "ride-dispatch.jsonl"))
+    monkeypatch.setattr(bot, "WEB_URL", "")
     bot.pending_statements.clear()
     credits._feed_seen.clear()
     credits._feed_missing_logged.clear()
@@ -148,6 +149,33 @@ def test_tick_proposes_the_exact_batch_but_links_nothing(db_path):
     assert sent_buttons(b) == []
     assert get_settlement(db_path, sid)["received"] == 0.0
     assert get_settlement(db_path, sid)["paid_on"] is None
+
+
+def test_tick_links_the_notice_to_its_credit_when_the_web_address_is_known(db_path, monkeypatch):
+    """The link opens the settle page on that credit. It is an address, not a
+    callback: nothing in the chat can put the money anywhere."""
+    monkeypatch.setattr(bot, "WEB_URL", "https://ride.example.test")
+    sid = batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 2540.0)
+    write_feed(feed_line("R1", 2540.0, YESTERDAY))
+    b = fake_bot()
+    tick(b)
+    cid = unallocated_credits(db_path)[0]["id"]
+    assert sent(b).split("\n")[1] == "去埋數頁對數"
+    [button] = sent_buttons(b)
+    assert button.url == f"https://ride.example.test/settle?credit={cid}"
+    assert button.callback_data is None
+    assert get_settlement(db_path, sid)["received"] == 0.0
+
+
+def test_a_refused_link_does_not_cost_the_notice(db_path, monkeypatch):
+    monkeypatch.setattr(bot, "WEB_URL", "https://ride.example.test")
+    batch(db_path, "A1", f"{TWO_DAYS} 09:00:00", 2540.0)
+    write_feed(feed_line("R1", 2540.0, YESTERDAY))
+    b = fake_bot()
+    b.send_message = AsyncMock(side_effect=[RuntimeError("bad url"), None])
+    tick(b)
+    assert b.send_message.await_count == 2
+    assert sent(b, 1).startswith("入數 $2,540") and sent_buttons(b, 1) == []
 
 
 def test_tick_names_a_whole_group_one_transfer_pays(db_path):

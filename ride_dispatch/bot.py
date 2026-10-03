@@ -51,6 +51,12 @@ ALLOWED_CHAT_IDS: set[int] = (
 # machine that is not the one holding the mailbox).
 FEED_PATH = os.environ.get("BANK_CREDITS_FEED", "")
 
+# The address the web app is reached at from the operator's phone, with no
+# trailing slash.  Only used to link a credit's notice to that credit on the
+# settle page; unset, or not an http(s) address, the notice carries no link.
+_web_url_raw = os.environ.get("RIDE_WEB_URL", "").strip().rstrip("/")
+WEB_URL = _web_url_raw if _web_url_raw.startswith(("https://", "http://")) else ""
+
 # Above this, an arriving batch of credits is a backfill rather than the day's
 # payout: one summary instead of a card per credit.
 BACKFILL_THRESHOLD = 3
@@ -1076,6 +1082,30 @@ def _leftover_line(credit_id: int) -> str | None:
     return credits.leftover_text(credit)
 
 
+def _credit_link(credit_id: int) -> InlineKeyboardMarkup | None:
+    """A way from a credit's notice to that credit on the settle page.
+
+    A URL button opens an address and calls nothing back, so it cannot put
+    money anywhere: the tap that does is still made on the page.
+    """
+    if not WEB_URL:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "喺埋數頁睇呢筆", url=f"{WEB_URL}/settle?credit={credit_id}")]])
+
+
+async def _announce_credit(bot, chat_id: int, text: str, credit_id: int):
+    link = _credit_link(credit_id)
+    if link is not None:
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=link)
+            return
+        except Exception:
+            # An address Telegram will not take must not cost the notice.
+            logger.exception("credit notice refused with its link, sent without")
+    await bot.send_message(chat_id=chat_id, text=text)
+
+
 async def _check_credits(bot, chat_id: int):
     """Take whatever the feed has gained since the last tick into the ledger."""
     if not FEED_PATH or not credits.feed_changed(FEED_PATH):
@@ -1108,7 +1138,7 @@ async def _check_credits(bot, chat_id: int):
         try:
             m = credits.propose_credit(DB_PATH, c["id"])
             offered = credits.offer(m, open_batches(DB_PATH, c["platform"]))
-            await bot.send_message(chat_id=chat_id, text=credits.credit_card_text(c, m, offered))
+            await _announce_credit(bot, chat_id, credits.credit_card_text(c, m, offered), c["id"])
         except Exception:
             logger.exception("credit %s not handled", c["ref"])
 
