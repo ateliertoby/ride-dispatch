@@ -598,7 +598,7 @@ def get_order_by_telegram_msg_id(db_path: str, msg_id: int) -> dict | None:
 
 def get_tracking_dates(db_path: str, now: datetime | None = None) -> list[str]:
     # Coarse time gate only — flight_status deliberately has no say here,
-    # so a stale/wrong status can never stop the poll loop (MU5017 2026-07-02).
+    # so a stale/wrong status can never stop the poll loop.
     # Fine-grained termination lives in flight.calc_next_interval.
     now = now or datetime.now()
     cutoff = (now - timedelta(hours=COARSE_WINDOW_HOURS)).strftime("%Y-%m-%d %H:%M:%S")

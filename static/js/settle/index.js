@@ -1351,7 +1351,7 @@ function sheetHead(title, sub) {
 // leg's money has got to, 'batch' shows the platform's own figure beside the
 // system's. A tick option turns the batch row into the operator's answer to
 // which leg the platform has not paid; without it the row is a read, since a
-// batch is created from a statement image in the bot, never from here.
+// batch is created from a statement image and never by picking legs.
 function orderRowHtml(o, mode, opts) {
   const tick = opts && opts.tick;
   const tag = (cls, text) => '<span class="otag ' + cls + '">' + figs(text) + '</span>';
@@ -1784,7 +1784,8 @@ function creditViewHtml(v) {
   else state = '<div class="hero-s">收埋' +
     (c.archived_reason ? '（' + esc(c.archived_reason) + '）' : '') + '</div>';
   // Money still to be accounted for is offered against the batches that are
-  // owed it, so the sheet the operator is already reading is where he answers.
+  // owed it, so the sheet the operator is already reading is where the answer
+  // is given.
   if (c.state === 'open' || c.state === 'partial') {
     const props = c.proposals || [];
     extra = props.length

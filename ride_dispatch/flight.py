@@ -172,9 +172,9 @@ def fetch_arrivals(date_str: str) -> list[dict]:
         timeout=15,
     )
     resp.raise_for_status()
-    # Even with span=1 the API returns adjacent days (verified 2026-07-02:
-    # requesting 07-02 returned 07-01 + 07-02). Tag each flight with its
-    # day so match_flights can disambiguate daily-repeating flight numbers.
+    # Even with span=1 the API returns the day before as well as the day
+    # asked for. Tag each flight with its day so match_flights can
+    # disambiguate daily-repeating flight numbers.
     flights = []
     for day in resp.json():
         day_date = day.get("date", date_str)
@@ -196,7 +196,7 @@ def _arrival_dt(info: dict) -> datetime | None:
 
 def match_flights(orders: list[dict], arrivals: list[dict]) -> dict[str, dict]:
     # Flight numbers repeat every day and the feed spans multiple days, so a
-    # bare flight_no lookup can hit the wrong day's leg (MU5017 2026-07-02).
+    # bare flight_no lookup can hit the wrong day's leg.
     # Keep every candidate and pick the one closest to the order's pickup
     # time; anything beyond MATCH_WINDOW_HOURS is a different day's flight
     # and matching nothing is safer than matching it.
