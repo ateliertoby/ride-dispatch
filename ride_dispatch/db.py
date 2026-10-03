@@ -1056,15 +1056,20 @@ _CREDIT_COLS = (
 CENT = 0.005
 
 
-def _credit_dict(conn, row) -> dict:
+def _credit_with(row, allocations: list[dict]) -> dict:
     out = dict(row)
     out["allocated"] = round(out["allocated"], 2)
     out["remaining"] = round(out["amount"] - out["allocated"], 2)
-    out["allocations"] = [{"settlement_id": r["settlement_id"], "amount": r["amount"]}
-                          for r in conn.execute(
-        "SELECT settlement_id, amount FROM credit_allocations WHERE credit_id = ? ORDER BY id",
-        (out["id"],))]
+    out["allocations"] = allocations
     return out
+
+
+def _credit_dict(conn, row) -> dict:
+    return _credit_with(row, [
+        {"settlement_id": r["settlement_id"], "amount": r["amount"]}
+        for r in conn.execute(
+            "SELECT settlement_id, amount FROM credit_allocations WHERE credit_id = ? ORDER BY id",
+            (row["id"],))])
 
 
 def insert_credit(db_path: str, credit: dict) -> int | None:
@@ -1101,7 +1106,16 @@ def unallocated_credits(db_path: str, platform: str | None = None) -> list[dict]
             "AND (? IS NULL OR c.platform = ?) ORDER BY c.value_date, c.id",
             (platform, platform),
         ).fetchall()
-        credits = [_credit_dict(conn, r) for r in rows]
+        allocations: dict[int, list[dict]] = {r["id"]: [] for r in rows}
+        for a in conn.execute(
+            "SELECT a.credit_id, a.settlement_id, a.amount FROM credit_allocations a "
+            "JOIN bank_credits c ON c.id = a.credit_id WHERE c.archived_reason IS NULL "
+            "AND (? IS NULL OR c.platform = ?) ORDER BY a.id",
+            (platform, platform),
+        ):
+            allocations[a["credit_id"]].append(
+                {"settlement_id": a["settlement_id"], "amount": a["amount"]})
+        credits = [_credit_with(r, allocations[r["id"]]) for r in rows]
         return [c for c in credits if c["remaining"] > CENT]
 
 
@@ -1483,7 +1497,8 @@ def _earlier_open(conn, month: str, platform: str, open_ids: list[int], cutoff: 
 
 
 def get_settle_month(db_path: str, month: str, platform: str,
-                     now: datetime | None = None) -> dict:
+                     now: datetime | None = None,
+                     unallocated: list[dict] | None = None) -> dict:
     """Everything the settle page draws for one month of one platform.
 
     Batches come back whole even when only part of them falls inside the
@@ -1502,6 +1517,10 @@ def get_settle_month(db_path: str, month: str, platform: str,
     a statement whose shortfall its orders' fares cannot hold).  The rest of
     the payload does not depend on them, so the page still loads and the
     statement at fault can still be opened and corrected from it.
+
+    `unallocated` is unallocated_credits(db_path, platform) when the caller
+    already holds it, so a request that also matches those credits against the
+    month's batches reads them once.
     """
     cutoff = _now_str(now)
     with _conn(db_path) as conn:
@@ -1549,7 +1568,8 @@ def get_settle_month(db_path: str, month: str, platform: str,
             logging.getLogger("db").warning(
                 "earlier open money withheld before %s %s: %s", month, platform, exc)
 
-    unallocated = unallocated_credits(db_path, platform)
+    if unallocated is None:
+        unallocated = unallocated_credits(db_path, platform)
 
     return {
         "now": cutoff,

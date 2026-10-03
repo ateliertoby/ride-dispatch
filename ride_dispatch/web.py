@@ -47,8 +47,8 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
-from .credits import (CENT, anchor, guess_unpaid, in_window, match_credit, offer,
-                      propose_batch)
+from .credits import (CENT, anchor, guess_unpaid, in_window, match_batch, match_credit,
+                      offer)
 from .flight import depart_hhmm, exit_urgency, normalize_flight_no, row_time
 from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PICKUP_POINTS
 from .pricing import suggest_price
@@ -486,22 +486,26 @@ def _decorate_batch(batch: dict) -> dict:
     return batch
 
 
-def _batch_proposals(batch: dict) -> list[dict]:
+def _batch_proposals(batch: dict, unallocated: list[dict] | None = None) -> list[dict]:
     """The credits that could pay what a batch is still owed, best first.
 
     Carried inside the batch rather than fetched per sheet: the whole ledger is
     a few hundred rows a year, so one round trip answers every open batch.
+    `unallocated` is that ledger's waiting credits when the caller answers
+    for many batches and has read them once; left out, they are read here.
     """
     if batch["outstanding"] <= CENT:
         return []
-    m = propose_batch(DB_PATH, batch["id"])
+    if unallocated is None:
+        unallocated = unallocated_credits(DB_PATH, batch["platform"])
+    m = match_batch(batch, unallocated)
     # `near` says the dates agree, by the matcher's own window: a credit
     # outside it is a candidate only because nothing rules it out, and a batch
     # still waiting for its transfer does not announce one as its money.
     return [{"id": c["id"], "amount": c["amount"], "value_date": c["value_date"],
              "remaining": c["remaining"], "exact": c["id"] in m.exact,
              "near": in_window(anchor(batch), c["value_date"])}
-            for c in offer(m, unallocated_credits(DB_PATH, batch["platform"]))]
+            for c in offer(m, unallocated)]
 
 
 def _credit_proposals(credit: dict, batches: list[dict]) -> tuple[list[dict], dict | None]:
@@ -540,7 +544,8 @@ def api_settle():
     platform = request.args.get("platform", "ride")
     if platform not in PLATFORMS:
         return jsonify({"error": f"platform must be one of {sorted(PLATFORMS)}"}), 400
-    data = get_settle_month(DB_PATH, month, platform)
+    unallocated = unallocated_credits(DB_PATH, platform)
+    data = get_settle_month(DB_PATH, month, platform, unallocated=unallocated)
     for o in data["orders"]:
         _display_flight(o)
     for batch in data["settlements"]:
@@ -548,7 +553,7 @@ def api_settle():
         # stored under is not something the client can do anything with.
         batch["statement_image"] = bool(batch.get("statement_image"))
         _decorate_batch(batch)
-        batch["proposals"] = _batch_proposals(batch)
+        batch["proposals"] = _batch_proposals(batch, unallocated)
     return jsonify({"month": month, "platform": platform, **data})
 
 

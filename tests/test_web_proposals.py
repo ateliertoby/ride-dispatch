@@ -98,6 +98,67 @@ def test_open_batches_are_the_batches_still_owed_money_whole(monkeypatch, tmp_pa
     every = [r[0] for r in conn.execute("SELECT id FROM settlements WHERE platform = 'ride' ORDER BY id")]
     conn.close()
     whole = [db.get_settlement(path, sid) for sid in every]
-    owed = [b for b in whole if b["outstanding"] > db.CENT]
-    assert 0 < len(owed) < len(whole)
-    assert db.open_batches(path, "ride") == owed
+    still_owed = [b for b in whole if b["outstanding"] > db.CENT]
+    assert 0 < len(still_owed) < len(whole)
+    assert db.open_batches(path, "ride") == still_owed
+
+
+MONTHS = [seed_demo_db.month_start(TODAY, back).isoformat()[:7] for back in (3, 2, 1, 0)]
+
+
+def month(client, key: str) -> dict:
+    r = client.get(f"/api/settle?month={key}&platform=ride")
+    assert r.status_code == 200
+    return r.get_json()
+
+
+def owed(payload: dict) -> list[dict]:
+    return [b for b in payload["settlements"] if b["outstanding"] > credits.CENT]
+
+
+def test_every_batch_owed_money_is_offered_what_its_own_proposal_offers(client, monkeypatch, tmp_path):
+    path = seeded(monkeypatch, tmp_path, "backlog.db", backlog=True)
+    seen = {}
+    for key in MONTHS:
+        payload = month(client, key)
+        waiting = db.unallocated_credits(path, "ride")
+        assert payload["credits"] == {
+            "unallocated": len(waiting),
+            "unallocated_sum": round(sum(c["remaining"] for c in waiting), 2)}
+        for b in payload["settlements"]:
+            m = credits.propose_batch(path, b["id"])
+            offered = credits.offer(m, waiting)
+            assert [(p["id"], p["exact"], p["remaining"]) for p in b["proposals"]] == \
+                [(c["id"], c["id"] in m.exact, c["remaining"]) for c in offered]
+            seen[b["id"]] = b["proposals"]
+    # Not a comparison of empty lists: the statement waiting for its transfer
+    # is answered by the one credit that agrees with it, a paid one by nothing.
+    assert [(p["id"], p["exact"]) for p in seen[seed_demo_db.BATCH["awaiting"]]][:1] == \
+        [(seed_demo_db.CREDIT["exact"], True)]
+    assert seen[seed_demo_db.BATCH["paid"]] == []
+
+
+def test_a_month_costs_the_same_reads_however_many_batches_are_owed(client, monkeypatch, tmp_path):
+    path = seeded(monkeypatch, tmp_path, "backlog.db", backlog=True)
+    key = max(MONTHS, key=lambda k: len(month(client, k)["settlements"]))
+    before = month(client, key)
+    cost = connections(monkeypatch, lambda: month(client, key))
+    # With no allocation left, every batch of the month is owed its whole total.
+    conn = sqlite3.connect(path)
+    conn.execute("DELETE FROM credit_allocations")
+    conn.commit()
+    conn.close()
+    after = month(client, key)
+    assert len(owed(after)) == len(after["settlements"]) > len(owed(before)) > 0
+    assert sum(bool(b["proposals"]) for b in after["settlements"]) > 1
+    # The waiting credits, then the month.
+    assert connections(monkeypatch, lambda: month(client, key)) == cost == 2
+
+
+def test_unallocated_credits_carry_what_each_credit_carries_alone(monkeypatch, tmp_path):
+    path = seeded(monkeypatch, tmp_path, "backlog.db", backlog=True)
+    for platform in (None, "ride", "uber"):
+        rows = db.unallocated_credits(path, platform)
+        assert rows == [db.get_credit(path, c["id"]) for c in rows]
+    waiting = db.unallocated_credits(path)
+    assert any(c["allocations"] for c in waiting) and any(not c["allocations"] for c in waiting)
