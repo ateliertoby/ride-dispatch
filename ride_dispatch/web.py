@@ -818,7 +818,7 @@ def main():
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
     print(f"DB: {os.path.abspath(DB_PATH)} ({count_active_orders(DB_PATH)} active orders)", flush=True)
-    port = int(os.environ.get("RIDE_WEB_PORT", "3200"))
+    port = int(os.environ.get("RIDE_WEB_PORT") or "3200")
     app.run(host="127.0.0.1", port=port)
 
 

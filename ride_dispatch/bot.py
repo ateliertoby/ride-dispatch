@@ -1045,7 +1045,11 @@ def _log_state(state: str | None):
 
 def _notify_chat_id() -> int:
     """Chat every push goes to; 0 when the bot has no configured destination."""
-    return int(os.environ.get("NOTIFY_CHAT_ID", list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else "0"))
+    # A variable set to nothing is one nobody filled in, not a chat called "".
+    named = os.environ.get("NOTIFY_CHAT_ID", "").strip()
+    if named:
+        return int(named)
+    return list(ALLOWED_CHAT_IDS)[0] if ALLOWED_CHAT_IDS else 0
 
 
 def _kick_poll(context):

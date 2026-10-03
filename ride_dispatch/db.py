@@ -18,7 +18,9 @@ COARSE_WINDOW_HOURS = 24
 # a leading "~" into a literal directory under cwd. Expansion therefore belongs
 # at the env read, not at sqlite3.connect.
 def resolve_db_path() -> str:
-    return os.path.expanduser(os.environ.get("RIDE_DB_PATH", "orders.db"))
+    # A blank value is absent: sqlite opens "" as a private database that is
+    # gone when the connection closes.
+    return os.path.expanduser(os.environ.get("RIDE_DB_PATH") or "orders.db")
 
 
 @contextmanager

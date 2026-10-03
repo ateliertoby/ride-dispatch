@@ -281,6 +281,22 @@ def test_heartbeat_checks_the_feed_ahead_of_the_flight_gate(db_path, monkeypatch
     bot._poll_and_notify.assert_not_awaited()
 
 
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_a_blank_notify_chat_falls_back_on_the_allowed_chats(db_path, monkeypatch, blank):
+    """The example environment file ships the variable with no value."""
+    monkeypatch.setenv("NOTIFY_CHAT_ID", blank)
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", {CHAT})
+    assert bot._notify_chat_id() == CHAT
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    assert bot._notify_chat_id() == 0
+
+
+def test_a_named_notify_chat_wins_over_the_allowed_chats(db_path, monkeypatch):
+    monkeypatch.setenv("NOTIFY_CHAT_ID", "456")
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", {CHAT})
+    assert bot._notify_chat_id() == 456
+
+
 def test_heartbeat_survives_a_broken_feed_check(db_path, monkeypatch, caplog):
     monkeypatch.setattr(bot, "_check_credits", AsyncMock(side_effect=RuntimeError("boom")))
     monkeypatch.setattr(bot, "_poll_and_notify", AsyncMock(return_value=60))

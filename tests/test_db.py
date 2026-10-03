@@ -521,6 +521,11 @@ def test_resolve_db_path_keeps_relative_path(monkeypatch):
     assert resolve_db_path() == "data/orders.db"
 
 
+def test_resolve_db_path_treats_a_blank_value_as_absent(monkeypatch):
+    monkeypatch.setenv("RIDE_DB_PATH", "")
+    assert resolve_db_path() == "orders.db"
+
+
 def test_resolve_db_path_defaults_to_cwd_file(monkeypatch):
     monkeypatch.delenv("RIDE_DB_PATH", raising=False)
     assert resolve_db_path() == "orders.db"
