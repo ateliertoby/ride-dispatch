@@ -47,8 +47,8 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
-from .credits import (CENT, anchor, guess_unpaid, in_window, offer, propose_batch,
-                      propose_credit)
+from .credits import (CENT, anchor, guess_unpaid, in_window, match_credit, offer,
+                      propose_batch)
 from .flight import depart_hhmm, exit_urgency, normalize_flight_no, row_time
 from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PICKUP_POINTS
 from .pricing import suggest_price
@@ -504,14 +504,19 @@ def _batch_proposals(batch: dict) -> list[dict]:
             for c in offer(m, unallocated_credits(DB_PATH, batch["platform"]))]
 
 
-def _credit_proposals(credit: dict, platform: str) -> tuple[list[dict], dict | None]:
+def _credit_proposals(credit: dict, batches: list[dict]) -> tuple[list[dict], dict | None]:
     """The batches a credit could pay, best first, and the group it pays whole.
 
     The mirror of the above.  A matcher answer of several batches is one
     transfer paying a whole group, so it also travels as one proposal the page
     can take with one tap; its batches stay offered one by one as well.
+
+    `credit` is a waiting credit of the ledger and `batches` the platform's
+    open batches, both read once by the caller: loading a batch whole costs
+    its orders and its statement, so reading them again for every credit made
+    the ledger's cost the product of the two lists.
     """
-    m = propose_credit(DB_PATH, credit["id"])
+    m = match_credit(credit, batches)
     # `due_dates` and `settled_on` are what a statement is named by, so a batch
     # offered here is named as the month's payload and the ledger name it.
     proposals = [{"id": b["id"], "outstanding": b["outstanding"],
@@ -519,7 +524,7 @@ def _credit_proposals(credit: dict, platform: str) -> tuple[list[dict], dict | N
                   "dates": sorted({(o["scheduled_time"] or "")[:10] for o in b["orders"]}),
                   "orders": len(b["orders"]), "exact": b["id"] in m.exact,
                   "due_dates": b["due_dates"], "settled_on": b["settled_on"]}
-                 for b in offer(m, open_batches(DB_PATH, platform))]
+                 for b in offer(m, batches)]
     combo = None
     if m.reason == "subset" and len(m.exact) > 1:
         owed = {p["id"]: p["outstanding"] for p in proposals}
@@ -662,11 +667,14 @@ def api_credits():
     credits = list_credits(DB_PATH, platform)
     counts = {state: 0 for state in ("open", "partial", "done", "archived")}
     sums = {"open": 0.0, "done": 0.0}
+    batches = None
     for c in credits:
         counts[c["state"]] += 1
         if c["state"] in ("open", "partial"):
             sums["open"] += c["remaining"]
-            c["proposals"], c["combo"] = _credit_proposals(c, platform)
+            if batches is None:
+                batches = open_batches(DB_PATH, platform)
+            c["proposals"], c["combo"] = _credit_proposals(c, batches)
         else:
             c["proposals"], c["combo"] = [], None
             if c["state"] == "done":

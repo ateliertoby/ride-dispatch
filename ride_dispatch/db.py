@@ -1113,18 +1113,21 @@ def open_batches(db_path: str, platform: str) -> list[dict]:
     transfer.
     """
     with _conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM settlements WHERE platform = ? ORDER BY id", (platform,)
-        ).fetchall()
-        batches = [_settlement_dict(r) for r in rows]
-        ids = [b["id"] for b in batches]
-        members = _settlement_orders(conn, ids)
-        allocations = _batch_allocations(conn, ids)
-        adjustments = _batch_adjustments(conn, ids)
-        for b in batches:
-            b["orders"] = members[b["id"]]
-            _derive_batch(b, allocations[b["id"]], adjustments[b["id"]])
-        return [b for b in batches if b["outstanding"] > CENT]
+        # Loading a batch whole reads its orders and decodes its statement, and
+        # most batches of a ledger are paid, so SQL names the ones worth
+        # loading.  It only narrows: _derive_batch still decides.  Allocations
+        # are stored rounded to the cent, so a batch owed at least a cent by
+        # that rounding is owed well over half of CENT by this sum, and the
+        # looser bound can load a batch too many but never drop one.
+        ids = [row["id"] for row in conn.execute(
+            "SELECT s.id FROM settlements s "
+            "LEFT JOIN credit_allocations a ON a.settlement_id = s.id "
+            "WHERE s.platform = ? GROUP BY s.id "
+            "HAVING coalesce(s.confirmed_amount, 0) - coalesce(sum(a.amount), 0) > ? "
+            "ORDER BY s.id",
+            (platform, CENT / 2),
+        )]
+        return [b for b in _derived_batches(conn, ids) if b["outstanding"] > CENT]
 
 
 def _load_batch(conn, settlement_id: int) -> dict:
