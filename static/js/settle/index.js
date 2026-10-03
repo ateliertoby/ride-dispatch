@@ -2065,6 +2065,52 @@ async function openBatch(id) {
   pushView({ kind: 'batch', id: id });
 }
 
+// ---- a credit named in the address ----
+// /settle?credit=<id> is where the bot's notice of a credit points: the page
+// goes to that credit's platform and opens its sheet over the queue, or the
+// queue alone when the credit is unknown or no longer waiting. The marker
+// stays in the address until it has been answered, so a login that expired
+// in between comes back to the same credit, and is taken off once it has.
+function creditMarker() {
+  const id = new URL(location.href).searchParams.get('credit');
+  return id && /^\d+$/.test(id) ? +id : 0;
+}
+function dropCreditMarker() {
+  const here = new URL(location.href);
+  if (!here.searchParams.has('credit')) return;
+  here.searchParams.delete('credit');
+  history.replaceState(history.state, '', here.pathname + here.search + here.hash);
+}
+async function followCredit(id) {
+  let named = null;
+  try {
+    // The ledger is asked for one platform at a time, so which one comes first.
+    const res = await apiFetch('/api/credits/' + id);
+    if (res.ok) named = await res.json();
+    else if (res.status !== 404) throw new Error('HTTP ' + res.status);
+  } catch (e) {
+    // With the login expired the marker is left for the load after it.
+    if (e instanceof AuthExpired) return;
+    dropCreditMarker();
+    toast('載入失敗');
+    return load();
+  }
+  dropCreditMarker();
+  if (!showing) return;
+  if (named && named.platform !== curPlat && PLATFORMS.some(p => p.key === named.platform)) {
+    curPlat = named.platform;
+    savePlat();
+    await refound(todayMonth());
+  } else {
+    await load();
+  }
+  if (!showing || !months.size) return;
+  const c = named && creditById(id);
+  views = [{ kind: 'queue' }];
+  if (c && (c.state === 'open' || c.state === 'partial')) views.push({ kind: 'credit', id: id });
+  paintView();
+}
+
 // ---- reading a statement ----
 // The file picked here is the platform's own: a screenshot forwarded through a
 // chat has been recompressed first, and that is what the reader mis-reads.
@@ -2400,7 +2446,8 @@ export const settleView = {
     renderFoot();
     // Loaded again on every showing: nothing was drawn while the view was
     // hidden, and the load ends by painting the open sheet.
-    return load();
+    const credit = creditMarker();
+    return credit ? followCredit(credit) : load();
   },
   hide() { showing = false; },
   // The server said something changed.

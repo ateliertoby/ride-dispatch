@@ -5332,6 +5332,34 @@ def settle_queue_backlog(s: Session) -> None:
     s.eq(len(s.writes), 2, "writes")
 
 
+@check("settle.a-credit-named-in-the-address")
+def settle_credit_marker(s: Session) -> None:
+    """/settle?credit=<id>, where the bot's notice points: the credit's sheet
+    over the queue, on the credit's platform, and the marker off the address."""
+    c = s.t["credit"]
+    s.open(f"/settle?credit={c['exact']}", ".sheet.show .hero")
+    s.eq(s.page.url, s.base + "/settle", "the address once the credit is open")
+    s.eq(s.title(), "入數 " + md_label(s.back(14)), "the credit's sheet")
+    s.eq(s.page.evaluate(MATCH_JS, ".sheet.show .mrow")[0][3:], ["啱數", "確認啱數"], "its answer and the confirm")
+    s.tap(".sheet.show .sheet-back")
+    s.eq(s.title(), "入數未對", "the queue under it")
+    s.page.close()
+    # One no longer waiting, on another platform: that platform's queue.
+    s.open(f"/settle?credit={c['clean']}", ".sheet.show .sheet-title")
+    s.eq((s.page.url, s.title(), s.sub()), (s.base + "/settle", "入數未對", "Uber · 0 筆 $0"), "a matched credit of another platform")
+    s.eq(s.page.eval_on_selector_all("#settle-tabs .tab.on", "els => els.map(e => e.dataset.f)"), ["uber"], "the platform chosen")
+    s.page.close()
+    # One the ledger does not hold: the queue of the platform last chosen.
+    s.allow("http 404", "status of 404")
+    s.open("/settle?credit=99999", ".sheet.show .sheet-title")
+    s.eq((s.page.url, s.title()), (s.base + "/settle", "入數未對"), "an unknown credit")
+    s.page.close()
+    # Not a number: no sheet, and the page as usual.
+    s.open("/settle?credit=abc", ".cell[data-d]")
+    s.expect(not s.sheet_open(), "a sheet opened for a marker that names nothing")
+    s.eq(s.writes, [], "writes")
+
+
 @check("settle.unlink")
 def settle_unlink(s: Session) -> None:
     s.open_settle()
@@ -6873,6 +6901,32 @@ def auth_launch(s: Session) -> None:
     s.api("PATCH", "/api/orders/" + seed_demo_db._oid(12), {"price": 401})
     s.wait(lambda: ("GET", CREDITS, 200) in s.server.asked()[asked:], "the reload for a change", ms=6000)
     s.settle()
+
+
+@check("auth.a-credit-named-in-the-address-survives-the-login", workers=True)
+def auth_credit_marker(s: Session) -> None:
+    """The bot's link opened with the login expired: the shell comes from the
+    cache with the marker still in its address, the login keeps it, and the
+    credit opens once the data can be read."""
+    s.allow(*LOST_SERVER, *CUT_OFF)
+    credit = s.t["credit"]["exact"]
+    s.open_settle()
+    s.controlled()
+    s.server.fault(expired=True)
+    s.page.goto(f"{s.base}/settle?credit={credit}")
+    s.wait(lambda: s.banner("auth"), "the banner")
+    s.eq(s.page.url, f"{s.base}/settle?credit={credit}", "the address while the credit cannot be read")
+    s.expect(not s.sheet_open(), "a sheet with the login expired")
+    asked = len(s.server.asked())
+    s.page.locator("#banner-auth").tap()
+    s.page.wait_for_url("**" + LOGIN_PATH + "?**")
+    s.wait(lambda: [p for m, p, st in s.server.asked()[asked:] if p.startswith(f"/settle?credit={credit}&login=")],
+           "the navigation to the login, with the credit still named")
+    s.server.fault()
+    s.page.locator("#back").tap()
+    s.on(".sheet.show .hero").first.wait_for()
+    s.settle()
+    s.eq((s.page.url, s.title()), (s.base + "/settle", "入數 " + md_label(s.back(14))), "the credit after the login")
 
 
 @check("auth.dropped-stream-finds-the-expired-login", workers=True, long=True)

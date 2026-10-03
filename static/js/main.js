@@ -9,7 +9,7 @@ import { dayView } from './day/index.js';
 import { settleView } from './settle/index.js';
 
 // Two markers in the address have done their job by the time this runs, and
-// are taken off it. ?login sent the navigation past the worker, to the login.
+// are taken off it. Any other is a view's own and is left for it. ?login sent the navigation past the worker, to the login.
 // ?perf=1 / ?perf=0 switches the timing readout the views report with, for a
 // browser where typing an address is easier than the hold on the date button.
 const here = new URL(location.href);
@@ -44,8 +44,12 @@ const authBanner = document.getElementById('banner-auth');
 onAuthExpired(() => { authBanner.hidden = false; });
 authBanner.addEventListener('click', () => {
   // A navigation the worker lets through to the network, so the access proxy
-  // can run its login and send the browser back here.
-  location.assign(location.pathname + '?login=' + Date.now());
+  // can run its login and send the browser back here. What else the address
+  // carries goes with it: a view's marker not yet answered is still wanted
+  // after the login.
+  const back = new URL(location.href);
+  back.searchParams.set('login', Date.now());
+  location.assign(back.pathname + back.search);
 });
 
 // A hidden view asks nothing, so when the stream fails the ping is what tells

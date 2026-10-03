@@ -681,6 +681,20 @@ def api_credits():
     })
 
 
+@app.get("/api/credits/<int:credit_id>")
+def api_credit(credit_id):
+    """Which platform's ledger a credit is in, and whether it still waits.
+
+    The ledger is asked for one platform at a time, so a page sent to a credit
+    by its id alone (the link in the bot's notice) asks this first.
+    """
+    credit = get_credit(DB_PATH, credit_id)
+    if credit is None:
+        return jsonify({"error": "credit not found"}), 404
+    waiting = not credit["archived_reason"] and credit["remaining"] > CENT
+    return jsonify({"id": credit["id"], "platform": credit["platform"], "open": waiting})
+
+
 @app.post("/api/credits/<int:credit_id>/allocate")
 def api_allocate_credit(credit_id):
     """Put a credit against a batch from the settle page.

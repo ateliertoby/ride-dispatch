@@ -1158,6 +1158,21 @@ def test_a_credits_proposals_carry_what_their_statements_are_named_by(client):
     assert proposal["settled_on"] == batch["settled_on"] == "2026-07-03"
 
 
+def test_a_credit_says_which_platforms_ledger_it_is_in(client):
+    from ride_dispatch.db import allocate, archive_credit
+    seed_order("D1")
+    sid = create_batch(["D1"], platform="didi", confirmed=250, settled_on="2026-07-03")
+    waiting = seed_credit(amount=250.0, platform="didi", ref="C1")
+    put_away = seed_credit(amount=99.0, ref="C2")
+    assert client.get(f"/api/credits/{waiting}").get_json() == {"id": waiting, "platform": "didi", "open": True}
+    allocate(web.DB_PATH, waiting, sid)
+    assert client.get(f"/api/credits/{waiting}").get_json()["open"] is False
+    archive_credit(web.DB_PATH, put_away, "pre-system", "2026-07-06")
+    assert client.get(f"/api/credits/{put_away}").get_json() == {"id": put_away, "platform": "ride", "open": False}
+    res = client.get("/api/credits/999")
+    assert res.status_code == 404 and res.headers["Cache-Control"] == "no-store"
+
+
 def seed_group(amount=1050.0):
     """Three statements confirmed on one working day and the one transfer
     that paid them all."""
