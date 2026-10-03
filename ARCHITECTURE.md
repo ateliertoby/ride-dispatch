@@ -1,318 +1,664 @@
 # Architecture
 
+Two processes share one SQLite file. `ride_dispatch.bot` is the Telegram bot and runs the repeating jobs (flights, car park, bank credit feed). `ride_dispatch.web` is a Flask app serving one document with two views: the day view (`/`) and the settle view (`/settle`, 埋數).
+
+This file has three parts:
+
+- [Design decisions](#design-decisions): the constraints and the reasons, grouped by domain.
+- [Data flow](#data-flow): what calls what, and the HTTP routes.
+- [Key files](#key-files): what each file is responsible for.
+
+Terms used throughout: a **batch** is a settlement (`settlements` row) created from one platform statement; a **leg** is an order in a batch; a **credit** is one bank transfer (`bank_credits` row); the **operator** is the single user.
+
 ## Design decisions
 
-**Order entry in both the bot and the dashboard, parsing shared.** WeChat order messages can be pasted into the Telegram bot (summary card, confirm, price) or straight into the dashboard's paste box (parse preview with fee and duplicate warnings, then price and save). Both paths run the same cascade in `ingest.py`; the dashboard POST re-parses server-side rather than trusting the client. Everything after the save (price, fees, time corrections, cancellation) happens on the dashboard: tapping a card opens an edit sheet instead of deep-linking back into Telegram, which used to cost an app switch per correction. The dashboard also creates quick orders directly (Didi/Uber/foodpanda — time, money, done) so a missed order can be backfilled onto any date being viewed, which the bot's today/yesterday inference can't do. `/didi` and `/uber` remain in the bot as an alternative path for just-finished trips.
+### Foundations
 
-**All auth at the perimeter via Cloudflare Access.** The dashboard is exposed via a named Cloudflare Tunnel with Cloudflare Access (email OTP, 1-month session) as the single auth layer — both reads and writes require passing Access, with no in-app auth. This is a single-user system; anyone who passes Cloudflare Access is the operator and can read, edit, create, and cancel orders. The Flask app itself binds to localhost and trusts that the tunnel enforces identity.
+**SQLite.** Single user, single machine. Nothing heavier is justified. The schema is created and migrated on start by `db.init_db`, with `ALTER TABLE ... ADD COLUMN` as the only migration mechanism.
 
-**Manual price and cost entry.** The dispatch platform gives a flat price per order. Costs (tunnel fees, parking) are variable but predictable. Encoding cost logic upfront would slow down shipping. Manual entry is fast enough for 3-7 orders/day, and rules can be added incrementally. Parking is where rules have been added: its amount is planned from the meeting point and settled by the car park visit (below).
+**All auth is at the perimeter.** The web app is exposed through a named Cloudflare Tunnel with Cloudflare Access (email OTP) as the single auth layer. The Flask app binds to localhost, has no auth of its own and trusts the tunnel: whoever passes Access is the operator and can read, edit, create and cancel.
 
-**SQLite.** Single user, single machine. No reason for anything heavier.
+**Prices and costs are entered by hand.** The platform gives a flat price per order, and costs (tunnel, parking) are variable but predictable. Manual entry is fast enough for three to seven orders a day, and rules are added only where they pay for themselves. Two have been: parking, which is planned from the meeting point and settled by the car park visit, and a suggested price, which `pricing.py` reads off the history of fares to the same zone and holds no price constants of its own.
 
-**HKIA undocumented endpoint for flight data.** The official public API (data.gov.hk) only provides D-1 historical data — useless for real-time scheduling. The endpoint used here is the same one powering HKIA's own website: public, no auth, no API key. It's undocumented, so it could break without notice. The system degrades gracefully — if the endpoint fails, the dashboard just shows no flight data; orders and revenue are unaffected.
+### Order entry
 
-**Flight poller as an immortal heartbeat in the bot.** The poller lives in the bot process on a 60s `run_repeating` heartbeat (`misfire_grace_time=None`, so late ticks run instead of being discarded). Each tick is cheap: it checks the time-gated tracking window from the DB and only hits HKIA when a poll is actually due, at the tier interval computed by `calc_next_interval` (60s landed / 600s watchdog / ETA-halving / 1800s no-data). Termination is time-based only — flight status can slow polling but can never stop it; a wrong or stale status self-corrects on the next poll. Flight matching is date-aware: the HKIA feed spans adjacent days and flight numbers repeat daily, so each order matches the candidate closest to its pickup time within ±12h.
+**Both the bot and the web app take orders, and parsing is shared.** A WeChat order message can be pasted into the bot (summary card, confirm, price) or into the web app's paste box (preview with fees and warnings, then price and save). Both run the same cascade, `ingest.parse_any`. The web POST parses the text again on the server and never trusts the preview the client holds.
 
-**GPT-Image-2 via fal.ai for whiteboard sign photos.** The dispatch platform requires a photo of a handwritten whiteboard sign before each 舉牌 pickup. GPT-Image-2 has best-in-class text rendering including Chinese characters. The image is generated by editing a base photo (AI-generated, no PII) to replace the whiteboard text with realistic handwriting. Quality is set to "low" — it's a compliance photo, not print media. The fal.ai queue API is called via httpx (already a dependency) to avoid adding a new one. Landing offers generation behind a confirm button — the prompt previews the sign text so a wrong name is caught before credits are spent, and platform VIP markers are stripped from the name before it reaches the model. `/board` is the manual retry path. If FAL_KEY is unset the feature is silently off — the bot runs normally.
+**A message that lands on a live order is an amendment, not a duplicate.** The platform re-sends the whole message when the customer changes a detail. Both entry paths show the difference and apply it in place (`db.update_order_from_message`).
 
-**Car park visits are detected, never entered by hand.** The once-per-24h free half hour, shared by Car Park 3 and 4, is invisible to the driver and to the API; only a record of past visits can say whether it is available, and the driver cannot keep that record from the wheel. `parking.py` polls HKIA's online-payment status endpoint (same family as the flight endpoint: public, unauthenticated, undocumented) from 30 minutes before a pickup's predicted landing until two hours after, and keeps polling any open visit until two consecutive not-inside replies. Visits are keyed by HKIA's own `pvNr`, so a restart resumes rather than duplicates. Payment goes through the same endpoints HKIA's page uses, and the PayDollar gateway accepts its form as a GET, so the bot hands over a URL button rather than hosting a page; a visit still unpaid at 50 minutes gets a link unprompted. The lookup is HKIA's online payment service, which covers Car Park 3 and 4 only (`TRACKED_CAR_PARKS`): a Car Park 1 visit never appears, so nothing about it is detected, pushed or written back. If `CAR_PLATE` is unset the feature is silently off.
+- A field the new message leaves empty means "not mentioned", never "cleared". Re-sent messages often drop the contact numbers, so the stored value survives.
+- `parking_fee` and `pickup_point` are not overwritten: the operator or a car park visit may have moved them since entry. `banner_fee` is re-derived, because it is a pure function of the message.
+- The price is kept unless a new one is given.
+- An order in a batch is refused: its fields are frozen with the batch.
 
-**A visit is priced on HKIA's clock and dated on the bot's.** Every reply seen while the car is inside carries HKIA's own `parkTime` and the fee for leaving at that moment, so each is stored on the visit (`last_seen_at`, `last_park_minutes`, `last_fee`) and the close reads back from them — but from two different columns, because they answer two different questions. The stay is HKIA's minute count: that is the clock that charges, and it is a whole-minute figure however often the bot polls, which is exactly why it cannot say when those minutes ended. The exit time is `last_seen_at`, the last tick that saw the car, which tightens with the tick rate and is provably no later than the real exit — the direction an operator can reason about — while the first tick to miss it is kept apart in `gone_at` as the upper bound. The two are deliberately decoupled and nothing forces them to agree: entry plus the stay can be a minute off the recorded exit, and that difference is evidence rather than an error to reconcile away. The fee decides free from chargeable, because HKIA computes it with the allowance already applied and its real free threshold is longer than 30 minutes and unpublished. `FREE_MINUTES` survives as the entry message's "leave before" guidance and as the fallback for a visit that was never read, and both only at a car park that has the free half hour (`ALLOWANCE_CAR_PARKS`, Car Park 3 and 4): Car Park 1 charges from entry, so an unread visit there is chargeable, and a car park we cannot name is assumed to charge.
+**A cancelled order's number can be entered again.** The platform re-books under the same order number. Re-entry overwrites the cancelled row (`db.save_or_revive_order`) and drops what the old booking derived: the price, because a stale price would hide the 未入價 mark, and the flight and reminder state, so tracking starts over.
 
-**The car park gets its own heartbeat rather than a share of the flight poll's.** The recorded exit is only ever as accurate as the tick that found the car gone, and that timestamp goes onto the visit and into the 24h allowance, so the tick rate is the resolution of a stored fact. The flight heartbeat cannot carry it: its own gate stretches to hours ahead of a distant flight, and putting the parking check behind it would either date exits to that interval or drag the whole poll onto the parking cadence. `_parking_tick` is therefore a `run_repeating` job of its own at `PARKING_OPEN_INTERVAL` (30s), gated back to `PARKING_IDLE_INTERVAL` (60s) by `_next_parking_at` whenever no visit is open, because only an open visit has an exit to get right — an armed pickup with no car inside gains nothing from the fast rate. A check that blew up leaves the cadence unknown and is assumed fast, since guessing fast costs one extra query a minute and guessing slow costs a visit recorded to the wrong minute.
+**Quick orders are created directly.** 滴滴, Uber and foodpanda trips have no message to parse: time, money, done. The web app adds one onto whichever date is being viewed, which the bot's `/didi` and `/uber` cannot do, since they infer today or yesterday from the time typed.
 
-**The driver can overrule the classification, and the allowance follows.** Only the driver saw whether the gate opened, and a wrong verdict silently moves the 24h allowance. The exit message therefore carries buttons for the two verdicts it did not pick, and `/parking mark <id> free|paid|gate` corrects a visit whose buttons are gone. Either writes `observed` and moves the derived `free` column with it; `free` also zeroes the order's `parking_fee`, while `paid`/`gate` leave it for the dashboard because the amount is not known to the system. `/parking` history shows the automatic verdict, HKIA's fee reading and any manual correction side by side.
+**Corrections are made in one order sheet, opened from both views.** Everything after the save (price, fees, time, meeting point, cancel) is edited in the order's sheet. An order found wrong while settling is corrected where it was found, so the sheet is one module, `static/js/order-sheet.js`, that both views import.
 
-**A pickup's meeting point is planned at entry and settled by the visit.** What waiting costs depends on where the driver meets the passenger: Car Park 1 charges $35 for the first hour from the moment the car enters and $50 for each hour after, Car Park 4 charges $32 an hour but gives the free half hour, and the Regal Airport Hotel (富豪) is outside HKIA's car parks and costs nothing. `orders.pickup_point` holds that place for an airport pickup and `ingest.PICKUP_POINTS` is the one tariff table for it, read by entry, by the PATCH the dashboard sends and by the entry message's price preview. Entry plans the place from the must-park rule (a 携程 pickup or a 舉牌 meet goes to Car Park 4, anything else to the hotel) and writes its first-hour charge as `parking_fee`; the dashboard sheet moves it when a passenger asks to be met somewhere else, and the move writes the new place's charge in the same write. A plan is a guess, so a visit linked to the order replaces it with what HKIA saw: the close overwrites the place with the car park the car was in (HKIA's own name for one we cannot name) and the fee with what the visit came to: nothing when free, the link's amount when paid through our link, the last fee quoted before a payment made anywhere else, and at the gate the last fee quoted inside, which is HKIA's price for leaving as of at most one tick before the exit. A chargeable visit with no reading leaves the planned fee standing, and a Car Park 1 pickup never has a visit at all, so its planned fee is final unless edited and a stay past the first hour is priced by hand; the landing pushes for such an order say so. The absence of a visit settles a plan too, but only at Car Park 4, where every visit is seen: a pickup still planned there 90 minutes after landing (`NO_ENTRY_MINUTES`), with no visit linked to it, none of any order entered since 30 minutes before its landing, and none open, is taken to have met its passenger at the hotel, so the place becomes 富豪 and the fee nothing, and one push says so with the fee the order carried. The second condition is there because one visit that collected two passengers links to only one of their orders. The rule can be wrong in two ways the system cannot see, so the push carries a button for each: the car was at Car Park 1, which only the operator can know, or at Car Park 4 on a visit the tracker missed; either writes that place and its first-hour charge. The push goes out before the write, so one that fails leaves the order untouched for the next tick, and the `noentry` reminder tag keeps an order the operator put back from being judged again. The verdict is given for two hours past its due moment and no later, because a bot that comes back after that was not watching while the visit would have happened, and never without `CAR_PLATE`. A visit that does begin after the switch links and closes like any other, and its close overwrites the switch. The close runs once, so an edit made after it stands, and a re-sent booking leaves the place alone, like `parking_fee`, because the operator or a visit may have moved it since entry.
+- Each view hands it a host (`useOrderHost`): which order is open, how a view is stacked, how a patch reloads, how a heading is drawn, and the view's own info rows. The settle view adds the whole order number to copy, the net figure, and links to the batch that holds the leg and the batch that paid its 舉牌 ahead.
+- Both views stay mounted, so the host is whichever view is showing. A view sets it when it is shown and again before it opens an order.
+- On a batched order, the fields its batch was summed from and cancellation show as 已結算 before the tap, instead of waiting for the server to refuse.
+- The sheet's table of meeting points twins `ingest.PICKUP_POINTS`, and a test pins the two together.
+- The sheet also links to the order's card in the bot (`/start order_<id>`), which offers tunnel and parking entry and cancel.
 
-**Settlement is a batch, and an order's money state is derived from it.** The platform pays for a run of days at once, so the unit of reconciliation is a batch of orders, not an order: `settlements` holds what the operator confirmed against the platform's statement, and `orders.settlement_id` points at it. Everything else is derived rather than stored — an order is unsettled with no batch, 等過數 with one the bank still owes money on, 已收 once the batch has a `paid_on` — so there is no second copy of the truth to fall out of step, and undoing a settlement is just unlinking. The amount a batch expects is summed inside the write transaction from the stored rows, never taken from the client, and the fields it was summed from (`price`, `tunnel_fee`, `banner_fee`) plus cancellation are locked while an order is batched: changing them afterwards would silently make the recorded total wrong. `parking_fee` and `scheduled_time` do not feed the total and stay editable. A discrepancy between expected and confirmed is recorded as 差額 and displayed; the operator takes it up with the platform.
+**The web app wakes the bot when it saves an order.** A pasted order written by the web process would otherwise wait out the bot's current poll interval before its flight is tracked. The web process sends `kick` over a unix socket beside the database (`bot.sock`), and the bot polls at once. It is best-effort: with the bot down nothing happens, and the bot's first poll on start covers it.
 
-**Statements are read on-device with RapidOCR, not with a vision model.** The platform's settlement statement arrives as a screenshot, re-encoded by Telegram to 1280 px, with order numbers seven pixels tall. Measured on that photo, PP-OCR read every order number and amount exactly in about two seconds on the server; a vision LLM mis-read two to four of twelve order numbers and took a minute per image. The engine's own aspect-ratio threshold has to go before some statements can be read at all, and it fails silently: above a width/height ratio of 8 RapidOCR skips detection and recognises the whole frame as a single line, returning no boxes rather than an error, and a statement day of few rows is exactly that wide. The engine is therefore built with `width_height_ratio=-1`, and because that threshold is the engine's setting rather than the reader's, any frame still wider than six times its height is also extended downwards with white rows before it is handed over — rows only, below the content, so the width and every original pixel stay as they were and the blank rows contribute no boxes of their own. RapidOCR is installed with `--no-deps` and `opencv-python-headless` because its metadata asks for the full OpenCV, whose `cv2.so` links libGL — on this server that would mean Mesa and LLVM for nothing.
+### Flights
 
-**The reader binds to the table's schema, never to a position in the row.** The platform adds columns without notice — a 結算狀態 column appeared to the right of 司機應結算金額, and every data row read as amountless — so the table's own structure is reconstructed instead of counted off the row. Columns are inferred from horizontal overlap, the one relation OCR preserves: a box is drawn tight around its text, so its width says nothing, but a figure and the label above it always share ground. The bands so inferred are named from the header row, each cell measured against the 27 column names the platform prints, in the traditional spelling and in the simplified one OCR returns, because every character differs between the two scripts and one spelling alone would reject a clean read of the other. A cell may be about two fifths of its name in edits away and no further — 司機預估收入 and 司機應結算金額 are five edits apart, and reading a day off the estimate column would settle a wrong figure while every subtotal on the image still agreed with itself — and a tie between two columns is no match, because a column named by a coin toss is worse than one left anonymous. The columns this reader takes nothing from are listed too, with no role: they are there to compete for a garbled header cell so a mangled neighbour lands on its own name rather than drifting onto a column that is acted on. Rows are still classified by shape and not by label, because the labels are what the compression garbles: an order id makes a data row whatever else it holds, the account code printed above the first day group marks the grand total, a date at the left edge opens a day. The amount column is the one place two independent readings must agree — the column the header names, and the rightmost column holding money. Either carries the read alone when the other is absent, since a cropped screenshot has no header row at all; when both are present and name different columns, neither is trusted — no amount is read, every row is dropped with a warning and nothing can be settled off that image. The alternative is picking one, and a wrong pick is invisible: the rows would be summed off the wrong column and the day's own 求和, read off that same column, would agree with them.
+**Flight data comes from HKIA's undocumented endpoint.** The official public API (data.gov.hk) provides only the previous day's data, which is useless for scheduling. The endpoint used is the one behind HKIA's own website: public, no auth, no key. It can break without notice, and the system degrades to showing no flight data; orders and revenue are unaffected.
 
-**A statement is checked against itself before it is matched against the book.** The statement's own subtotals are checked first, so a mis-read digit is reported as a reading error rather than as a dispute with the platform; ids are then matched to orders in four passes, weakest evidence last: exactly; then by prefix for a code the platform's UI truncated with an ellipsis (or one long enough that a shared prefix would be a coincidence); then that same opening within two edits, because Telegram's photo compression rewrites letters inside a code (a K read as X, a B as 8) that the digit fixes must not touch, so the compressed copy of an image whose original binds would otherwise lose the line; then a unique near-miss over whole ids. The tolerant opening is offered only to codes — a digit run's mis-reads are already covered — and it refuses two candidates inside the bound rather than taking the nearer, because a prefix is partial evidence and money must not be batched against two codes that both nearly agree. Three id shapes reach the reader — SPACE plus a short digit run, a long digit run in which S O I l B may be mis-read digits, and 同程's alphanumeric code — and a pattern that knows only some of them fails the checksum of an otherwise readable image over a line it never saw. `reconcile()` is a pure function over the parsed statement and candidate orders, so the reader could be swapped without touching it. Tests replay recorded OCR output rather than the image, and the recording replaces every order number with a keyed hash whose salt is supplied from the environment and never committed, so the fixtures keep the reader's real input without carrying real order numbers.
+**The poller is a heartbeat that never stops.** It is a 60 s `run_repeating` job in the bot with `misfire_grace_time=None`, so a late tick runs instead of being discarded. A chain of one-shot jobs would die silently the first time a tick fired late.
 
-**Money is allocated in amounts, not linked.** The platform paid a $3,460 statement with $2,950 because its own system had failed to submit two legs, said so by hand, and left the $510 to arrive later — alone or bundled into a bigger transfer. One credit per batch, paid in full, cannot record that, so `credit_allocations` carries an amount per (credit, batch) pair: a credit can pay several batches and a batch can be paid by several credits. What a credit has left and what a batch is still owed are both derived from it, so taking money back off a batch, or undoing the batch entirely, needs no second write that could disagree. A short-paid batch names the legs the platform has not paid for (`orders.unpaid`) on the settle page, not in Telegram: when the money is short the operator does not yet know which legs, and the answer comes only after the platform investigates. The settle page takes the ticks on the batch's own order list, against the full order numbers rather than a second list of its own, with a system guess (`credits.guess_unpaid`: subsets of legs whose platform amounts equal the shortfall, capped at size 5 and 8 results) pre-filled when exactly one combination adds up; `POST /api/settlements/<id>/unpaid` takes the set. The ticks are accepted only when they account for the shortfall to the cent — two independent statements of the same fact, one from the platform's message and one from its money, and a mismatch means one was misread. The ticks are priced in the platform's own figures (`statement.leg_amount`, the batch's statement rows folded per order id the way `reconcile` folds them), never in the system's: the transfer is the sum of what the platform printed, so a leg it priced differently would otherwise never account for the gap and the operator would be told his ticks are wrong over a discrepancy that is the platform's. The flags are history, not a to-do list: `allocate` leaves them alone when the make-up payment closes the batch, because which legs the platform held back on that statement stays true after they are paid, and it is the only record of it — without it a batch of fourteen legs paid in two transfers would tell the day sheet all fourteen arrived on the second date. Every reader therefore asks the batch's state as well as the flag: flagged in a 部分 batch is still owed, flagged in a 已收 batch was 補收 by the allocation that completed it, and nothing may read the flag alone as money outstanding. `paid_on` is written at the moment the allocations cover the total and by nothing else, so the dashboard's 已收 keeps meaning what it meant.
+- Each tick is cheap. It reads the tracking window from the database and fetches from HKIA only when a poll is due, at the interval `flight.calc_next_interval` gives: 60 s once a flight has landed, 600 s when every tracked flight is at the gate or cancelled, half the time to the nearest ETA otherwise, 1800 s with no arrival time at all.
+- Termination is by time only. An order leaves tracking when its window (the later of pickup time and latest ETA, plus three hours) expires. Status picks the tier and can never stop the poll, so a wrong or stale status corrects itself on the next one.
+- The interval is clamped so the next tick comes before the earliest pending reminder.
 
-**A statement is a batch.** The platform pays one statement with one transfer whatever number of days it spans, and a leg it held back appears on a later statement under its own date. The existing batch model already fits — a batch is not tied to a day and an order belongs to at most one — so the statement adds two columns to it: the platform's lines as JSON (shown beside the system's figures in batch detail, keyed by the id the matcher settled on, with the text as read kept as `read_as` where a near-miss was corrected) and the screenshot file beside the database. Held-back legs stay unsettled with no extra state; the next statement that lists them picks them up. Because the statement is the only thing that creates a batch, every batch has an image behind it and a chain from the bank credit through that image to the orders it lists.
+**Flights are matched by number and by date.** The feed spans adjacent days and flight numbers repeat daily. Each order takes the candidate closest to its pickup time, within 12 hours either side; beyond that it is another day's flight, and matching nothing is safer. Numbers are canonicalised first, because booking sources and the feed pad them differently. The database keeps what the platform sent and every screen and message shows the canonical form.
 
-**A leg's own cost belongs on the order, a cost the transfer carries belongs on the batch.** A statement is not only fares. The platform charges 判罰賠款 back for a trip it holds the driver responsible for, and it books such a line wherever it likes: against a leg of this statement, against a leg an earlier batch already holds, against a trip that was cancelled, or under a number the book has never seen. The first is the leg's own cost, so it is written to `orders.penalty_fee` by the same tap that creates the batch, and `expected_of` nets it off for every platform — which is also what makes a statement idempotent, because once the fine is stored, re-reading the same image agrees with the platform's own figure. The rest are money on this transfer and nothing else, so they go to `settlement_adjustments`, one row per printed line, and join the batch's `expected_amount` in the same write. The boundary is what keeps the two apart: recording a fine against an already-settled leg on the order would have to reopen a batch whose expected total is frozen, while recording it as a line of the transfer being confirmed now leaves that batch alone and still balances. The platform's own line structure is kept rather than netted, because a 判罰 and the 免責 line that cancels it are two facts and a pair that happens to net to zero must still read as the pair it was. A line that nets positive under an unknown number is not an adjustment at all but a leg the book never got, and stays flagged as unknown: money coming in must not be able to read as fully explained. The button that writes the batch names every part of what it is about to do — 確認結算 + 記判罰 + 記帳項 + 對入數 — because money leaving an order is not something to discover after the fact.
+**Reminders are anchored to the flight, not to the booking.** For a pickup the bot pushes 出發接機 (landing plus exit minutes minus a 40 minute drive) and 用車時間到 (landing plus exit minutes, once the flight has landed). Trips with a fixed time (送机, 单程接送, 接站) get one push 30 and 10 minutes before. Each is recorded as a tag in `orders.reminders_sent`. A flight-anchored push never fires more than two hours late, and a fixed-time one never after its time, so a bot that was down does not send a backlog.
 
-**A 舉牌 paid while its trip is held back is paid ahead, not settled.** The platform can leave a trip off a statement and still pay the trip's 舉牌 line on it, under the trip's own number. Folded by order number, that reads as the trip underpaid by its whole fare, and confirming it at the platform's figure would settle the order: the fare would drop out of what is owed, and the trip line arriving later would read as money paid extra. The 舉牌 is money on this transfer and the trip is not, so the line goes to `settlement_adjustments` flagged `ahead`, and the order stays unsettled like any held-back leg. `owed_of` takes what other batches carry for an order off `expected_of`, so the batch that later takes the trip is owed the trip alone and the trip line matches it. The category chip that names a line is unreadable, so the rule is arithmetic: an order whose only line is exactly its own 舉牌 fee. A trip line printed at zero beside it is a trip paid nothing, not one held back. The trip's batch freezes its expected total net of the line, so the batch carrying the line cannot be undone while the trip's batch stands, the same reason a batched leg's fees are locked. On the settle calendar the batch also covers the held trip's day, drawn as the dashed pointer a held-back day gets and labelled with the money it put in ($40→26日), since that day has no leg of its own in the batch.
+**A passed ETA is announced, never acted on.** The feed lags between touchdown and `Landed`. Five minutes after a still-`est` flight's own ETA the bot pushes 預計已落地 HH:MM（HKIA 未確認）, because the driver has the same decision to make either way. Nothing writes `flight_status` from it, so the reminder chain and the sign prompt still wait for the feed.
 
-**Money is matched on the settle page; the chat only announces it.** A credit arriving from the feed is pushed to Telegram as what arrived and what the matcher believes (對到 批次 #26、#27、#28？ · 去埋數頁對數), with no buttons. Matching it is a tap on the settle page, where the whole ledger and calendar are in view, and a whole confirmation day that one transfer paid is one tap there (對晒), allocated in one transaction that refuses the group whole unless the credit covers every batch in it. The chat's per-batch buttons made a transfer covering three statements take three taps and were answered without the ledger in view. The statement card's 確認結算 + 對入數 stays in the chat: the credit it spends is the one that card named. Buttons left on older credit cards answer with where matching is done now and move no money.
+**Sign photos are generated by GPT-Image-2 through fal.ai, behind a button.** The platform requires a photo of a handwritten whiteboard sign before each 舉牌 pickup.
 
-**One order sheet, opened from both views.** An order found wrong while settling is corrected where it was found. The order's sheet — its details, editable fields, pickup point, cancel confirm and numpad — is one module, `static/js/order-sheet.js` with `static/css/order-sheet.css`, that the day view and the settle view both import; each hands it a host through `useOrderHost` that says which order is open, how a view is stacked, how a patch reloads, how a heading is drawn and closed, and the view's own rows (the settle view adds the whole order number to copy, the net figure and links to the batches that hold the leg and that paid its 舉牌 ahead). Both views stay mounted, so the host is whichever view is showing: a view sets it when it is shown and again before it opens an order. On a batched order the fields its batch's frozen total was summed from, and cancellation, show as 已結算 rather than waiting for the server to refuse them. The sheet's heading leads with what the board's code column shows for the order — a flight pickup's flight number, any other order's service — and an airport pickup's meeting point is three segments, each place over its first-hour charge, from a table in the module that twins `ingest.PICKUP_POINTS` and is pinned to it by a test.
+- The image is made by editing a base photo (`assets/whiteboard_base.png`, AI-generated, no personal data) so that only the whiteboard text changes. Quality is `low`: it is a compliance photo.
+- Landing offers generation with a preview of the exact text, so a wrong name is caught before credits are spent. Platform VIP markers are stripped from the name first.
+- A generated image is cached until it has been delivered, so a failed send is retried without paying for generation again. `/board` is the manual path.
+- The fal.ai queue API is called with httpx, already a dependency. With `FAL_KEY` unset the feature is off and the bot runs normally.
 
-**One document, two mounted views.** `/` and `/settle` return the same shell (`templates/app.html`), and the path only says which view is showing. The day view answers "what am I driving" and the settle view "what am I owed": different questions and different shapes (a timeline versus a continuous strip of weeks), so they stay two views, but not two documents. A switch between documents goes through Cloudflare Access and the tunnel to the server, parses every script again, fetches the data again and reopens the event stream; a switch between views of one document does none of that. `router.js` maps the path to a view with the History API, so back and forward work and a reload or a home-screen launch on either address lands on that view. A view is mounted the first time it is shown and stays mounted: switching hides one root and shows the other, and each view gets its own scroll position back, the settle strip the months it has loaded and either view the sheet it had open. Each view keeps an on-screen control to the other, because an installed app has no browser chrome to go back with. Each view also keeps its own view stack, because the day view's serves two hosts (bottom sheet and top drop panel) while the settle view's stacks eight kinds — day, order, batch, statement, credit, the 未對 queue, undo and 解除入數 — most of them opened straight off the grid rather than always reached through a day. There is no build step: the scripts are ES modules and the styles plain CSS, served as they are written.
+### Car park
 
-**Each view is one module; only what is stateless is separate.** `static/js/day/index.js` and `static/js/settle/index.js` each hold around twenty mutable variables that most of their functions read and write. Cutting a view along its seams means turning every one of those references into an import or a parameter, and nothing but a browser can tell whether a reference was missed. What reads only its arguments is separate, because that is what a test can hold: `shared.js` (formatting and the twins of Python functions), `dates.js`, `lanes.js`, `api.js`, `store.js` and `stream.js`, each covered by `node --test "tests/js/*.test.mjs"` with no dependency. What needs a real browser — the views, the worker, the banners, the stream against a server that misbehaves — is checked by `scripts/e2e.py` in Playwright WebKit.
+**Visits are detected, never entered by hand.** The free half hour, shared by Car Park 3 and 4 and available once in 24 hours, is invisible to the driver and to the API. Only a record of past visits can say whether it is available, and the driver cannot keep that record from the wheel.
 
-**The store paints what it holds and always asks again.** The day view reads a day's orders through `store.js`, an in-memory map from key to the server's last answer. A read paints the held answer at once, asks the server, and paints again only if the new answer differs, so a day already seen appears before the network answers, and the neighbouring days are fetched ahead once the day's own answer is in. There is no notion of a held answer being fresh: `/api/orders` computes fields at request time (the row order, the departure time, the exit urgency) and another device or the bot can change an order at any moment, so a held answer is good for an instant paint and never for the truth. Requests are numbered per key, and an answer older than one already applied is dropped, so answers arriving out of order cannot put stale rows back; the view itself drops a paint for a day it has since left. Nothing is kept on the device, so a launch starts empty. The settle view does not use the store: it stays mounted, so its own map of loaded months already survives a switch, and a second copy of money data would be one more thing to keep in step.
+- `parking.py` polls HKIA's online-payment status endpoint (public, unauthenticated, undocumented) from 30 minutes before a pickup's predicted landing until two hours after, and keeps polling an open visit until two consecutive not-inside replies.
+- Visits are keyed by HKIA's own `pvNr`, so a restart resumes a visit instead of opening a second one.
+- The lookup is HKIA's online payment service, which covers Car Park 3 and 4 only (`TRACKED_CAR_PARKS`). A Car Park 1 visit never appears, so nothing about it is detected, pushed or written back.
+- With `CAR_PLATE` unset the feature is off.
 
-**A hidden view neither asks nor draws.** The settle strip measures its column width and every label against the live grid to decide which lane a bar goes on, and a hidden root has no width: a strip painted then would pack every label into nothing. The views also share the document's scroll position, the window's events and the order sheet's host. So while a view is hidden its answers are not painted, its listeners on the window stand down, and its writes do not reload it; `show()` always loads, which is also what redraws a sheet left open. The cost is that a hidden view can learn nothing: whatever changes is found by the showing view, and by the stream.
+**Payment is a link, not a hosted page.** Payment goes through the endpoints HKIA's own page uses, and the PayDollar gateway accepts its form as a GET, so the bot hands over a URL button. Every tap makes a new gateway order, because a link's lifetime is unknown and a stale one fails silently. A visit still unpaid at 50 minutes (`AUTO_LINK_MINUTE`) gets a link unprompted.
 
-**View styles are scoped with `:where()`, ids are per view.** With both views in one document, a rule or an id of one would reach the other. `day.css` and `settle.css` nest their rules under `:where(.view-day)` and `:where(.view-settle)` (CSS nesting, Safari 17.2+). A plain class would raise the specificity of every rule inside it and change which rule wins against `base.css`; `:where()` adds none, so the cascade is the one a single stylesheet would give. Rules on the document or the body are keyed on `body[data-view]`, which the router sets, and every id that both views would otherwise share carries the view's name (`day-sheet`, `settle-sheet`); each view looks its elements up inside its own root.
+**A visit is priced on HKIA's clock and dated on the bot's.** Every reply seen while the car is inside carries HKIA's `parkTime` and the fee for leaving at that moment. Both are stored on the visit (`last_park_minutes`, `last_fee`) with the tick's own time (`last_seen_at`), and the close reads them back for two different questions.
 
-**Tokens are named by role and re-valued per theme; the settle view shares the palette before it shares the layout.** `base.css` declares one set of custom properties — ground (`--bg`), panel (`--surface`, `--sheet-bg`), ink in three strengths (`--text`, `--text-2`, `--text-3`), hairline (`--line`), the three status colours and `--on-solid`, the text that sits on a solid status block — with the dark values as the base and the light ones under `prefers-color-scheme`. A rule names the role and never a colour, so a theme is a change of values and nothing else, and there is no toggle and no stored preference. Both views draw from the same tokens although only the day view has the board's layout: the two are one document, switched between without a load, and a change of ground and ink at every switch would read as two apps. The settle view's tints (`--blue`, the `*-bg` fills) keep their meaning and are adjusted only where the new ground made one illegible.
+- The stay is HKIA's minute count. That is the clock that charges, and it is whole minutes however often the bot polls, which is why it cannot say when those minutes ended.
+- The exit time is `last_seen_at`, the last tick that saw the car. It is provably no later than the real exit, the direction an operator can reason about. The first tick to miss the car is kept apart in `gone_at` as the upper bound.
+- The two are deliberately decoupled. Entry plus stay can be a minute off the recorded exit, and that difference is evidence, not an error to reconcile away.
+- The fee decides free from chargeable. HKIA computes it with the allowance already applied, and its real free threshold is longer than 30 minutes and unpublished.
+- `FREE_MINUTES` (30) remains as the "leave before" guidance on entry and as the fallback for a visit that was never read, and only at a car park that has the free half hour (`ALLOWANCE_CAR_PARKS`). A car park that cannot be named is assumed to charge.
 
-**Figures are set in one monospaced face, self-hosted, and pass through `tight()`.** Times, flight numbers and money are what the day view is read for, at arm's length in a car, so they are set in B612 Mono, a face drawn for cockpit displays, in which every digit takes the same width and a column of figures lines up without help. It is served from `static/fonts/` as two woff2 files cut down to Basic Latin and the few marks the app prints, preloaded by the shell and precached by the worker, because a face fetched from someone else's server would be one more thing that can fail behind the tunnel and the installed app must paint whole from its cache. Until the file arrives a figure is drawn in a local monospaced face declared with `size-adjust` and overridden ascent and descent so that its cell and line box match B612 Mono's: with `font-display: swap` the alternative is a row that changes width, and wraps differently, at the moment of the swap. A monospaced colon, point, comma or middle dot takes a whole cell and would open `13:42` and `$1560.50` up into separate words, so `shared.js:tight()` wraps each in a span the stylesheet pulls in from the right. It takes text that is already escaped and returns markup, skipping tags so that its own output can be given back to it; it is therefore applied to figures only, never to free text.
+**The car park has its own heartbeat.** The recorded exit is only as accurate as the tick that found the car gone, and that timestamp goes onto the visit and into the 24 hour allowance, so the tick rate is the resolution of a stored fact. The flight heartbeat cannot carry it: its gate stretches to hours for a distant flight.
 
-**Colour is reserved for status and for money that needs attention.** On the board a row's colour is its flight's status block (已到閘 inverse, 已降落 solid green, 預計 amber outline), a tight or urgent 出場 mark, 未入價 in amber and a 判罰 in red; in a sheet it is the same, plus the destructive action, which is a red outline until the step that confirms it and solid red only there. Nothing else is coloured: a platform is told apart by its name in the code column, a link is ink with a rule under it, a chosen segment is solid ink, and a primary action is ink on ground reversed. A colour that also decorated — a hue per platform, a tint per service — would leave the eye nothing to find first, and what the driver needs first is which flight has landed and which fare is missing.
+- `_parking_tick` runs every `PARKING_OPEN_INTERVAL` (30 s) and is gated back to `PARKING_IDLE_INTERVAL` (60 s) whenever no visit is open. Only an open visit has an exit to date; an armed pickup with no car inside gains nothing from the fast rate.
+- A check that failed leaves the cadence unknown and is assumed fast. Guessing fast costs one extra query a minute; guessing slow costs a visit recorded to the wrong minute.
 
-**Rows share one grid, and an endpoint is never truncated.** Every row, the column head, the placeholder rows and the NOW band use the same two fixed columns (time, code), each as wide as the widest thing it holds, so times and codes start on the same x down the list and the eye runs down a column. The place is where the driver has to go, and a hotel or an estate is routinely named in twenty characters, so the place wraps and nothing on the row is ever cut or ellipsed; the full address is one tap away, but a name cut short is a wrong turn. The fare has no column of its own: it floats at the right of the place's cell, on the first line, so a name that wraps stops short of the fare for a line (two, beside a 判罰) and then runs the full width under it, which keeps a long name to few lines without moving where a short one starts or where a fare ends. The cell holds only inline text and blocks, because the row aligns its cells on their first baselines and WebKit takes a wrong one from an inline box that wraps. The wait since the previous row hangs from the time it is counted to rather than from the row's second line, so a long name does not carry it away.
+**The driver can overrule the verdict, and the allowance follows.** Only the driver saw whether the gate opened, and a wrong verdict silently moves the 24 hour allowance. The exit message carries a button for each verdict it did not pick, and `/parking mark <id> free|paid|gate` corrects a visit whose buttons are gone. Either writes `observed` and moves the derived `free` column with it. `free` also zeroes the order's `parking_fee`; `paid` and `gate` leave it for the order sheet, because the amount is not known to the system. `/parking` history shows the automatic verdict, HKIA's fee reading and any correction side by side.
 
-**A finished row recedes by colour, not by opacity.** A done row sets all of its text in the faintest ink and its time in regular weight. Opacity would fade the status block with the rest, and that block is the one thing a finished row still says at a glance (which flight came in, and whether it reached the gate); it would also composite differently on the two grounds, the panel under NEXT and the page under everything else.
+**A pickup's meeting point is planned at entry and settled by the visit.** What waiting costs depends on where the driver meets the passenger. Car Park 1 charges $35 for the first hour from the moment the car enters (and $50 for each hour after). Car Park 4 charges $32 an hour but has the free half hour. The Regal Airport Hotel (富豪) is outside HKIA's car parks and costs nothing.
 
-**The status block turns over once, and only for a change seen on screen.** The board has one moving part: a status block whose word differs from the word the same order showed at the previous paint of the same day turns in over half a second. The list is rebuilt whole on every paint, so the view remembers the word each order last showed, keyed by day; a first paint, a change of day, a change of filter that brings a row in, and a repaint that changes nothing all leave it still, because none of them is the feed changing its mind. The block that leaves no longer exists by then, so only the arriving half of the turn is drawn, by a CSS animation on the new block with no timer behind it. Under `prefers-reduced-motion` the block does not turn, and the sheets, the drop panel, the numpad and the paste preview are still as well; the toast's quarter-second rise is the one movement left.
+- `orders.pickup_point` holds the place, and `ingest.PICKUP_POINTS` is the one tariff table, read by entry, by the PATCH the order sheet sends and by the entry message's price preview.
+- Entry plans the place from the must-park rule: a 携程 pickup or a 舉牌 meet goes to Car Park 4, anything else to the hotel. It writes the place's first-hour charge as `parking_fee`. Moving the place writes the new charge in the same write, so the two never disagree.
+- A visit linked to the order replaces the plan with what HKIA saw. The close writes the car park the car was in (HKIA's own name for one that cannot be named) and the cost: nothing when free, the link's amount when paid through the bot's link, the last fee quoted before a payment made anywhere else, and at the gate the last fee quoted inside, which is HKIA's price as of at most one tick before the exit. A chargeable visit with no reading leaves the planned fee standing.
+- A Car Park 1 pickup never has a visit, so its planned fee is final unless edited and a stay past the first hour is priced by hand. The landing pushes for such an order say so.
+- The close runs once, so an edit made after it stands.
 
-**Placeholder rows stand in once, for a list that has never been drawn.** On a cold start the day view has no rows and nothing in the store to draw them from; until the first answer it shows five rows of the board's own grid and hairlines with blocks where the figures will be, so the first paint has the page's final shape and the answer fills it rather than pushing it. They are still, because a shimmer says "wait" for as long as it runs and the wait is short. They never appear again: a day reached later keeps the previous day's rows until its own arrive (or paints from the store at once), since blanking a list the operator is reading is worse than showing it a moment too long, and a first load that fails gives way to the empty line rather than promising rows for ever.
+**The absence of a visit settles a plan too, but only at Car Park 4.** Every visit there is seen, so no row means no visit. A pickup still planned at P4 90 minutes after landing (`NO_ENTRY_MINUTES`) is taken to have met its passenger at the hotel: the place becomes 富豪 and the fee nothing, and one push says so with the fee the order carried.
 
-**The day's totals live in a fixed foot.** 程數, 未入價 (only when there is any) and 當日車費 sit in a bar fixed to the bottom of the screen, above the safe area, and follow the platform filter. The masthead is sticky and already holds the date, the keys, the tabs and the column head; a summary line there cost a row of the list on every screen, and the total is the figure looked at last, after the rows. The list is padded to clear the foot, the toast rises above it on this view, and sheets and their scrim cover it.
+- The conditions are: no visit linked to the order, none of any order entered since 30 minutes before its landing, and none open. The second is there because one visit that collected two passengers links to only one of their orders.
+- The rule can be wrong in two ways the system cannot see, so the push carries a button for each: the car was at Car Park 1, which only the operator can know, or at Car Park 4 on a visit the tracker missed. Either writes that place and its first-hour charge.
+- The push goes out before the write, so a push that fails leaves the order untouched for the next tick. The `noentry` reminder tag keeps an order the operator put back from being judged again.
+- The verdict is given for two hours past its due moment and no later. A bot that comes back after that was not watching while the visit would have happened. It is never given without `CAR_PLATE`.
+- A visit that begins after the switch links and closes like any other and overwrites it.
 
-**Panels are drawn in the board's manner, by class and not by view.** A flat panel under a hairline, squared controls, the primary action solid ink, everything else an outline, a ledger of label-left and figure-right lines, a numpad that is one ruled grid. `.board` on a panel's element gives it that manner whatever it holds; the day view's bottom sheet and drop panel carry it. The order's sheet is opened by the settle view too, inside a panel that is still the settle view's, so each view `order-sheet.js` draws begins with an `.os` mark and `.sheet:has(> .os)` gives the heading and buttons the hosting view supplied the same manner as the sheet they frame, while the panel keeps the shape its view gave it. The rules sit in `:where()` so that they weigh what the rules they replace weigh and win by coming later. A field a batch has frozen is drawn as text with 已結算 beside its label, not as a control made to look disabled: it cannot be edited from here at all, and the figure is still true.
+### Settlement and statements
 
-**Inline handlers are published under `window.rd`.** The day view and the order sheet write markup with inline `onclick` handlers. Those resolve names on `window` and cannot see a module's scope, so the modules publish exactly the functions their markup calls, as `window.rd.day` and `window.rd.sheet`, and an end-to-end check resolves every handler the sources emit. The settle view has none: its controls are found by listeners on its root.
+**Settlement is a batch, and an order's money state is derived from it.** The platform pays for a run of days at once, so the unit of reconciliation is a batch of orders. `settlements` holds what the operator confirmed against the platform's statement and `orders.settlement_id` points at it.
 
-**The settle calendar draws batches and credits as events, not only days.** Three dated things are traced on this page and only one of them had a shape: an order sat inside its day's cell, while a batch and a bank credit both carry dates of their own and were reachable only through a list. A batch now spans its service days as a bar and a credit sits on its value date as a chip, so where the money has got to reads off the grid and one tap opens the thing itself rather than the day it happens to touch. A batch's dates are never assumed contiguous: the platform holds legs back and settles them on a later statement, so the dates split into runs, the latest run carries the amount, and every earlier run is drawn dashed and pointing at it instead of being flattened into a span that would claim days the batch does not hold. Labels carry the exact figure, cents included: a reconciliation number is never approximated on screen, so the layout yields to the number rather than the number to the layout, and a label wider than its day's column takes the neighbouring lane space the packer reserves for it. Shape says what a thing is (a cell is a day, a filled bar a batch, an outlined pill a credit) and colour says only who owes what, ranked by whether the operator has to act: amber is money the platform still owes, blue is bank money not yet matched to a statement, a neutral bar is a batch waiting on the transfer, and finished things dim so the eye lands on the open ones first. One rule then covers a batch paid short in both marks: its bar divides its own fill at the fraction that has arrived, the paid colour left of the split and the owed colour right of it, so received-versus-owed reads off the calendar without opening anything; and a credit's outline follows the batches it went into rather than how much of itself is left, because a batch is the account and a credit is one of its lines — money fully allocated to a batch that is still short keeps the colour of what is owed instead of dimming away as a record, which is what left one short payment showing as three unrelated pictures of one fact. The strip these marks sit on runs continuously rather than a month at a time, because a week row can hold the end of one month and the start of the next, and money settled on a month's last day is paid in the month after: a boundary is a hairline and a corner label, never a cut, so a batch straddling one is still drawn as the single bar it is. And because one piece of money is drawn in several places, tapping any one of them focuses the relation — the credit, every batch it went into, every day those batches were driven — and lets the rest recede. The set is the whole connected run of allocations rather than one hop out from the mark that was tapped, so entering at a chip and entering at a bar light the identical set: two credits paying one batch are one statement about money, and a statement whose extent depended on where the operator looked would be worse than none.
+- State is derived, never stored. An order with no batch is unsettled. A batch is 等過數 with no money allocated, 部分 with some, and 已收 once its allocations cover its total. There is no second copy of the truth to fall out of step, and undoing a settlement is unlinking.
+- The amount a batch expects is summed inside the write transaction from the stored rows, never taken from the client.
+- The fields that sum was taken from (`price`, `tunnel_fee`, `banner_fee`) and cancellation are locked while an order is batched (`db.BATCH_LOCKED_FIELDS`). Changing them afterwards would silently make the recorded total wrong. `parking_fee` and `scheduled_time` do not feed the total and stay editable.
+- A difference between expected and confirmed is recorded and shown as 差額. The operator takes it up with the platform.
 
-**SSE for live updates, one stream for the document.** The app uses server-sent events rather than fixed-interval polling: the server watches one fingerprint of every table a view can be looking at — the orders (flight ETAs included), the batches, the bank credits and the allocations between them, none of it scoped to a day, because the settle view holds months and the ledger changes without any order moving — and says so when it changes, so a flight update or an edit from another device shows up without a reload. `stream.js` holds the one `EventSource`, and a message refreshes whichever view is showing; no control on the page asks for a refresh by hand. Every connection begins with a greeting. The first greeting of the first connection is not a change, since the view has only just loaded, unless the stream had already failed before it; the greeting of any later connection stands for whatever was missed while the stream was down. The document stays open for hours, so the stream has to outlive what would end it. A browser retries a dropped line by itself, but an answer that is not a 200 event stream — the tunnel's 502 while the web service restarts — closes an `EventSource` for good, so a closed stream is opened again after a delay that doubles from 2 s to 30 s and starts over once a message arrives. And because the document is not reloaded between uses, becoming visible after having been hidden refreshes the showing view and opens a waiting stream at once: a phone that slept would otherwise show data hours old.
+**A statement is a batch, and only a statement creates one.** The platform pays one statement with one transfer whatever number of days it spans, and a leg it held back appears on a later statement under its own date. A batch is not tied to a day and an order belongs to at most one, so the statement adds only two things to it: the platform's lines as JSON, and the screenshot file beside the database (`statements/`).
 
-**The service worker caches the shell and never data.** `templates/sw.js`, served as `/sw.js` so that its scope is the whole app, stores the document and every script, stylesheet and font, and answers two kinds of request from that store: an asset address, and a navigation to `/` or `/settle`. A launch therefore paints without the server. `/api/*` is not intercepted at all, and every API answer but the event stream carries `no-store`: a money figure must not be able to appear from a cache, so a figure on screen has always come from the server on this load. A version is installed whole or not at all — if any file cannot be fetched, or the document the server hands over is of another version, the install fails and the worker in charge stays in charge. The manifest and the icons stay at fixed addresses (`/manifest.webmanifest`, `/static/icons/…`), which is where installed home-screen apps point, and the worker leaves them to the network.
+- Held-back legs stay unsettled with no extra state. The next statement that lists them picks them up.
+- Every batch has an image behind it, so there is a chain from the bank credit through that image to the orders it lists.
+- The stored lines are keyed by the order id the matcher settled on. Where a near-miss was corrected, the text as read is kept as `read_as`.
 
-**Assets are addressed by version, and a stale version is a 404.** `web.asset_version()` is a content hash of everything the shell is made of. The document links its assets as `/assets/<version>/…`, the worker's cache carries the same version in its name, and the document says its version in the `X-Asset-Version` header, as `/api/ping` does in its answer. An address under the current version is cached as immutable; an address under any other version is refused rather than answered with today's file, because the address promises the content, and answering it would let a phone run one version's document against another's script. The server computes the version once per process, so the files must not change under a running process: a deploy stops the web service, pulls and starts it again as one step, because a process left running over changed files would serve new bytes at the old version's immutable address.
+**Statements are read on the machine with RapidOCR, not with a vision model.** The statement arrives as a screenshot, re-encoded by Telegram to 1280 px, with order numbers seven pixels tall. Measured on that photo, PP-OCR read every order number and amount exactly in about two seconds; a vision LLM mis-read two to four of twelve order numbers and took a minute per image.
 
-**A new version waits for a tap.** A reload loses whatever is open: a sheet, a statement that has been read and not yet confirmed, unsaved 未過數 ticks. So a new worker installs and then waits, the shell shows 有新版本, and the page reloads only when that banner is tapped; another open window of the app is offered the same reload when its worker is replaced under it. The one time a waiting version is taken without asking is at launch, when nothing is open yet. An installed app is rarely navigated, so the page asks the browser to look for a new worker each time it becomes visible.
+- The engine's aspect-ratio threshold fails silently. Above a width/height ratio of 8, RapidOCR skips detection and recognises the whole frame as one line, returning no boxes instead of an error, and a statement day of few rows is that wide. The engine is built with `width_height_ratio=-1`.
+- That threshold is the engine's setting and not the reader's, so any frame still wider than six times its height is also extended downwards with white rows before it is handed over. Rows only, below the content: the width and every original pixel stay, and the blank rows add no boxes.
+- RapidOCR is installed with `--no-deps` and `opencv-python-headless`. Its metadata asks for the full OpenCV, whose `cv2.so` links libGL, which on a headless server means Mesa and LLVM for nothing.
+- Reading takes about two seconds of CPU. The bot runs it in a worker thread so the heartbeats keep ticking, and a lock serialises the engine across the web server's threads.
 
-**An expired login is a banner, not a login page.** With the document served from the worker's cache, an expired Cloudflare Access session no longer shows itself as a login page; it shows as API requests that fail. Observed through this tunnel, a plain request without a session gets a 302 to the access proxy's own origin, and a request marked as scripted gets a 401 HTML page. `api.js` makes every request with `redirect: 'manual'` so that the first is visible as an opaque redirect (followed, it is indistinguishable from being offline), and takes HTML on a successful answer, a 401 or a 403 for the second; HTML on any other status is an ordinary failure, because the tunnel's own error pages are HTML too and the login is intact behind them. Either way the request throws `AuthExpired`, which no caller turns into a toast, and the shell shows 登入過期 instead. While that banner is up nothing is refreshed and the stream is not reopened. A tap on it navigates to the current path with `?login=…`, which the worker passes to the network so that Access can run its login and send the browser back; the marker is stripped on boot. A hidden view asks nothing, so a failing stream is followed by a spaced request to `/api/ping`, which is what tells an expired login from a dropped line.
+**The reader binds to the table's schema, never to a position in the row.** The platform adds columns without notice. A 結算狀態 column to the right of 司機應結算金額 makes every row read as amountless to a reader that takes the last figure. So the table's structure is reconstructed.
+
+- Columns are inferred from horizontal overlap, the one relation OCR preserves. A box is drawn tight around its text, so its width says nothing, but a figure and the label above it always share ground.
+- The bands are named from the header row. Each cell is measured against the 27 column names the platform prints, in the traditional spelling and in the simplified one OCR returns, because every character differs between the two scripts and one spelling alone would reject a clean read of the other.
+- A cell may be about two fifths of its name in edits away and no further. 司機預估收入 and 司機應結算金額 are five edits apart, and reading a day off the estimate column would settle a wrong figure while every subtotal on the image still agreed with itself.
+- A tie between two columns is no match. A column named by a coin toss is worse than one left anonymous.
+- The columns the reader takes nothing from are listed too, with no role. They compete for a garbled header cell, so a mangled neighbour lands on its own name and not on a column that is acted on.
+- Rows are classified by shape and not by label, because the labels are what compression garbles. An order id makes a data row whatever else it holds; the account code printed above the first day group marks the grand total; a date at the left edge opens a day.
+- The amount column needs two independent readings to agree: the column the header names, and the rightmost column holding money. Either carries the read alone when the other is absent, since a cropped screenshot has no header row. When both are present and name different columns, neither is trusted: no amount is read and nothing can be settled off that image. Picking one would be invisible when wrong, because the rows and the day's own 求和 would be read off the same wrong column and agree.
+
+**A statement is checked against itself before it is matched against the book.** The statement's own subtotals are checked first, so a mis-read digit is reported as a reading error and not as a dispute with the platform. A statement whose subtotals could not be read or do not agree cannot be confirmed.
+
+Ids are then bound to orders in four passes, weakest evidence last, so nothing weaker takes an order a stronger rule already claimed:
+
+1. Exactly.
+2. By prefix, for a code the platform's UI truncated with an ellipsis, or an id of ten characters or more, where a shared prefix is no coincidence.
+3. That same opening within two edits, for codes only. Telegram's photo compression rewrites letters inside a code (a K read as X, a B as 8) that the digit fixes must not touch, so the compressed copy of an image whose original binds would otherwise lose the line. This pass refuses two candidates inside the bound instead of taking the nearer: a prefix is partial evidence, and money must not be batched against two codes that both nearly agree.
+4. A unique near-miss over whole ids, within two edits.
+
+- Three id shapes reach the reader: `SPACE` plus a short digit run, a long digit run in which S O I l B may be mis-read digits, and an alphanumeric code. A pattern that knows only some of them fails the checksum of a readable image over a line it never saw.
+- `statement.reconcile` is a pure function over the parsed statement and the candidate orders, so the reader can be replaced without touching it.
+- Tests replay recorded OCR output, not the image. The recording replaces every order number with a keyed hash whose salt comes from the environment and is never committed, so the fixtures keep the reader's real input without real order numbers.
+
+**One flow serves both frontends.** The bot and the settle view both call `statement_flow.prepare` (reconcile and ask the ledger, writing nothing) and `statement_flow.confirm` (write the batch, its fines and its lines, and allocate the credit the card named). A statement cannot mean one thing in the chat and another in the browser, and the report text is the same string in both.
+
+- The browser hands over the platform's own file byte for byte. The same screenshot sent as a chat photo has been recompressed first, which is what the reader mis-reads, so the settle view is the path for a statement the bot read badly.
+- From the browser, a read is held under a token for 30 minutes and the token is spent on the way into the confirm. A double tap meets the same refusal an expired token does and cannot write a second batch. Uploads are capped at 10 MB.
+- An image the reader could not read is filed under `statements/failed/`. The operator's copy scrolls away, and a reader bug can only be reproduced from the exact bytes.
+- A statement whose legs are not in the system cannot become a batch. When a credit agrees with its total, the bot offers 收埋入數（單未入系統）, which archives that credit; the settle view names the same action without offering it.
+- Without the OCR package the bot answers an image with the list of unsettled legs, and the web route answers 503.
+
+**A leg's own cost belongs on the order; a cost the transfer carries belongs on the batch.** A statement is not only fares. The platform charges 判罰賠款 back for a trip it holds the driver responsible for, and it books such a line wherever it likes: against a leg of this statement, against a leg an earlier batch already holds, against a cancelled trip, or under a number the book has never seen.
+
+- A fine against a leg of this statement is the leg's own cost. It is written to `orders.penalty_fee` by the tap that creates the batch, and `service.expected_of` nets it off for every platform. That also makes a statement idempotent: once the fine is stored, re-reading the same image agrees with the platform's figure.
+- The rest are money on this transfer and nothing else. They go to `settlement_adjustments`, one row per printed line, and join the batch's `expected_amount` in the same write.
+- The boundary keeps the two apart. Recording a fine against an already-settled leg on the order would mean reopening a batch whose expected total is frozen. Recording it as a line of the transfer being confirmed leaves that batch alone and still balances.
+- The platform's line structure is kept, not netted. A 判罰 and the 免責 line that cancels it are two facts, and a pair that nets to zero must still read as the pair it was.
+- A line that nets positive under an unknown number is not an adjustment. It is most likely a leg the book never got, and it stays flagged as unknown: money coming in must not be able to read as fully explained.
+- The confirm button names every part of what it writes (確認結算 + 記判罰 + 記帳項 + 對入數), because money leaving an order is not something to discover afterwards.
+
+**A 舉牌 paid while its trip is held back is paid ahead, not settled.** The platform can leave a trip off a statement and still pay the trip's 舉牌 line on it, under the trip's own number. Folded by order number, that reads as the trip underpaid by its whole fare, and confirming it would settle the order: the fare would drop out of what is owed, and the trip line arriving later would read as money paid extra.
+
+- The line goes to `settlement_adjustments` flagged `ahead`, and the order stays unsettled like any held-back leg.
+- `service.owed_of` takes what other batches carry for an order off `expected_of`, so the batch that later takes the trip is owed the trip alone and the trip line matches it.
+- The category chip that names a line is unreadable, so the rule is arithmetic: an order whose only line is exactly its own 舉牌 fee. A trip line printed at zero beside it is a trip paid nothing, not one held back.
+- The trip's batch freezes its expected total net of the line. So the batch carrying the line cannot be undone while the trip's batch stands, for the same reason a batched leg's fees are locked.
+- In the settle view the carrying batch also covers the held trip's day, although that day has no leg of its own in it: the batch's list row names the day, a focus lights it, the day's sheet links the batch, and the line is counted in the month of the trip, in the state of the batch that carried it.
+
+### Bank credits
+
+**Every credit is recorded, whether or not anything exists for it.** A separate program publishes one JSON line per bank credit advice to a JSONL feed (`BANK_CREDITS_FEED`). The bot stats the file on each flight heartbeat, ahead of the flight gate so a credit never waits out a long flight interval, and reads it whole when its size or mtime changed.
+
+- The bank's reference is the identity (`INSERT OR IGNORE`), so a re-read is a no-op and this side keeps no offset. A trailing line without its newline is one the producer is still writing and is left for a later tick.
+- A line needs `v: 1`, `ref`, `platform`, `amount` and `value_date`. One that cannot be used is logged and skipped, so one corrupt line cannot stop the ledger.
+- A complete ledger is what makes backfilling months of payouts from forwarded screenshots possible.
+- One to three new credits get a push each. More is a backfill and gets one summary pointing at `/credits`.
+
+**Money is allocated in amounts, not linked.** The platform pays a statement short when its own system failed to submit some of the legs, and makes up the difference later, alone or bundled into a bigger transfer. One credit per batch, paid in full, cannot record that. `credit_allocations` carries an amount per (credit, batch) pair: a credit can pay several batches and a batch can be paid by several credits.
+
+- What a credit has left and what a batch is still owed are both derived from the allocations. Taking money back off a batch, or undoing the batch, needs no second write that could disagree.
+- `paid_on` is written at the moment the allocations cover the total and by nothing else, from the bank's value date. Taking money back clears it.
+- The amount is never the client's. A tap allocates as much of the batch as the credit can still pay.
+
+**The legs a short payment left out are named on the batch, after the fact.** When the money is short the operator does not yet know which legs, and the answer comes only after the platform investigates. So the legs are ticked 未過數 in the settle view on the batch's own order list, against the full order numbers.
+
+- The system guesses first (`credits.guess_unpaid`: subsets of legs whose amounts equal the shortfall, up to five legs and eight results) and pre-fills the ticks when exactly one combination adds up.
+- The ticks are accepted only when they account for the shortfall to the cent. They are two independent statements of the same fact, one from the platform's message and one from its money, and a mismatch means one was misread.
+- The ticks are priced in the platform's own figures (`statement.leg_amount`), never the system's. The transfer is the sum of what the platform printed, so a leg it priced differently would otherwise never account for the gap, and the operator would be told the ticks are wrong over a discrepancy that is the platform's.
+- The flags (`orders.unpaid`) are history, not a to-do list. `allocate` leaves them alone when the make-up payment closes the batch, because which legs the platform held back stays true after they are paid and is the only record of it. Without it, a batch of fourteen legs paid in two transfers would tell the day's sheet that all fourteen arrived on the second date.
+- Every reader therefore asks the batch's state as well as the flag. Flagged in a 部分 batch is still owed; flagged in a 已收 batch was 補收 by the allocation that completed it. Nothing may read the flag alone as money outstanding.
+
+**Nothing allocates by itself.** `credits.py` proposes and writes nothing to `settlements`, so a matcher that grows a new rule cannot start moving money. `db.allocate` is reached only from the statement confirm and the settle view's confirm of a credit against a statement, and `db.allocate_all` only from its confirm of a group; tests pin those call sites.
+
+**Money is matched in the settle view; the chat only announces it.** A credit arriving from the feed is pushed as what arrived and what the matcher believes (對到 批次 #26、#27、#28？ · 去埋數頁對數), with no button that moves money. Matching is a tap in the settle view, where the whole ledger and the calendar are in sight.
+
+- With `RIDE_WEB_URL` set, the notice carries one URL button to `/settle?credit=<id>`, which opens that credit. A URL button opens an address and calls nothing back. If Telegram refuses the message with the button, the notice is sent again without it.
+
+- A per-batch button in the chat would take three taps for a transfer covering three statements and be answered without the ledger in view.
+- A whole group is one tap, allocated in one transaction that refuses the group whole unless the credit covers every batch in it. A group that half-landed would leave a part payment nobody chose.
+- The statement card's 確認結算 + 對入數 stays in the chat: the credit it spends is the one that card named.
+- A credit card in the chat that still carries allocation buttons is answered with 去埋數頁對數 and moves no money.
+
+**A payment is keyed to the day a batch was confirmed, not to the days it covers.** Everything confirmed within one working day is paid as one transfer about two working days later. The matcher (`credits.match_credit`, `credits.match_batch`) is built on that.
+
+- The window is seven days either side of the batch's `settled_on` (`WINDOW_DAYS`). It is symmetric because a screenshot confirmed late legitimately puts the bank first.
+- The window is what separates a match from a coincidence. Amounts are round hundreds and the ledger holds months of them, so an amount agreeing to the cent on the wrong date is offered among the alternatives and never proposed.
+- Money dated before a batch's last service day is not a candidate at all. It cannot pay for work not yet done.
+- Inside the window, an exact amount is proposed, and so is a whole confirmation-day group at any size: one transfer pays every batch confirmed on the same working day, so the group is the ordinary payment.
+- Only a transfer that mixes confirmation days leaves no whole group. Then combinations are searched blind, up to four batches (`MAX_SUBSET`), and only a single hit is an answer. Among equal sums, a combination drawn from one confirmation day wins, because that is the platform's own grouping; equal sums spanning days are the coincidence the ambiguity refusal exists for.
+- A near miss is never proposed. A $30 gap is a question about a fee or a held-back order, not a rounding error.
+- A statement being read stands in for the batch it is about to become (`credits.propose_statement`), with its total as the amount and today as the confirmation day, since that is the date the confirm writes.
+
+**The belief leads without being acted on.** Proposals are ordered by `credits.offer`: what agrees to the cent, then what the credit could only pay part of, then the other candidates. Both settle payloads carry the proposals inline, a batch its candidate credits and a credit its candidate batches. A batch offered to a credit carries the `due_dates` and `settled_on` it is named by; a credit offered to a batch carries `near`, whether its date is inside the matcher's window. The ledger is a few hundred rows a year, which is cheaper than a round trip per sheet. The change left on a credit stays proposed against whatever is still owed, which is how a make-up payment bundled into a bigger transfer reaches the batch that is short.
+
+**Credits that will never have a batch are archived, not deleted.** `/credits archive before <date>` puts away the payouts that predate the system, and a credit for legs the system never had is archived from its statement card. An archived credit leaves the queue with its allocations untouched and can be brought back.
+
+### The web shell
+
+**One document, two mounted views.** `/` and `/settle` return the same shell (`templates/app.html`), and the path only says which view is showing. The day view answers "what am I driving" and the settle view "what am I owed": different questions and different shapes, so they stay two views, but not two documents.
+
+- A switch between documents goes through Cloudflare Access and the tunnel, parses every script again, fetches the data again and reopens the event stream. A switch between views does none of that.
+- `router.js` maps the path to a view with the History API, so back and forward work, and a reload or a home-screen launch on either address lands on that view.
+- A view is mounted the first time it is shown and stays mounted. Switching hides one root and shows the other; each view gets back its scroll position, the settle view its loaded months, and either view the sheet it had open.
+- Each view keeps an on-screen control to the other, because an installed app has no browser chrome to go back with.
+- Each view keeps its own view stack. The day view's serves two hosts (bottom sheet and top drop panel). The settle view's stacks nine kinds (day, order, batch, statement, credit, the queue of credits still waiting, the credits put away, undo and 解除入數), and a sheet opened from another hands the operator back to it.
+- There is no build step. Scripts are ES modules and styles plain CSS, served as written.
+
+**Each view is one module; only what is stateless is separate.** `day/index.js` and `settle/index.js` each hold around twenty mutable variables that most of their functions read and write. Cutting a view along its seams would turn every one of those references into an import or a parameter, and nothing but a browser can tell whether one was missed. What reads only its arguments is separate, because that is what a test can hold: `shared.js`, `dates.js`, `settle/days.js`, `api.js`, `store.js` and `stream.js`, each covered by `node --test`. What needs a real browser is checked by `scripts/e2e.py`.
+
+**The store paints what it holds and always asks again.** The day view reads a day through `store.js`, an in-memory map from key to the server's last answer. A read paints the held answer at once, asks the server, and paints again only if the answer differs. The neighbouring days are fetched ahead once the day's own answer is in.
+
+- A held answer is never treated as fresh. `/api/orders` computes fields at request time (row order, departure time, exit urgency), and another device or the bot can change an order at any moment.
+- Requests are numbered per key, and an answer older than one already applied is dropped, so answers arriving out of order cannot put stale rows back.
+- The store keeps nothing on the device, so a launch starts empty.
+- The settle view does not use the store. It stays mounted, so its own map of loaded months already survives a switch, and a second copy of money data would be one more thing to keep in step.
+
+**A hidden view neither asks nor draws.** The settle strip holds its top row in place across every paint and reads the month the header names off the rows it has laid out, and a hidden root has no geometry. The views also share the document's scroll position, the window's events and the order sheet's host. So while a view is hidden its answers are not painted, its listeners on the window stand down, and its writes do not reload it. `show()` always loads, which also redraws a sheet left open. The cost is that a hidden view learns nothing: changes are found by the showing view and by the stream.
+
+**View styles are scoped with `:where()`, and ids are per view.** With both views in one document, a rule or an id of one would reach the other. `day.css` and `settle.css` nest their rules under `:where(.view-day)` and `:where(.view-settle)` (CSS nesting, Safari 17.2+). A plain class would raise the specificity of every rule inside it and change which rule wins against `base.css`; `:where()` adds none. Rules on the document or the body are keyed on `body[data-view]`, which the router sets. Every id both views would share carries the view's name (`day-sheet`, `settle-sheet`), and each view looks its elements up inside its own root.
+
+**Inline handlers are published under `window.rd`.** The day view and the order sheet write markup with inline `onclick` handlers. Those resolve names on `window` and cannot see a module's scope, so the modules publish exactly the functions their markup calls (`window.rd.day`, `window.rd.sheet`), and an end-to-end check resolves every handler the sources emit. The settle view has none: its controls are found by listeners on its root.
+
+**Live updates are one server-sent event stream for the document.** The server compares a fingerprint every two seconds and says "something changed" when it differs; a message refreshes whichever view is showing. No control on the page asks for a refresh by hand.
+
+- The fingerprint (`web._fingerprint`) is a hash of every column of every order, plus the batches, the credits and the allocations. The orders are hashed whole so that a column a view starts to show is covered without being named: an amendment that changes only an address or a flight number has to reach another open device. None of it is scoped to a day, because the settle view holds months and the ledger changes without any order moving.
+- Hashing the table costs tens of milliseconds at a few thousand rows, too much for every two seconds per connection. A stream keeps one database connection and reads `PRAGMA data_version` first, which costs microseconds and moves only when another connection has committed; the fingerprint is taken only then (`web._Watch`). A commit that changes nothing a view shows moves the version and not the fingerprint, and is not reported.
+- `stream.js` holds the one `EventSource`. Every connection begins with a greeting. The first greeting of the first connection is not a change, unless the stream had already failed before it; the greeting of any later connection stands for whatever was missed while the stream was down.
+- The document stays open for hours, so the stream has to outlive what would end it. A browser retries a dropped line itself, but an answer that is not a 200 event stream (the tunnel's 502 while the web service restarts) closes an `EventSource` for good. A closed stream is opened again after a delay that doubles from 2 s to 30 s and starts over once a message arrives.
+- The document is not reloaded between uses, so becoming visible after having been hidden refreshes the showing view and opens a waiting stream at once. A phone that slept would otherwise show data hours old.
+
+**The service worker caches the shell and never data.** `templates/sw.js`, served as `/sw.js` so that its scope is the whole app, stores the document and every script, stylesheet and font. It answers asset addresses and navigations to `/` and `/settle` from that store, so a launch paints without the server.
+
+- `/api/*` is not intercepted, and every API answer except the event stream carries `no-store`. A money figure must not be able to appear from a cache: a figure on screen has always come from the server on this load.
+- A version is installed whole or not at all. If any file cannot be fetched, or the document the server hands over is of another version, the install fails and the worker in charge stays in charge.
+- The manifest and the icons stay at fixed addresses (`/manifest.webmanifest`, `/static/icons/…`), where installed home-screen apps point, and the worker leaves them to the network.
+
+**Assets are addressed by version, and a stale version is a 404.** `web.asset_version()` is a content hash of everything the shell is made of. The document links its assets as `/assets/<version>/…`, the worker's cache carries the version in its name, and the document states it in the `X-Asset-Version` header, as `/api/ping` does in its answer. The document also states the bot's username (`TELEGRAM_BOT_USERNAME`), which the order sheet's 喺 Telegram 開 link is built from: a value that differs per deployment reaches the page through the document, never through a file under the asset address, and is folded into the version so the worker's stored document cannot outlive a change of it.
+
+- An address under the current version is cached as immutable. An address under any other version is refused, not answered with today's file: the address promises the content, and answering it would let a phone run one version's document against another's script.
+- The server computes the version once per process, so the files must not change under a running process. A deploy stops the web service, pulls and starts it again as one step.
+- `archive` directories are left out of both the version and the precache list (`web._live_files`), which walk the same files.
+
+**A new version waits for a tap.** A reload loses whatever is open: a sheet, a statement read and not yet confirmed, unsaved 未過數 ticks. So a new worker installs and waits, the shell shows 有新版本, and the page reloads only when that banner is tapped. Another open window of the app is offered the same reload when its worker is replaced under it. The one time a waiting version is taken without asking is at launch, when nothing is open yet. An installed app is rarely navigated, so the page asks the browser to look for a new worker each time it becomes visible.
+
+**An expired login is a banner, not a login page.** With the document served from the worker's cache, an expired Cloudflare Access session shows as API requests that fail. Observed through this tunnel, a plain request without a session gets a 302 to the access proxy's own origin, and a request marked as scripted gets a 401 HTML page.
+
+- `api.js` makes every request with `redirect: 'manual'`, so the first is visible as an opaque redirect; followed, it is indistinguishable from being offline. It takes HTML on a successful answer, a 401 or a 403 for the second. HTML on any other status is an ordinary failure: the tunnel's own error pages are HTML too, and the login is intact behind them.
+- Either way the request throws `AuthExpired`, which no caller turns into a toast, and the shell shows 登入過期. While that banner is up nothing is refreshed and the stream is not reopened.
+- A tap navigates to the current address with `?login=…` added, which the worker passes to the network so that Access can run its login and send the browser back. The marker is stripped on boot. Whatever else the address carries is kept, so a view's own marker not yet answered (`?credit=`) is still there after the login.
+- A hidden view asks nothing, so a failing stream is followed by a spaced request to `/api/ping`, which is what tells an expired login from a dropped line.
+
+**The timing readout is cleared by a failure as well as by a paint.** With `localStorage.perf` set (by `?perf=1`, or by holding the day view's date button, since an installed app has no address bar), a paint reports how long it took from the tap that asked for it. A load that fails clears the mark its tap set, unless a newer tap has replaced it. Otherwise the next paint for any other reason, minutes later, would be reported as having taken that long.
+
+### The day view
+
+**Rows share one grid, and an endpoint is never truncated.** Every row, the column head, the placeholder rows and the NOW band use the same two fixed columns (time, code), so times and codes start on the same x down the list.
+
+- The place is where the driver has to go, and a hotel or an estate is routinely named in twenty characters. The place wraps and nothing on the row is cut or ellipsed: a name cut short is a wrong turn.
+- The fare has no column of its own. It floats at the right of the place's cell on the first line, so a name that wraps stops short of the fare and then runs the full width under it. That keeps a long name to few lines without moving where a short one starts or where a fare ends.
+- The cell holds only inline text and blocks, because the row aligns its cells on their first baselines and WebKit takes a wrong one from an inline box that wraps.
+- The wait since the previous row hangs from the time it is counted to, so a long name does not carry it away.
+
+**One time drives the sort, the row and the NOW line.** A pickup's row shows the flight's own time (gate, then ETA, then schedule), because that is the number the driver watches. `flight.row_time` sorts by that same choice and sends it as `row_time`, and the view places the NOW line against it. Deriving it twice could sort a row where it does not read; `row_time` and the view's `rowTime` must pick the same field.
+
+**A finished row recedes by colour, not by opacity.** A done row sets its text in the faintest ink and its time in regular weight. Opacity would fade the status block with the rest, and that block is the one thing a finished row still says at a glance. It would also composite differently on the two grounds, the panel under NEXT and the page under everything else.
+
+**The status block turns over once, and only for a change seen on screen.** A status block whose word differs from the word the same order showed at the previous paint of the same day turns in over half a second.
+
+- The list is rebuilt whole on every paint, so the view remembers the word each order last showed, keyed by day. A first paint, a change of day, a filter that brings a row in and a repaint that changes nothing all leave it still: none of them is the feed changing its mind.
+- The block that leaves is gone by then, so only the arriving half is drawn, by a CSS animation with no timer behind it.
+- Under `prefers-reduced-motion` the block does not turn, the sheets, the drop panel, the numpad and the paste preview are still, and the toast fades in where it stands.
+
+**Placeholder rows stand in once, for a list that has never been drawn.** On a cold start the view shows five rows of the board's own grid with blocks where the figures will be, so the first paint has the page's final shape and the answer fills it without pushing it.
+
+- They are still. A shimmer says "wait" for as long as it runs, and the wait is short.
+- They never appear again. A day reached later keeps the previous day's rows until its own arrive (or paints from the store at once), since blanking a list the operator is reading is worse than showing it a moment too long.
+- A first load that fails gives way to the empty line and does not promise rows for ever.
+
+**The day's totals live in a fixed foot.** 程數, 未入價 (only when there is any) and 當日車費 sit in a bar fixed to the bottom of the screen and follow the platform filter. The masthead is sticky and already holds the date, the keys, the tabs and the column head; a summary line there would cost a row of the list on every screen, and the total is the figure looked at last. The list is padded to clear the foot, the toast stands above it, and sheets and their scrim cover it. The settle view keeps the same bar for what needs action.
+
+**The add panel is one view stack in a panel that drops from the top.** Paste, preview and price, or a quick order's time, money and confirm, are stages of the same panel, which grows and shrinks between them. For a pasted order the preview and the price keypad are one view, and the confirming tap both prices and saves: the operator checks the parsed fields by eye, and a separate confirmation step would add nothing.
+
+### The settle view
+
+**Each of the month's totals opens the form that suits it.** Under the platform tabs stand four keys, 本月車費, 已收, 等過數 and 未結算, each a label over a figure exact to the cent, for the month the header names and the platform chosen. The page is opened to see how the month's income stands; tracing a statement or a transfer back to its orders is needed only when a figure is wrong. So the totals are what is always on screen, and each is the way into what it counts.
+
+- Fares and unsettled money are about days and orders, which a calendar can show. Money awaiting a transfer and money received are about statements and credits, and a calendar can say of those only when, not what they hold, so they are read as a list.
+- One piece of state, the lens (`setLens`), says which key is chosen and decides the body. 本月車費 is the calendar of whole fares. 未結算 is the same calendar with the days holding money on no statement lit, each printing that part, so the lit figures of a month add up to the key; every other day recedes. 等過數 and 已收 put a list of statements in the strip's place.
+- The strip runs on through the months, so under 未結算 open money just across a month's line is lit as well and is seen without paging.
+- The strip is hidden under a list, never emptied. Its months and its place are there on the way back, and it comes back on the month the list was paged to.
+- The lens is where the operator was looking and not a setting: it is the whole fare again each time the view is shown. The platform chosen is kept in `localStorage`, since the operator works one platform for a stretch.
+- The chosen key takes the panel's ground and joins the column head below it, while a tab is chosen by a rule under it, so the two rows read as two kinds of control. The keys wear the rule their state wears in a day's cell, and only while they hold money in that state, so the row of keys is the calendar's legend and the page carries no other.
+
+**A day's cell says three things, and its figure always means the whole day's fare.** The date, small; what the whole day is worth, larger; and a short rule under that figure saying where the day's money has got to.
+
+- A figure that meant the unsettled part on one day and the total on the next could not be added up or compared down a column. So the figure is the whole day everywhere except under 未結算, where the lit days say by their ground that they are showing a part.
+- Inside the grid a figure has no `$` and no thousands comma, and its cents are set smaller. Outside it, in the keys, the lists and the foot, it has all three.
+- A day in several states shows the one furthest from being paid: unsettled (amber rule and figure), paid short (a rule in two parts, green then amber, cut at the share that has arrived), awaiting (a thin rule), collected or still to come (no rule, faintest readable ink).
+- Only orders already driven decide the state, as only they are counted in the month's totals. A booking later today cannot turn its day amber.
+- A day with no orders is its date alone and takes no tap.
+- Batches and credits are not drawn in the grid at all. A statement is a set of orders, and what a row of days can say about it (a bar cut at the week's end, dashes for the days it skips, one label on one segment) is less than its row in a list says.
+
+**The month's totals are split order by order, so they add up by construction.** `month_totals.split_month` takes the month's orders already driven and puts each one's value, `expected_of`, into exactly one of four parts: unsettled when it is on no statement, awaiting when its statement has had no money, received when its statement is collected, and on a statement paid short, short for a leg ticked as unpaid and received for every other.
+
+- `本月車費 = 已收 + 等過數 + 未結算 + 收少咗` therefore holds for every month and platform without two queries having to agree, and the tests hold it.
+- The part of an order another statement paid ahead of its trip takes that statement's state.
+- An order still to be driven is counted in no total, because it may yet be cancelled.
+- A statement that straddles two months is counted in each by the legs driven in it.
+- The server computes the split, and the keys and the foot print it, so the header and the body cannot disagree about the same money. Nothing in the payload totals money over all time: the only figure that reaches past the month is `earlier`, made by the same split.
+
+**A statement paid short is kept apart from money that is awaiting.** What arrived on it is received, and what did not is in none of the three keys beside the fare: it is the foot's 收少咗. Awaiting money needs nothing from the operator, since the transfer follows the statement by itself. A shortfall is the one figure the operator has to take back to the platform, and folded into 等過數 it would be a sum that could not be acted on or found.
+
+- The statement is listed under 已收, with the money that did come, and leads that list.
+- The shortfall over all the months a statement covers is exactly what the statement is still owed. The ticked legs need not add up to that, since nothing may be ticked yet and the ticks are taken in the platform's figures. The difference is moved between received and short once, in the month of the statement's latest leg, so a statement across two months is never corrected twice.
+
+**A figure that cannot be stated exactly is withheld, not guessed.** `split_month` refuses a statement whose shortfall its orders' fares cannot hold. Clamping at zero or spreading the difference would print a made-up number as an exact one.
+
+- `db.get_settle_month` then sends `month_totals`, or `earlier`, as `null` and everything else as usual, so the page still loads and the statement at fault can be opened and corrected.
+- A key whose month is not loaded, or whose totals were withheld, shows a dash and no state's colour, never a zero.
+- The foot says 全部啱數 only when the month's totals and the earlier months' figure are both in hand. It says 今個月計唔到準數 when the totals were withheld, and shows the earlier months' item with a dash and no tap when that figure was.
+
+**The keys count fares; a list row states the statement's own amount and says when the two differ.** A statement can be confirmed at a figure that is not the sum of its orders' fares. The keys keep to the fares the book holds, because that is what makes them add up. A row is a statement, so its figure is the statement's: what the platform confirmed while nothing has come, what has arrived once something has, with each credit that paid it on a line of its own.
+
+- What separates that figure from what the keys count is said on the row, part by part, so the rows can be added up against the key. The identity is `confirmed figure = its part of every month it covers + 另有帳項 + 同車費差`, computed in `settle/days.js` (`inMonthPart`, `otherLines`, `fareGap`).
+- 其中本月, on a statement reaching outside the month, is how much of it this month's key counts.
+- 另有帳項 is the sum of the lines the statement carries that the totals count under no order: a 判罰 against a trip another statement holds, one that was cancelled or one the book never had, the 免責 line that cancels one, a 舉牌 paid ahead of a trip cancelled since.
+- 同車費差 is what is left: a figure the platform put on a leg or on the whole statement that is not the book's.
+- None of the three is a state, so none takes a state's colour. Only 仲差, on a statement paid short, is money still owed.
+- Under 等過數 the longest wait is first. Under 已收 the statement still owed money is first and the collected ones follow, newest first by the date they are named by, receding as records.
+- Credits put away with no statement belong to no month, so the way to them is the last row of whichever month's 已收 list is shown.
+
+**A statement is named by the 應結算日期 its rows print.** `10/9 結算`, `10/8–9 結算`, `12/28、30 結算`: the set of due dates on the statement's rows, written as runs of consecutive days (`statement.due_dates` reads them off the stored statement; `days.js:statementName` writes the name). The list, the foot and the focus line use it, and the ledger carries the same dates for every batch a credit paid, so a statement known only from the ledger is named the same.
+
+- The set is the name because nothing smaller is the statement's own. The platform prints one value per service day, several statements are confirmed on one day, and no single date, earliest or latest, is unique to one.
+- A row that prints no value, or one that is not a real date, adds nothing, and nothing is derived from the service day in its place. The name has to be what the platform printed, so that it can be found on the platform's side.
+- A batch whose stored statement prints none falls back on the day it was confirmed, and one with neither has no date. The bank's value date names the transfer, not the statement, and the system's own id ties to nothing the platform or the bank says.
+- Two statements that would still share a name are told apart by a number on the later.
+- Day sheets and batch sheets label a batch by the service days it covers; the day it was confirmed is said on the batch's sheet.
+
+**The foot holds only what needs action.** Up to three items, in this order: 收少咗, the month's shortfall, naming the statement when there is one and counting them when there are more, which opens the 已收 list; the bank credits no statement accounts for, with their count, which opens their queue; and 之前月份未清, which goes to the earliest month still holding open money, on the calendar of whole fares. With nothing to act on the foot is one line, 全部啱數.
+
+- The third is there because the keys are per month. What is unsettled, awaiting or short in every earlier month is summed by the same split (`earlier` in the payload). Without it, money left open in a month not on screen would be seen only by paging back to look for it, which is what the page is opened to prevent.
+- The foot is one height whatever it holds, so it covers the same part of the page in every state. The strip and the list are padded so their last row clears it, and sheets and their scrim lie over it.
+- The credits' item has two forms. While any credit has one sure answer (one statement agreeing to the cent on dates the matcher believes, or the group one transfer pays whole) it counts those and sums what they hold: 入數啱數 N 筆, with 啱數 as the solid green block it is in a sheet. Otherwise it counts every credit that waits: 入數未對 N 筆. A ledger can hold dozens of old credits that will never have a statement, and counted among them the one a tap can finish would read as the same backlog as yesterday. In both forms the figure is bank money not yet matched and keeps that colour.
+- An item is a ruled cell like a key, at least 44px tall. A cell that leads nowhere is not a button.
+
+**A foot label keeps its size, and room is made for it in a fixed order.** Labels and figures stay on one line, exact to the cent, and nothing is wrapped or cut. When three items are too long, `fitFoot` makes room a step at a time and stops at the first step that is enough: the labels give up their letter-spacing; the padding beside the rules goes down to 4px; the shortfall's label gives up the name of its statement, and the first two steps are tried again; the padding goes down to 2px; last, the figures are set smaller, all together.
+
+- The name goes before the padding passes 4px. A label nearer a hairline than that reads as crowded against it, and the name is the one part another place states: the cell opens the list that the statement leads.
+- The cells are measured where they stand and not counted from their characters, since a label mixes two faces and marks pulled in by `tight()`. The foot is fitted again whenever its width changes.
+
+**The strip is one run of weeks, with no break at a month.** A week row can hold the end of one month and the start of the next, and a statement's days can lie either side of that line. A boundary is a stronger hairline and the month carried by the 1st, never a cut. The strip loads a month at a time off either end as it is scrolled, and the header names the month of the row at its top, so the keys and the foot follow the scroll.
+
+**The strip is a ruled sheet, not a set of cards.** It is drawn the way the board's list is: a week is a row between two hairlines, a day is a column of it, and a day's number, figure and rule all start on their column's left edge. There is no box round a day and no line between days: the left edges already draw the columns.
+
+- The 1st carries its month, because a week row is not a month and has no heading to read one off. Today's number is an inverse block.
+- An amount too long for its column at the size the others are set in is set smaller, never cut.
+- Header, weekday head and key are whole pixels tall, because the strip is scrolled to positions worked out from them and the browser scrolls by whole pixels.
+
+**The strip's held months are an unbroken run, and a run is stored whole or not at all.** The strip draws every date from its first held month to its last, so a month missing between two that are held would draw as real days with no work on them, which on this page reads as nothing owed.
+
+- A reach for a month outside the strip fetches every month in between, and the answers are stored only when all of them arrived. A failure leaves the strip as it was.
+- A month another caller is already fetching is waited on through the same request, so two callers cannot leave a gap between them.
+- A reload of what is held is whole in the same way: every held month and the ledger, or nothing. A half-refreshed strip would show the same batch in two states.
+- A month more than `FILL_MAX` (3) fetches away is a jump, not a scroll. The strip is thrown away and refounded there instead of paying for every month in between.
+
+**A month asked for lands with its first row at the top, however short the strip is.** The arrows, the month button, the foot's 之前月份未清 and a batch opened from a credit each name a month. A strip just opened or refounded is a month or two long, about a screen, so the row asked for can have less than a screen of strip under it and the scroll stops short at the document's end.
+
+- The row is therefore pinned, and every paint that lengthens the strip asks for it again until it is at the top. Stopping at the document's end is also what brings the next month into reach of the strip's edge, so the growth the pin waits for is already asked for.
+- Without the pin, the strip's own growth would hold whichever row the unfinished scroll left on top.
+- A row that can be reached takes an earlier pin away, and so does a load that fails, so a later paint cannot move the strip to a month nobody is asking for any more.
+- The row a focus goes to is placed by the same scroll.
+
+**A statement's days are lit from its sheet, and the rest recede by colour, not by opacity.** Nothing in a day's cell says which statement the day went onto. The batch sheet has a key, 喺月曆睇, that closes the sheet, goes to the calendar of whole fares and lights that statement's days. It is the one way into a focus.
+
+- A lit day takes the panel's ground. Every other day gives up its colour and weight and keeps its figure. Opacity would do it in one rule, but a faded amber figure cannot be read on the light ground, and a receded figure is still money the operator reads at a glance.
+- The set lit is the whole connected run of allocations, not the named statement alone. Two statements paid by one credit are one statement about money, and it has to read the same from either end.
+- When none of the statement's days is on screen the strip goes to the nearest row carrying one; it stays where it is when one already is.
+- A tap on empty calendar puts the focus down, and so does choosing another key, since the strip lights one set of days at a time. A day still opens on one tap whatever is lit.
+
+**While a statement is in focus the foot is one line naming it, and the line gives way part by part.** The line holds the statement's name, the days it lights, its leg count, its figure and where its money has got to, with a ✕ to put the focus down. It stays on one line at every width, so the foot is as tall with a focus as without and the calendar does not move under it.
+
+- When the line is too long, every part is set smaller together, down to 12px. Only when that is not enough does a part go: the leg count first and then the days, both of which the lit calendar and the statement's sheet still say. The name, the figure and the state always stay.
+- A part that has gone is taken out of the line, not hidden, so the line says exactly what is on screen to whatever reads it.
+- The line is measured where it stands, at its full size and at the floor, for the same reason the foot's cells are.
+
+**A settle sheet is a page of a ledger.** Each sheet states its money in one order: the figure the sheet is opened for, large, with where that money has got to under it in the colour of that state; then lines of label left and figure right; then the legs.
+
+- Every list of legs is one grid (the time, the whole order number over what jogs the memory of the leg, the figure over what is to be said about it), so numbers start on one x down a day sheet, a batch's list and the tick list alike.
+- An order number is grouped in fours, wraps where it must and is never cut. Reconciling is done number by number against the platform's statement, and a number cut short cannot be checked. A bank reference and a memo wrap for the same reason.
+- Figures are in the figure face and the words around them are not.
+- What moves money (確認啱數, 確認收到 $300.00（仲差 $80.00）) is an outlined key at least 44px tall that says in full what the tap records. 撤銷結算 and 解除 are confirmed in a pushed view, not by an armed button, so a repaint in the middle of the decision cannot wipe the armed state.
+- The statement's report is printed as the server sent it, the same text the bot's card carries.
+- Every settle sheet is a read except 撤銷結算, the 未過數 ticks, reading and confirming a statement, and putting a credit against a batch or a group or taking it back off.
+
+**A credit against a statement is drawn as two figures and a verdict.** Putting a credit against a statement is a tap, and not automatic, because the bank's figure can differ from the statement's. So wherever the pair is offered (the queue, a credit's sheet, a batch's sheet, the row for a group) it is drawn as that comparison: 銀行入 over the statement's name, label left and figure right, both to the cent in the figure face so the two stand one over the other; then the verdict, and a key that says what the tap records. `days.js:matchWording` decides the words.
+
+- The figures agree and the matcher believes the pair: 啱數 as a solid block, 確認啱數.
+- The credit is smaller: 少 $N in the colour of money owed, 確認收到 $X（仲差 $N）.
+- The credit is larger: 多 $N in the colour of unmatched bank money, 確認收到，入數剩 $N.
+- The same amount on dates outside the matcher's window is said to be the same amount (銀碼一樣，日期隔得遠), not 啱數: a coincidence must not wear the block of a match.
+- A credit part spent is compared by what it has left (銀行入 剩) and a statement part paid by what it is still owed (仲差), so 啱數 on a make-up payment means it agrees with what is outstanding.
+- One transfer paying a whole group is one row: the count of statements and their sum, their names under it, one key.
+- The statement is named as everywhere else, by its 應結算日期. The toast after a tap says the result in the same words (`confirmedText`).
+- The tap calls the same endpoints as before and the amount is the server's.
+
+**The queue lists only the credits still waiting, and leads with those that have an answer.** 入數未對 opens the open and part-matched credits in two parts. 有結算對得上 holds the credits with one sure answer, newest first, each with the comparison and its confirm in place: the newest is the one a notice has just announced. 未有結算對得上 holds the rest, oldest first, since those are the ones being chased, each a way into its own sheet. The heading counts every credit that waits, and a part with nothing in it is not drawn. Old credits with no statement stay in the second part and in the count; they are kept there as a reminder and are not what a new credit should be found behind. A matched credit is reached from the batch it paid, and listing it again would bury the ones still waiting.
+
+**A statement waiting for its transfer says when the money is in.** Its sheet shows, above its legs under 入數到咗, the credits dated inside the matcher's window, with the same comparison and confirm. A credit dated far from it is offered only on the credit's own sheet, where every candidate is listed: on the statement's sheet it would be announced as that statement's money. With no such credit the sheet adds nothing, since waiting with no money yet is the ordinary case. A statement paid short lists every candidate under 等緊補數, because a make-up payment can arrive at any distance.
+
+**A credit can be named in the address.** `/settle?credit=<id>` chooses the credit's platform (`GET /api/credits/<id>` says which), opens the credit's sheet over the queue, and takes the marker off the address. A credit the ledger does not hold, or one no longer waiting, opens the queue alone. The worker answers `/settle` with any query from the cached shell, so the installed app handles it. The marker is left in place until it has been answered, so a login that expired in between returns to the same credit.
+
+**A sheet never shows an order the page could not read again.** The settle view's order sheet shows an order fetched on its own (`GET /api/orders/<id>`, because the month payload carries settle columns only), and the fetch is repeated with every reload, since a reload means something changed. When it fails, the held order is dropped and the sheet says 讀唔到. An order left standing would be the one from before the change, with editable fields, and nothing on it would say so.
+
+**Nothing in the header, the calendar, the list or the foot is underlined to say it can be tapped.** An underline reads as a hyperlink, and on a page of figures it would also read as a rule under a sum. What can be tapped there is a ruled cell or a whole row. Inside the sheets a link is ink with a rule under it.
+
+**The event drawing is kept, and nothing loads it.** The code and the rules that draw batches as bars and credits as chips under the days, with the lane packer that places them, are in `static/js/settle/archive/` and `static/css/archive/`. No module imports them and no document links them. Because archive directories are outside the asset version and the precache, no phone downloads them and a change to one does not send every client the app again. `lanes.js` keeps its test.
+
+### Visual system
+
+**Tokens are named by role and re-valued per theme, and both views draw from the one set.** `base.css` declares one set of custom properties: ground (`--bg`), panel (`--surface`, `--sheet-bg`), ink in four strengths (`--text`, `--text-2`, `--text-3`, `--text-4`), hairline (`--line`), the three status colours and `--on-solid`, the text on a solid status block. Dark values are the base and light ones sit under `prefers-color-scheme`.
+
+- A rule names the role and never a colour, so a theme is a change of values and nothing else. There is no toggle and no stored preference.
+- The two views are one document, switched between without a load. A change of ground, ink or shape at every switch would read as two apps.
+- The settle view adds one colour to the board's three: `--blue`, for bank money not yet matched to a statement.
+
+**Every value holds a contrast floor, in both themes.** The floors are stated beside the values in `base.css` and hold against the ground and the panel alike.
+
+- `--text` at 11:1, and no more than about 13.5:1 on the ground, because brighter ink on a dark ground blooms.
+- `--text-2` at 6.5:1. `--text-3` at 4.5:1 and at least 2 below `--text-2`, so the two strengths are told apart.
+- The status colours at 4.5:1 as text, and `--on-solid` at 4.5:1 on each of them.
+- `--line` at least 1.4:1 on the ground in both themes. The page is ruled, not boxed, and rules plain in one theme and nearly gone in the other would give it two layouts.
+
+**A fourth ink is for coordinates.** `--text-4` sets the dates of empty days and the weekday head, at about 3:1 on the ground and no less than 3:1 on the panel, deliberately below what text meant to be read holds. They are positions to read the grid by. Set in the faintest text ink they would stand as strong as a collected day's figure, and the grid would lose the difference between a position and an amount.
+
+**Text meant to be read is never set under 12px.** A label, a column head, a tag, a note, a secondary line and a figure are at least 12px in either view and in every sheet. The app is read on a phone for hours, by day and by night and in a moving car, and small text at regular weight is the hardest thing to read there, most of all on the dark ground.
+
+- Three things may be smaller: a pure coordinate (the date in a settle calendar cell, the year beside the masthead date); the cents of a figure; and a figure at the moment a shrink-to-fit rule sets it smaller to hold it in its column, because cutting or wrapping a money figure is worse.
+- The room a size needs is made from letter-spacing, from padding or by a line of its own, and never by cutting text, wrapping a figure or letting the page scroll sideways.
+- The rule is stated in `base.css`, and the `type.*` checks of `scripts/e2e.py` walk the text on screen and hold the same list of exemptions.
+
+**Figures are set in one monospaced face, self-hosted, and pass through `tight()`.** Times, flight numbers and money are what the day view is read for, at arm's length in a car. They are set in B612 Mono, a face drawn for cockpit displays, in which every digit takes the same width and a column of figures lines up without help.
+
+- It is served from `static/fonts/` as two woff2 files cut down to Basic Latin and the few marks the app prints, preloaded by the shell and precached by the worker. A face fetched from someone else's server would be one more thing that can fail behind the tunnel, and the installed app must paint whole from its cache.
+- Until the file arrives a figure is drawn in a local monospaced face declared with `size-adjust` and overridden ascent and descent, so that its cell and line box match. With `font-display: swap` the alternative is a row that changes width, and wraps differently, at the moment of the swap.
+- A monospaced mark takes a whole cell and would open `13:42`, `$1560.50`, `9/10` and `2026-10-01` up into separate words. `shared.js:tight()` wraps each in a span the stylesheet pulls in, by a class that says how the mark sits in its cell: a colon, point, comma or middle dot is drawn at the left of its cell and is pulled from the right; a hyphen sits in the middle and a slash fills its cell, so each is pulled from both sides.
+- The minus sign before money is U+2212 and is not a mark inside a figure, so it is left alone.
+- `tight()` takes text that is already escaped and returns markup, skipping tags so its own output can be given back to it. It is applied to figures only, never to free text.
+
+**Colour is reserved for status and for money that needs attention.** On the board, colour is a flight's status block (已到閘 inverse, 已降落 solid green, 預計 amber outline), a tight or urgent 出場 mark, 未入價 in amber and a 判罰 in red. In the settle view it says who owes what: amber is money the platform still owes, blue is bank money not matched, green is finished, red is what cannot be taken back or could not be done.
+
+- Nothing else is coloured. A platform is told apart by its name in the code column, a link is ink with a rule under it, a chosen segment is solid ink, and a primary action is ink on ground reversed.
+- State is a solid block or coloured text, never a tinted pill.
+- A destructive action is a red outline until the step that confirms it, and solid red only there.
+- A colour that also decorated (a hue per platform, a tint per service) would leave the eye nothing to find first, and what the driver needs first is which flight has landed and which fare is missing.
+
+**Panels are drawn in the board's manner, by class and not by view.** A flat panel under a hairline, squared controls, the primary action solid ink, everything else an outline, a ledger of label-left and figure-right lines, a numpad that is one ruled grid. `.board` on a panel's element gives what it holds that manner, whichever view or module wrote it, so the order sheet looks the same in either view.
+
+- The rules sit in `:where()`, so they weigh what the rules they replace weigh and win by coming later.
+- A field a batch has frozen is drawn as text with 已結算 beside its label, not as a control made to look disabled. It cannot be edited from here at all, and the figure is still true.
 
 ## Data flow
 
 ```
-WeChat order message
-  → paste into Telegram bot (card + confirm) or dashboard paste box (preview + price)
-  → ingest.py runs the parse cascade over parser.py's format parsers
-  → db.py writes to SQLite
-  → web saves kick the bot's poller via a unix socket for an immediate first poll
-  → web.py serves the shell document, its versioned assets and the API
-  → the day view (static/js/day/index.js) reads the day through the store
-    and renders
+Order entry
+  WeChat message
+    → bot: handle_message → ingest.parse_any → card (確認 / 取消)
+        → price typed, or 確認 then price → db.save_or_revive_order, db.update_price
+        → message for a live order → diff card (更新 / 略過) → db.update_order_from_message
+    → web: POST /api/orders/parse (preview: fees, changes, suggested price)
+        → POST /api/orders {type: paste} → parsed again → same db calls
+        → kick over bot.sock → the bot polls at once
+  Quick order
+    → web: POST /api/orders {type: didi | uber | foodpanda, date, time, price}
+    → bot: /didi, /uber → db.save_quick_order
+  Edit
+    → order sheet → PATCH /api/orders/<id> (price, fees, time, pickup_point, cancel)
+    → db.update_order_fields (refuses locked fields on a batched order)
 
-Dashboard edit / quick order (Didi, Uber, foodpanda)
-  → PATCH /api/orders/<id> (price, fees, time, cancel)
-    or POST /api/orders (pasted order / quick order)
-  → db.py writes to SQLite
-  → SSE fingerprint changes → the showing view of every open app refreshes
+Live update
+  any write → web._fingerprint differs → GET /api/events says so
+    → stream.js → the showing view reloads
 
-Settlement (埋數)
-  → /settle event calendar, one platform at a time: the day's loose money in
-    the cell, a batch as a bar over its service days, a credit as a chip on
-    its value date
-  → GET /api/settle?month=&platform= (orders + batches + counts + totals)
-    + GET /api/credits?platform= (the whole ledger, not the month)
-  → scrolling off either end of the strip loads the next month and merges it
-    into what the page already holds; every month in between is filled in too,
-    because the strip's keys have to stay an unbroken run. A month more than
-    FILL_MAX fetches away is a jump rather than a scroll, so the strip is thrown
-    away and refounded there instead of paying for the months in between
-  → both payloads carry the matcher's proposals inline — a batch still owed
-    money its candidate credits, an open or partial credit its candidate
-    batches, each flagged whether it is Match.exact — so the sheet that asks
-    the question already holds the answer and the tap that takes it; the volume
-    is a few hundred rows a year, which is cheaper than a round trip per sheet
-  → a bar opens the batch sheet, a chip the credit sheet, a cell the day sheet,
-    a leg in that day sheet the order sheet the day view opens (order-sheet.js;
-    GET /api/orders/<id>, because the month payload carries settle columns
-    only), where the order is edited in place; a tap also focuses the money
-    relation the mark belongs to and dims everything outside it
-  → a batch is created only by confirming a statement, from this page or from
-    the bot, so every batch traces back to the image it was read from
-  → the header's 入數未對 count opens the work queue: open and partial credits,
-    oldest first, a row whose match is unambiguous carrying that match and its
-    對 button in place, or 對晒 for a confirmation-day group; a matched or
-    archived credit is read off the calendar
-  → batch sheet states what the bank has sent and what it still owes, one row
-    per allocation and each of them a way into that credit's own sheet plus a
-    解除, and folds the order list behind a count; a short-paid batch offers the
-    credits that could close it (等緊補數) above the 未過數 ticks it takes on
-    that same list, and a collected one names which legs the last transfer was
-    for (補 …0041 · …0092, 補收 on the leg)
-  → credit sheet states what arrived, how much of it a statement accounts for,
-    and the batches it paid, with what each of those is still owed; money not
-    yet accounted for is offered against the batches owed it (可能對), led by
-    the group one transfer pays whole when the matcher found one
-  → 對 → POST /api/credits/<id>/allocate {settlement_id} → db.allocate, the
-    amount being as much of the batch as the credit can still pay — the same
-    default the statement confirm allocates on, never a figure from the client
-  → 對晒 → POST /api/credits/<id>/allocate-all {settlement_ids} →
-    db.allocate_all: every batch of the group paid in full in one transaction,
-    or none of them
-  → 解除 → DELETE /api/settlements/<id>/allocations/<credit id> → db.deallocate
-    (one line only; the batch keeps whatever else paid it)
-  → 撤銷結算 → DELETE /api/settlements/<id> (unlinks its orders, drops its
-    allocations so every credit gets its remainder back, clears the unpaid flags)
-  → SSE fingerprint changes → the day view's 結算 row follows on other devices
+Flights (bot, 60 s heartbeat, fetch gated by calc_next_interval)
+  reminders first: 用車時間, 出發, ETA-passed advisory, dep30 / dep10
+  → flight.fetch_arrivals per tracked date → flight.match_flights
+  → db.update_flight_info (scheduled, ETA, gate, status, hall)
+  → status change → 已降落 / 已到閘口 / 航班取消 push, with the car park
+    allowance line when CAR_PLATE is set
+  → landed 舉牌 pickup → sign-text preview + 生成舉牌相
+      → whiteboard.generate (fal.ai queue) → send_photo; the image is cached
+        until delivered
+  → day view: GET /api/orders?date= adds row_time, depart_hhmm, exit_urgency
 
-Settlement statement (結算單 screenshot)
-  → photo / image file to the bot, or the settle page's 圖 button / a file
-    dropped on it → POST /api/statements/read (10 MB cap). The browser hands
-    over the platform's own file byte for byte where a chat photo has been
-    recompressed first, which is what the reader mis-reads, so the page is the
-    path for a statement the bot came back garbled on
-  → statement.read_image (RapidOCR in a worker thread) → Statement
-  → nothing read → statement_flow.keep_unread_image files the bytes under
-    statements/failed/: the operator's copy scrolls away and a reader bug can
-    only be reproduced from the exact pixels
-  → statement_flow.prepare (writes nothing, and both frontends call it, so a
-    statement cannot mean one thing in the chat and another in the browser)
-  → db.settlement_candidates (orders on those dates + settleable tail)
-  → statement.reconcile → checksum, per-line verdict, settle set
-  → credits.propose_statement matches the statement against the ledger before
-    any batch exists: the statement stands in for the batch it is about to
-    become, its total the amount and today the anchor, because confirming it
-    is what the operator is doing right now and that is the date the confirm
-    writes as settled_on; so the card can name the credit it agrees with
-  → 對到入數 (one credit agrees to the cent) → 確認結算 + 對入數 creates the batch
-    and allocates that credit with the same tap; a credit in the window that is
-    smaller than the statement is the short-payment case (對到入數 … 差 $510),
-    and the reply ends with 平台查完喺 dashboard 入返邊張單 — naming the legs
-    is a dashboard operation because the operator does not know which legs yet;
-    入數可能係 lists what could contain it; 未收到呢筆數 when nothing does
-  → settle page batch sheet of a partial batch: 邊張單未過？ ticks taken on its
-    own order list with guess_unpaid pre-filled,
-    POST /api/settlements/<id>/unpaid → db.mark_unpaid
-  → 確認結算 / 照平台數確認 (+ 記判罰 + 記帳項 + 對入數 as the statement calls
-    for them) → statement_flow.confirm → db.create_settlement(statement JSON,
-    screenshot, the 判罰 per order, the 帳項 rows) writes the fines, sums
-    expected off the rows that now carry them, and files the adjustments in one
-    transaction; then the credit the card named is allocated by the same tap
-  → from the browser the read is held by token for 30 minutes and the token is
-    spent on the way in, so a double tap meets the same expiry a stale one does
-    rather than writing a second batch
-  → no orders in the system but a credit agrees → no batch, one button that
-    archives the credit with reason no-orders
-  → settle page batch sheet shows platform figures and links the screenshot
+Car park (bot, own job: 30 s with a visit open, 60 s otherwise)
+  armed by a pickup's landing window (parking.arming_orders), or a visit open
+  → ParkingClient.query (plate → inside?, pvNr, entry time, parkTime, fee, paid)
+  → entry: parking_sessions row linked to the nearest armed order
+      → 已入 push: allowance verdict or the first hour's price, + pay button
+  → every inside reply: last_seen_at, last_park_minutes, last_fee stored
+  → tap, or 50 minutes unpaid: fee query → storeOnlinePayment → PayDollar URL
+  → alreadyPaid flips: 已收到付款 push; paid elsewhere, the previous fee
+    reading becomes paid_amount
+  → two not-inside replies: close → 已出閘 push, pickup_point and parking_fee
+    written to the order, buttons for the two verdicts not picked
+      → button or /parking mark → db.mark_parking_observed
+  → every tick, from the database alone: parking.no_entry_orders
+      → push, then pickup_point 富豪 and parking_fee 0, then the noentry tag
+      → 其實去咗 P1 / 其實係 P4 → ingest.pickup_point_fields written
+
+Statement (結算單)
+  image → bot (photo or file), or settle view 圖 / drop → POST /api/statements/read
+  → statement.read_image (RapidOCR) → Statement
+      → nothing read → statement_flow.keep_unread_image → statements/failed/
+  → statement_flow.prepare
+      → db.settlement_candidates (orders within a day of the statement's
+        dates, plus every settleable order)
+      → statement.reconcile → checksum, per-line verdict, settle set, adjustments
+      → credits.propose_statement → the credit line of the card:
+          對到入數 (one credit agrees to the cent)
+          對到入數 …，差 $510 (a credit in the window is smaller: short payment)
+          入數可能係： (candidates only)
+          未收到呢筆數 (nothing yet, the ordinary case)
+  → confirm: bot button, or POST /api/statements/confirm {token}
+  → statement_flow.confirm → db.create_settlement (batch, fines, adjustments,
+    one transaction; the screenshot is written after the commit)
+      → db.allocate for the credit the card named
+      → short payment: the reply ends 平台查完喺 dashboard 入返邊張單
 
 Bank credit (入數)
-  → first-reader publishes one JSON line per HSBC credit advice to a JSONL feed
-  → bot.py heartbeat (60s, ahead of the flight gate): credits.feed_changed stats
-    the file; a changed (mtime, size) → credits.ingest_feed reads it whole
-  → INSERT OR IGNORE by the bank's reference → bank_credits row, always kept,
-    whether or not any batch or order exists for it
-  → credits.propose_credit → credits.match_credit against the open batches.
-    Nothing in credits.py writes to settlements: it proposes, a tap decides
-  → the window is what separates a match from a coincidence, and it is keyed to
-    the day a batch was confirmed (settled_on), never to the days it covers:
-    everything confirmed within one working day is paid as one transfer about
-    two working days later. Seven days either side, symmetric because a
-    screenshot confirmed late legitimately puts the bank first. Money dated
-    before a batch's last service day is not a candidate at all, whatever the
-    window says: it cannot pay for work not yet done
-  → inside that window: an exact amount, or a whole confirmation-day group at
-    any size — one transfer pays every batch confirmed on the same working day,
-    so the group is the ordinary payment rather than a coincidence and is
-    matched whole → Match.exact, which the push names (對到 批次 #4？)
-  → only a transfer that mixes confirmation days leaves no whole group, and
-    only then are combinations searched blind, up to MAX_SUBSET batches, one
-    hit being the answer; among equal-sum combinations the one drawn from a
-    single confirmation day wins, because that is the platform's own grouping
-    rule, and equal sums spanning days are the coincidence the ambiguity
-    refusal exists for
-  → amounts are round hundreds and the ledger holds months of them, so an
-    amount agreeing to the cent on the wrong date is offered among the
-    alternatives, never proposed
-  → the settle page's proposals come from credits.offer: Match.exact first,
-    then Match.short (batches the credit could only pay part of,
-    對 $2,950（差 $510）), then the other candidates — the belief leads without
-    being acted on; a Match.exact of several batches also travels whole as
-    the credit's combo, which the page offers as one tap
-  → db.allocate is reached only from the statement confirm and the settle
-    page's 對, db.allocate_all only from its 對晒; tests pin those call sites
-  → the change left on a credit stays proposed against whatever is still owed,
-    which is how a make-up payment bundled into a bigger transfer reaches the
-    batch that is short; a statement confirmed in the chat says so
-    (入數仲剩 $510 · 去埋數頁對數)
-  → 1-3 new credits: one push each, no buttons; more: one backfill summary,
-    /credits
-  → /credits (queue, detail, archive, unarchive, unlink) is the correction
-    path; unlink takes all the money back off a batch, or, given a credit as
-    well, only that one allocation
+  feed file → credits.feed_changed → credits.ingest_feed → bank_credits
+  → credits.propose_credit → push (with RIDE_WEB_URL, a link to
+    /settle?credit=<id>; never a button that moves money), or one backfill summary
+  → settle view:
+      確認 (one statement) → POST /api/credits/<id>/allocate {settlement_id} → db.allocate
+      確認 (a group) → POST /api/credits/<id>/allocate-all {settlement_ids} → db.allocate_all
+      解除  → DELETE /api/settlements/<id>/allocations/<credit id> → db.deallocate
+      ticks → POST /api/settlements/<id>/unpaid {order_ids} → db.mark_unpaid
+      撤銷結算 → DELETE /api/settlements/<id> → db.delete_settlement (unlinks the
+               orders, drops the allocations and adjustments, clears the flags)
+  → bot: /credits (queue, detail, archive, unarchive, unlink) is the correction path
 
-HKIA endpoint
-  → bot.py heartbeat (60s tick, tier-gated fetch)
-  → flight.py matches flights to orders by flight number + closest date/time
-  → db.py updates flight columns (scheduled, ETA, gate, status)
-  → bot.py pushes 已降落/已到閘口 on status transitions, plus ETA-anchored
-    reminders (出發 depart, 用車時間, T-30/T-10 dropoff)
-  → an ETA that passed five minutes ago while the feed still says est gets the
-    advisory 預計已落地 HH:MM（HKIA 未確認）(reminder tag etapass): the feed lags
-    between touchdown and Landed, and the driver has the same decision to make
-    either way. Advisory only — nothing here writes flight_status, so the
-    reminder chain and the whiteboard prompt still wait for the feed
-  → if 舉牌 pickup: bot sends sign-text preview + 生成舉牌相 button
-    → on tap: whiteboard.py generates sign photo (fal.ai queue API)
-      → send_photo to chat (failure → text fallback + /board retry)
-  → the day view shows landing time + computed 用車時間
-
-HKIA parking endpoint (plate → inside? entry time, pvNr, paid; Car Park 3 and 4 only)
-  → bot.py's own parking job (30s while a visit is open, 60s otherwise, never
-    behind the flight gate), armed by the pickup's landing window
-    (parking.arming_orders)
-  → entry: parking_sessions row, 已入 push with the free-allowance verdict
-    (Car Park 3 and 4 only; elsewhere the first hour's price) + pay button
-  → tap / 50 min unpaid: storeOnlinePayment + gateway params → PayDollar GET URL button
-  → alreadyPaid flips: 已收到付款 push; paid anywhere but our link, the
-    previous tick's fee becomes paid_amount
-  → every inside reply: parkTime + fee stored on the row (INFO log line per tick)
-  → two not-inside replies: close the row — the stay off HKIA's parkTime, the
-    exit off the last tick that saw the car, the miss tick kept in gone_at, and
-    the fee deciding free/gate — 已出閘 push, the car park and what the visit
-    cost written to the order (pickup_point, parking_fee), buttons for the
-    two verdicts not picked
-  → 其實免費 tap / `/parking mark`: observed verdict overwrites free, allowance follows
-  → every tick, from the database alone (no HKIA answer needed, armed or not):
-    parking.no_entry_orders → a Car Park 4 pickup 90 minutes past landing with
-    no visit of its own, none entered in its window and none open → push
-    落地 90 分鐘冇 P4 入場紀錄, then pickup_point 富豪 and parking_fee 0, then
-    the noentry reminder tag
-  → 其實去咗 P1 / 其實係 P4 tap: that place and its first-hour charge written
-    to the order (ingest.pickup_point_fields, the dashboard PATCH's rule); a
-    cancelled order answers the tap and writes nothing
-  → 已降落/已到閘口 pushes carry the allowance line (for an order planned at
-    Car Park 1, that it charges from entry and that the bot cannot see it);
-    /parking answers on demand
+Settle view load
+  GET /api/settle?month=&platform= per held month + GET /api/credits?platform=
+  → month payload: the month's orders (settle columns); every batch the month's
+    totals count something of, whole (orders with platform_amount, allocations,
+    adjustments with trip_date, due_dates, unpaid_guesses, proposals); counts
+    of settleable orders per platform over all time, for the tabs;
+    month_totals; earlier; now, the server's clock
+  → ledger payload: every credit of the platform with its state, the batches it
+    paid (days, due_dates, settled_on, state), its proposals and its combo
+  → cell → day sheet → leg → order sheet (GET /api/orders/<id>)
+  → list row, or a link in a sheet → batch sheet → credit sheet
 ```
+
+### HTTP routes
+
+| Route | Purpose |
+|---|---|
+| `GET /`, `GET /settle` | The shell document |
+| `GET /assets/<version>/<path>` | Versioned static files; 404 for any other version |
+| `GET /sw.js` | Service worker, rendered with the version and the precache list |
+| `GET /manifest.webmanifest` | Web app manifest, at a fixed address |
+| `GET /api/ping` | `{ok, version}` |
+| `GET /api/events` | Server-sent event stream |
+| `GET /api/orders?date=` | One day's active orders |
+| `POST /api/orders/parse` | Preview of a pasted message |
+| `POST /api/orders` | Create a pasted or quick order, or apply an amendment |
+| `GET /api/orders/<id>` | One active order, whole |
+| `PATCH /api/orders/<id>` | Edit fields, move the meeting point, cancel |
+| `GET /api/settle?month=&platform=` | One month of one platform for the settle view |
+| `GET /api/credits?platform=` | The platform's whole credit ledger |
+| `GET /api/credits/<id>` | Which platform a credit is in, and whether it still waits |
+| `POST /api/statements/read` | Read a statement image (multipart `file`) |
+| `POST /api/statements/confirm` | Write the batch a read statement describes |
+| `POST /api/credits/<id>/allocate` | Put a credit against a batch |
+| `POST /api/credits/<id>/allocate-all` | Pay a group of batches in full from one credit |
+| `DELETE /api/settlements/<id>/allocations/<credit id>` | Take one credit's money back off a batch |
+| `POST /api/settlements/<id>/unpaid` | Name the legs a short-paid batch is missing |
+| `DELETE /api/settlements/<id>` | Undo a batch |
+| `GET /api/settlements/<id>/image` | The batch's statement screenshot |
 
 ## Key files
 
-- `ride_dispatch/parser.py` — Order dataclass and one parser per relayed order format: key-value standard, 同程 comma format, 飛豬, SPACE format, and 分銷 relay.
-- `ride_dispatch/ingest.py` — Shared entry point for bot and web: parse cascade across the format parsers plus parking/banner fee rules and the meeting-point plan (`PICKUP_POINTS`, each place's first-hour tariff).
-- `ride_dispatch/bot.py` — Telegram bot handlers and the two repeating jobs the process runs: the flight-poller heartbeat, which also reads the bank credit feed ahead of its own flight gate, and the car park's faster one. Confirm/cancel flow, price input, cost tracking, status/reminder pushes, whiteboard sign prompt. `_notify_chat_id()` is where every push is addressed: `NOTIFY_CHAT_ID`, else the first of `ALLOWED_CHAT_IDS`, and with neither of them set the jobs run but send nothing.
-- `ride_dispatch/db.py` — SQLite schema and queries. Auto-migrates columns on startup.
-- `ride_dispatch/flight.py` — HKIA flight fetcher and matcher. Date-aware flight matching, poll tier calculation, tracking window logic, and the rules behind the ETA-anchored pushes — including the ETA-passed advisory, which fires `ETA_PASSED_GRACE` after a still-`est` flight's own ETA and stays advisory, never a status.
-- `ride_dispatch/service.py` — Service-type layer: labels and flight-pickup classification (接机/送机/接站…).
-- `ride_dispatch/pricing.py` — Zone-based price suggestion learned from order history; no price constants in code.
-- `ride_dispatch/phone.py` — Display-time E.164 phone formatting, recognising every country code currently assigned in ITU-T E.164 (`E164_CC`, prefix-free, which is what makes the longest-match-first scan unambiguous) and stripping the national trunk zero only for the codes known to use one (`TRUNK_ZERO_CC`). A separated 3-digit code followed by exactly 7 digits is left alone: that is how a NANP number is written, the shape is unresolvable, and a wrong guess dials a stranger. Twinned in `static/js/shared.js:formatPhoneE164`, both country-code lists included — keep them in sync.
-- `ride_dispatch/parking.py` — HKIA car park client and the rules read off a visit: free/chargeable verdict from HKIA's fee reading, car park naming (P1/P4 from HKIA's code or name), which car parks have the free half hour and which the lookup can see at all, payment plan, poll-arming window, which Car Park 4 pickups the car never entered for, PayDollar link assembly. Async httpx.
-- `ride_dispatch/whiteboard.py` — Whiteboard sign image generator. fal.ai queue API (GPT-Image-2 edit), async httpx, base image in `assets/`, VIP-marker name sanitization.
-- `ride_dispatch/credits.py` — Bank credit ledger: feed ingestion (whole-file re-read, deduped on the bank reference, so the consumer keeps no offset), the pure credit ↔ batch matcher shared by both directions, the `propose_*` wrappers that read the DB, and the card text. A batch is paid when, and only when, everything allocated to it covers its total: `paid_on` is written by an allocation alone (`allocate`, `allocate_all`), from the bank's value date, at the moment the batch is whole, and cleared by `deallocate` or by the batch being undone. Nothing in this module allocates — it proposes and the operator's tap decides, so a matcher that grows a new rule cannot start moving money on its own. What a credit has left to give and what a batch is still owed are both derived from `credit_allocations`, never stored. Text only: the chat's credit messages carry no buttons, since matching is done on the settle page.
-- `ride_dispatch/statement.py` — Settlement statement reader (RapidOCR boxes → rows by shape, cells out of a reconstructed column grid named off the header) and the pure reconciliation of a statement against candidate orders, including which of its lines are an order's own 判罰, which are the batch's 帳項, and which 舉牌 was paid ahead of a trip the platform held back; the card text both frontends print.
-- `ride_dispatch/statement_flow.py` — What a statement means and what confirming one does, shared by the bot and the settle page so a statement cannot mean one thing in the chat and another in the browser. `prepare` reconciles and asks the ledger, writing nothing; `confirm` writes the batch, its fines and its adjustments and allocates the credit the card named, asking nothing. Both hand back text fragments each frontend arranges into its own card. `keep_unread_image` files a screenshot the reader could not read under `statements/failed/`, because a reader bug can only be reproduced from the exact bytes.
-- `ride_dispatch/web.py` — Flask app. The shell document on `/` and `/settle`, its assets under `/assets/<version>/`, the service worker at `/sw.js`, the manifest, and the JSON API + SSE event stream + write endpoints (paste parse/create, quick order create, field patch, cancel, settlement delete, the 未過數 ticks, and allocating a credit to a batch or to a whole group, or taking it back off). `asset_version()` hashes `static/` and the two templates once per process. It also reads statements: `POST /api/statements/read` runs the same `statement_flow.prepare` the bot does and holds the result under a token for 30 minutes, and `/api/statements/confirm` spends that token on the way in, so a double tap cannot write a second batch. Only a statement creates a batch, here as in the bot.
-- `templates/app.html` — The shell: the head, the two banners, the two view roots with the markup each view starts from, the one toast. It links four stylesheets and one module, all by versioned address, and carries no script or style of its own.
-- `templates/sw.js` — Service worker source, rendered with the version and the list of every script, stylesheet and font. Caches the shell whole, answers asset addresses and navigations to the two paths, and never touches `/api/`.
-- `static/js/main.js` — Boot: the store, the two views and the router that shows one of them, the stream and the refresh on return to the app, the worker's registration, and the update and expired-login banners.
-- `static/js/router.js` — Path to view and back on the History API; mounts a view the first time it is shown, hides and shows roots, keeps each view's scroll position.
-- `static/js/store.js` — The day view's cache: paint what is held, always ask again, drop answers that arrive out of order.
-- `static/js/api.js` — Every request the app makes to its own server, and the one place that decides what an expired login looks like (`AuthExpired`).
-- `static/js/stream.js` — The one `EventSource`: the greeting rule, and reopening a stream the browser has given up.
-- `static/js/shared.js` — Leaf helpers shared by both views and the order sheet — anything that assumes a view's own DOM shape stays in that view — and where every twin of a Python function lives: `money` (`statement.money_str`), `formatPhoneE164` (`phone.py`, both country-code lists with it), `collectContactLines` (`bot.collect_contact_lines`), `platform` (`service.platform_of`), `expectedOf` (`service.expected_of`), `owedOf` (`service.owed_of`), plus `svcLabel`, `orderTime`, `weekday`, `tight` (the wrapper for punctuation inside a monospaced figure) and the toast. Changing one side of a twin without the other is the sync risk this list exists to name.
-- `static/js/dates.js`, `static/js/lanes.js` — The settle view's stateless parts: date arithmetic and labels, the split of a batch's dates into runs, and the packing of bars and chips into lanes.
-- `static/js/order-sheet.js`, `static/css/order-sheet.css` — The order's own sheet (details, editable fields as a ledger, pickup point segments, cancel confirm, numpad), imported by both views and drawn in the board's manner in either. Each view supplies a host for what differs: which order is open, how a view is stacked, how a patch reloads, how a heading is drawn, and its own info rows. Holds the twin of `ingest.PICKUP_POINTS`.
-- `static/js/settle/index.js`, `static/css/settle.css` — Settle view (埋數). Event calendar: a day cell carries the money no statement covers yet, a batch draws as a bar over its service days and a credit as a chip on its value date, packed into lanes per week. The strip of weeks is continuous and loads a month at a time off either end: a batch's dates split into runs wherever they are not consecutive, and within a run the only thing that cuts a bar is the week wrap — a batch straddling a month boundary is drawn whole. Day, order, batch, statement, credit, 未對 queue, undo and 解除入數 sheets, plus the focus mode that lights one whole money relation on the strip behind them. Every settle sheet is a read except 撤銷結算, the 未過數 ticks, reading a statement, and putting a credit against a batch or a group or taking it back off; the order sheet is the day view's too, and edits the order.
-- `static/js/day/index.js`, `static/css/day.css` — Day view: one day's orders as an arrivals board. A masthead (date, the four keys, platform tabs with counts, the column head), rows on one grid (time, code, place with the fare at its right, then the flight's status block, 出發 and 用車 times and the marks), the NOW band, NEXT, placeholder rows for a cold start and a fixed foot of totals. Over it, the order sheet on a bottom sheet and the add panel dropping from the top: paste a message (preview, duplicate and amendment handling, price) or enter a quick order stage by stage on the numpad.
-- `static/css/base.css` — The figure face and its metric-matched stand-in, the tokens, and the components both views use, including the shell's banners and the board's manner for a panel (`.board`, `.sheet:has(> .os)`). A rule one view overrides belongs in that view's stylesheet instead.
-- `static/fonts/` — B612 Mono Regular and Bold as subset woff2, with the OFL licence they are distributed under.
-- `scripts/` — Development tools, none of them used by the running app: `seed_demo_db.py` builds a synthetic database covering every visual state, `shots.py` screenshots every state in Playwright WebKit (the day view's a second time at 340 wide, and under stress at four widths) and compares two runs pixel by pixel, `e2e.py` drives the app through its behaviour in the same browser, and `harness.py` is the server and page driver the two share.
+**Python (`ride_dispatch/`)**
+
+- `parser.py`: the `Order` dataclass and one parser per relayed message format: key-value (携程), 同程 comma format, 飛豬, SPACE and 分銷.
+- `ingest.py`: `parse_any`, the cascade over those parsers, which also names the order's source; the parking and 舉牌 fee rules; the meeting-point plan and its tariff table (`PICKUP_POINTS`).
+- `service.py`: classification by service type (flight pickup, departure reminder, platform), display labels, and what an order is worth: `expected_of` and `owed_of`.
+- `pricing.py`: suggested price for a pasted order, from the history of fares to the same zone.
+- `phone.py`: display-time E.164 formatting. Recognises every assigned country code (`E164_CC`, prefix-free, so the longest-match scan is unambiguous) and strips a trunk zero only for codes known to use one (`TRUNK_ZERO_CC`). A separated 3-digit code followed by exactly 7 digits is left alone: that is how a NANP number is written, and a wrong guess dials a stranger.
+- `db.py`: schema, migrations and every query. Orders, batches (`create_settlement`, `delete_settlement`), credits and allocations (`allocate`, `allocate_all`, `deallocate`, `mark_unpaid`), the settle view's month payload (`get_settle_month`), car park visits.
+- `month_totals.py`: `split_month`, pure: one month's orders into fare, received, awaiting, unsettled and short.
+- `flight.py`: HKIA arrivals fetch, date-aware matching, the poll interval, `row_time`, and the pure rules behind every reminder.
+- `parking.py`: HKIA car park client and the rules read off a visit: verdict, car park naming, which car parks have the allowance and which can be seen, arming window, no-entry rule, PayDollar link.
+- `whiteboard.py`: sign photo generation (fal.ai queue API), name sanitising, the undelivered-image cache.
+- `statement.py`: the statement reader (OCR boxes to rows, columns named off the header), `reconcile`, `leg_amount`, `due_dates`, and the report and button text both frontends print.
+- `statement_flow.py`: `prepare` and `confirm`, shared by the bot and the web app; `keep_unread_image`.
+- `credits.py`: feed ingestion, the pure credit and batch matcher, the `propose_*` wrappers that read the database, `guess_unpaid`, and the chat text about credits. Writes credits only, never allocations.
+- `bot.py`: Telegram handlers (order cards, quick orders, statement images, `/cancel`, `/board`, `/parking`, `/credits`, `/start`) and the two repeating jobs. `_notify_chat_id()` is where every push is addressed.
+- `web.py`: the Flask app: the shell, versioned assets, the service worker, the JSON API and the event stream. Holds read statements under a token until confirmed.
+
+**Web (`templates/`, `static/`)**
+
+- `templates/app.html`: the shell: the head, the two banners, the two view roots with the markup each starts from, the toast. Links four stylesheets and one module by versioned address.
+- `templates/sw.js`: service worker source, rendered per version.
+- `static/js/main.js`: boot: the store, the views and the router, the stream and the refresh on return, the worker's registration, the two banners.
+- `static/js/router.js`: path to view and back; mounts, shows and hides views; keeps each view's scroll position.
+- `static/js/store.js`: the day view's cache.
+- `static/js/api.js`: every request to the server, and `AuthExpired`.
+- `static/js/stream.js`: the one `EventSource` and its reopening.
+- `static/js/shared.js`: leaf helpers shared by both views and the order sheet, and where the twins of Python functions live: `money` (`statement.money_str`), `formatPhoneE164` (`phone.format_phone_e164`, both code lists with it), `collectContactLines` (`bot.collect_contact_lines`), `platform` (`service.platform_of`), `expectedOf` and `owedOf` (`service.py`), `svcLabel` (`service.label`). Also `tight` and the toast. Changing one side of a twin without the other is the sync risk this list exists to name.
+- `static/js/dates.js`: date arithmetic and labels for the settle view.
+- `static/js/order-sheet.js`, `static/css/order-sheet.css`: the order sheet and its numpad. Holds the twin of `ingest.PICKUP_POINTS`.
+- `static/js/day/index.js`, `static/css/day.css`: the day view: the board, the NOW line, the foot, the add panel. `rowTime` is the twin of `flight.row_time`.
+- `static/js/settle/index.js`, `static/css/settle.css`: the settle view: keys and lens, the strip, the statement lists, the foot, the focus, and every settle sheet.
+- `static/js/settle/days.js`: what the settle view says about a day and a statement, from the data alone: `dayState`, the figure forms, `statementName`, list order, `inMonthPart`, `otherLines`, `fareGap`, `waitedDays`, the two fitting rules (`fitLine`, `figureScale`), and what a credit against a statement says and which credits lead the queue (`matchWording`, `confirmedText`, `sureMatch`, `queueSections`).
+- `static/js/settle/archive/`, `static/css/archive/`: the event drawing, kept and not loaded.
+- `static/css/base.css`: the figure face and its stand-in, the tokens, and the components both views use (masthead, tabs, column head, foot, sheet and scrim, banners, toast, `.board`). A rule one view overrides belongs in that view's stylesheet.
+- `static/fonts/`: B612 Mono Regular and Bold as subset woff2, with their OFL licence.
+- `static/icons/`: home-screen icons at the fixed addresses installed apps point to. The two SVGs are the sources the four PNGs are rendered from. Their ground is the manifest's `background_color`, which a test holds, so a launch screen shows the mark and no square.
+
+**Development (`scripts/`, `tests/`, `deploy/`)**
+
+- `scripts/seed_demo_db.py`: builds a synthetic database covering every visual state; `--backlog` adds old bank credits that nothing accounts for. Most rows are placed by offset from the chosen day; what has to exist at any date (a statement across two months, a second statement collected in full in the month it reaches into, a month with nothing left to do) is placed by the calendar.
+- `scripts/harness.py`: the server and page driver the two scripts below share.
+- `scripts/shots.py`: screenshots every state in WebKit in both themes, each again at 340 wide and the settle view's again at 1000 wide, and compares two runs pixel by pixel.
+- `scripts/e2e.py`: drives the app through its behaviour in the same browser. Every check has a server and a freshly seeded database of its own, so checks run in parallel processes. `--today-set` runs the whole set for several days, because the seed's days fall differently around the first of a month.
+- `tests/`: pytest for the Python modules; `tests/js/` for the stateless browser modules under `node --test`; `tests/fixtures/` holds recorded OCR output with hashed order numbers. `tests/test_seed_demo.py` holds the synthetic database to what the scripts rely on: every month of every platform adds up, at days either side of a month's and a year's end and on a leap day.
+- `deploy/`: example launchd plists and systemd units for the bot, the web app and the tunnel.
