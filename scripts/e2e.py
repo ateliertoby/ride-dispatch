@@ -57,7 +57,8 @@ CHECKS = []
 
 
 def check(name: str, clock: str = "fixed", still: bool = True,
-          workers: bool = False, copy: bool = False, desktop: bool = False, long: bool = False):
+          workers: bool = False, copy: bool = False, desktop: bool = False, long: bool = False,
+          backlog: bool = False):
     """Register a check. `clock` is "fixed" (Date frozen, timers real) or
     "installed" (the check moves time itself). `still` turns the page's
     transitions and animations off, which is what every check wants unless
@@ -67,12 +68,14 @@ def check(name: str, clock: str = "fixed", still: bool = True,
     (Server.fault). `copy` serves the app from a throwaway copy the check may
     change, to stand for a deploy. `desktop` runs it in a wide window with a
     pointer that hovers and no touch, so it clicks where the others tap.
+    `backlog` seeds the database with its old unmatched bank credits as well.
     `long` says it takes several times as long as most. Checks run side by
     side (--jobs) are handed out with these first, so that none of them is
     still running alone after everything else has finished."""
     def register(fn):
         CHECKS.append({"name": name, "fn": fn, "clock": clock, "still": still,
-                       "workers": workers, "copy": copy, "desktop": desktop, "long": long})
+                       "workers": workers, "copy": copy, "desktop": desktop, "long": long,
+                       "backlog": backlog})
         return fn
     return register
 
@@ -3488,8 +3491,14 @@ def settle_foot(s: Session) -> None:
     f = s.foot_look()
     queue, prior = ([c for c in f["cells"] if kind in c["cls"].split()][0] for kind in ("open", "prior"))
     s.eq((queue["label"], queue["figure"], prior["label"], prior["figure"]),
-         (f"入數未對 {len(waiting)} 筆", money2(ledger["sums"]["open"]), "之前月份未清", money2(book["earlier"]["open"])),
+         (*credits_item(ledger), "之前月份未清", money2(book["earlier"]["open"])),
          "label over figure")
+    # The seed's credits include ones with a sure answer, so the item counts
+    # those: 啱數 as the solid block that says it in a sheet.
+    s.eq(queue["label"], f"入數啱數 {len(sure_credits(ledger))} 筆", "the item while a credit agrees with a statement")
+    mark = s.on(".foot .fkey.open .fmark").first.evaluate(
+        "e => { const c = getComputedStyle(e); return [e.textContent, c.backgroundColor, c.color]; }")
+    s.eq(mark, ["啱數", s.token("--green"), s.token("--on-solid")], "啱數 in the foot")
     # Blue is bank money not matched, amber what is still owed; money from
     # earlier months mixes states, so no state rule stands under it.
     s.eq((queue["ink"], prior["ink"], prior["rule"][2:]), (s.token("--blue"), s.token("--amber"), [CLEAR, "none"]), "the figures' colours")
@@ -3554,7 +3563,7 @@ def settle_foot_items(s: Session) -> None:
     rewrite(s.ctx, book, ledger)
     s.open_settle()
     named = f"收少咗 · {s.named('short')}$380.00"
-    queue, prior = "入數未對 3 筆$4,440.00", "之前月份未清$1,320.00"
+    queue, prior = "入數啱數 2 筆$4,140.00", "之前月份未清$1,320.00"
     heights = set()
     for short, credits, earlier, want in (
             (1, False, False, [named]), (0, True, False, [queue]), (0, False, True, [prior]),
@@ -3793,7 +3802,7 @@ def settle_foot_unknown(s: Session) -> None:
     f = s.foot_look()
     s.eq((f["cells"][0]["tag"], f["cells"][0]["ink"], f["height"]), ("DIV", s.token("--text-2"), height), "the line that says so")
     serve(totals=False, short=True, credits=True)
-    s.eq(s.totals(), ["入數未對 3 筆$4,440.00"], "the items that can still be stated with the totals withheld")
+    s.eq(s.totals(), ["入數啱數 2 筆$4,140.00"], "the items that can still be stated with the totals withheld")
     # The earlier months' figure withheld: the item stands with a dash, in no
     # state's colour, and leads nowhere, since no month is named.
     serve(earlier=False)
@@ -3802,7 +3811,7 @@ def settle_foot_unknown(s: Session) -> None:
     dash = f["cells"][0]
     s.eq((dash["tag"], dash["ink"], dash["rule"][2:], f["height"]), ("DIV", s.token("--text-2"), [CLEAR, "none"], height), "the item with no figure")
     serve(earlier=False, short=True, credits=True)
-    s.eq(s.totals(), [f"收少咗 · {s.named('short')}$380.00", "入數未對 3 筆$4,440.00", "之前月份未清—"], "the dash beside two stated items")
+    s.eq(s.totals(), [f"收少咗 · {s.named('short')}$380.00", "入數啱數 2 筆$4,140.00", "之前月份未清—"], "the dash beside two stated items")
     foot_holds(s, 3, "with the earlier months withheld")
     s.eq([c["tag"] for c in s.foot_look()["cells"]], ["BUTTON", "BUTTON", "DIV"], "which of them are controls")
     s.eq(s.writes, [], "writes")
@@ -4282,6 +4291,37 @@ def statement_name(b: dict, batches: list) -> str:
     return plain(b) + (f" ({same.index(b['id']) + 1})" if same.index(b["id"]) else "")
 
 
+# A credit offered against a statement, as it is drawn: the two labelled
+# figures, the statements a group names, the verdict and the key's words.
+MATCH_JS = """
+sel => [...document.querySelectorAll(sel)].filter(e => e.getClientRects().length && e.querySelector('.ma')).map(e => [
+  ...[...e.querySelectorAll('.mf')].map(f => [f.querySelector('.k').textContent, f.querySelector('.v').textContent]),
+  (e.querySelector('.mn') || { textContent: '' }).textContent,
+  e.querySelector('.ma > :first-child').textContent,
+  e.querySelector('.pbtn').textContent,
+])
+"""
+
+
+def sure_credits(ledger: dict) -> list:
+    """The credits still waiting that have one answer and no other: the group
+    one transfer pays whole, or the one statement that agrees to the cent."""
+    return [c for c in ledger["credits"] if c["state"] in ("open", "partial")
+            and (c["combo"] or len([p for p in c["proposals"] if p["exact"]]) == 1)]
+
+
+def credits_item(ledger: dict) -> tuple:
+    """The foot's item for bank credits, as (label, figure), or None: those
+    with a sure answer while there are any, and otherwise all that wait."""
+    waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
+    sure = sure_credits(ledger)
+    if sure:
+        return f"入數啱數 {len(sure)} 筆", money2(round(sum(c["remaining"] for c in sure), 2))
+    if waiting:
+        return f"入數未對 {len(waiting)} 筆", money2(ledger["sums"]["open"])
+    return None
+
+
 def foot_texts(book: dict, ledger: dict, month: str) -> list:
     """What the foot says for one month, from that month's answer from
     /api/settle and the platform's from /api/credits: each item's label and
@@ -4294,9 +4334,9 @@ def foot_texts(book: dict, ledger: dict, month: str) -> list:
                  if b["state"] == "partial" and any(month_key(d) == month for d in batch_days(b))]
         which = " · " + statement_name(short[0], book["settlements"]) if len(short) == 1 else f" {len(short)} 張" if short else ""
         out.append("收少咗" + which + money2(totals["short"]))
-    waiting = [c for c in ledger["credits"] if c["state"] in ("open", "partial")]
-    if waiting:
-        out.append(f"入數未對 {len(waiting)} 筆" + money2(ledger["sums"]["open"]))
+    item = credits_item(ledger)
+    if item:
+        out.append("".join(item))
     if earlier is None:
         out.append("之前月份未清—")
     elif earlier["open"] > 0:
@@ -5120,22 +5160,28 @@ def settle_credit_sheets(s: Session) -> None:
     c = s.t["credit"]
     s.tap(".foot [data-credits]")
     s.eq((s.title(), s.sub()), ("入數未對", "接送 · 3 筆 $4440"), "queue")
+    s.eq(s.texts(".sheet.show .prop-head"), ["有結算對得上 · 2 筆", "未有結算對得上 · 1 筆"], "the queue's two parts")
     s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => [e.dataset.credit, e.textContent])"), [
-        [str(c["exact"]), f"{md_slash(s.back(14))} · $1270未對›"],
+        [str(c["group"]), f"銀行入 {md_slash(s.back(0))}$2,870.00›"],
+        [str(c["exact"]), f"銀行入 {md_slash(s.back(14))}$1,270.00›"],
         [str(c["partial"]), f"{md_slash(s.back(7))} · $2080未對 · 剩 $300›"],
-        [str(c["group"]), f"{md_slash(s.back(0))} · $2870未對›"],
-    ], "queue rows, oldest first")
-    group = "、".join([span_label(s.back(6), s.back(5)), span_label(s.back(9), s.back(8))])
-    s.eq(s.page.eval_on_selector_all(".sheet.show .qprop", "els => els.map(e => e.textContent)"), [
-        f"→ 批次 {span_label(s.back(19), s.back(18))} 差 $1270對",
-        f"→ 2 個批次 · {group} · $2870對晒",
-    ], "matches that are not in question")
+    ], "queue rows: those with an answer newest first, then the rest")
+    group = "、".join([s.named("ahead"), s.named("group")])
+    s.eq(s.page.evaluate(MATCH_JS, ".sheet.show .qitem"), [
+        [[f"銀行入 {md_slash(s.back(0))}", "$2,870.00"], ["2 張結算共", "$2,870.00"], group, "啱數", "確認啱數"],
+        [[f"銀行入 {md_slash(s.back(14))}", "$1,270.00"], [s.named("awaiting"), "$1,270.00"], "", "啱數", "確認啱數"],
+    ], "each answer: the bank's figure, the statement's, the verdict and what the tap records")
     # A credit part-used: what it could still pay, and what it has paid.
     s.tap(f'.sheet.show .qrow[data-credit="{c["partial"]}"]')
     s.eq((s.title(), s.sub()), ("入數 " + md_label(s.back(7)), "接送 · DEMO PLATFORM LTD"), "credit sheet")
     s.eq(s.texts(".sheet.show .hero > div"), ["到帳", "$2080", "已對 $1780 · 剩 $300"], "hero")
     s.eq(s.text(".sheet.show .prop-head"), "可能對", "proposals heading")
-    s.eq(s.texts(".sheet.show .prow .pbtn"), ["對 $300（差 $1145）", "對 $300（差 $970）", "對 $300（差 $80）"], "what each tap would do")
+    s.eq(s.page.evaluate(MATCH_JS, ".sheet.show .mrow"), [
+        [["銀行入 剩", "$300.00"], [s.named("group"), "$1,445.00"], "", "少 $1,145.00", "確認收到 $300.00（仲差 $1,145.00）"],
+        [["銀行入 剩", "$300.00"], [s.named("awaiting"), "$1,270.00"], "", "少 $970.00", "確認收到 $300.00（仲差 $970.00）"],
+        [["銀行入 剩", "$300.00"], [s.named("short") + " 仲差", "$380.00"], "", "少 $80.00", "確認收到 $300.00（仲差 $80.00）"],
+    ], "what the credit has left against what each statement is owed")
+    s.eq(s.colour(".sheet.show .mv.short"), s.token("--amber"), "a verdict that leaves the statement owed")
     s.eq(s.sum_pairs(".sheet.show .sum-rows .sum-row"), [
         [f"批次 {span_label(s.back(12), s.back(11))}", "4 程 · $1780›"], ["Ref", "DEMO-REF-0004"], ["備註", "SUPPLIERPAY"]], "rows")
     s.tap(".sheet.show .sum-row.link")
@@ -5147,8 +5193,32 @@ def settle_credit_sheets(s: Session) -> None:
     # The group one transfer pays, offered as one row on the credit's own sheet.
     s.open_credit("group")
     s.eq(s.texts(".sheet.show .hero > div"), ["到帳", "$2870", "未對"], "hero of an unmatched credit")
-    s.eq(s.texts(".sheet.show .prow")[0], f"2 個批次 · {group} · $2870啱數對晒", "the group row")
-    s.eq(s.count(".sheet.show .prow .ptag"), 1, "啱數 tags: the group's, not its batches' own")
+    rows = s.page.evaluate(MATCH_JS, ".sheet.show .mrow")
+    s.eq(rows[0], [["銀行入", "$2,870.00"], ["2 張結算共", "$2,870.00"], group, "啱數", "確認啱數"], "the group row")
+    # A statement of the group takes only its own part: the rest stays on the credit.
+    s.eq(rows[1], [["銀行入", "$2,870.00"], [s.named("ahead"), "$1,425.00"], "", "多 $1,445.00", "確認收到，入數剩 $1,445.00"],
+         "one statement of the group on its own")
+    s.eq(s.count(".sheet.show .mrow .ptag"), 1, "啱數 blocks: the group's, not its statements' own")
+    s.eq(s.colour(".sheet.show .mv.over"), s.token("--blue"), "a verdict that leaves money on the credit")
+    s.close_sheets()
+    # A statement waiting for its transfer says so when money agreeing with it is in.
+    s.open_batch("awaiting")
+    s.eq(s.texts(".sheet.show .prop-head"), ["入數到咗"], "the heading over the credit that arrived")
+    s.eq(s.page.evaluate(MATCH_JS, ".sheet.show .mrow"), [
+        [[f"銀行入 {md_slash(s.back(14))}", "$1,270.00"], [s.named("awaiting"), "$1,270.00"], "", "啱數", "確認啱數"]],
+         "the credit against the statement, and no credit dated far from it")
+    above = s.page.evaluate("""() => {
+      const seen = e => e.getClientRects().length > 0;
+      const key = [...document.querySelectorAll('.sheet.show .pbtn')].find(seen);
+      const fold = [...document.querySelectorAll('.sheet.show .fold')].find(seen);
+      return key.getBoundingClientRect().bottom <= fold.getBoundingClientRect().top;
+    }""")
+    s.expect(above, "the confirm is not above the fold of legs")
+    s.close_sheets()
+    # One with no money near it says nothing about credits.
+    s.open_batch("paid")
+    s.eq((s.count(".sheet.show .prop-head", has_text="入數到咗"), s.count(".sheet.show .pbtn")), (0, 0),
+         "a statement with nothing to confirm")
     s.close_sheets()
     # A credit paid into a batch that is still short, reached from that batch.
     s.open_batch("short", ".sheet.show .up-sec")
@@ -5165,24 +5235,28 @@ def settle_allocate(s: Session) -> None:
     b, c = s.t["batch"], s.t["credit"]
     s.tap(".foot [data-credits]")
     s.press(f'.sheet.show .pbtn[data-alloc-credit="{c["exact"]}"]')
-    s.wait_toast("已對 $1270 · 批次收齊")
+    s.wait_toast(s.named("awaiting") + " 已收齊")
     s.eq(s.writes[-1], ("POST", f"/api/credits/{c['exact']}/allocate", json.dumps({"settlement_id": b["awaiting"]}, separators=(",", ":"))),
          "allocate write")
     s.settle()
     # The queue stays, without the credit that was put away.
-    s.eq(s.title(), "入數未對", "the sheet after 對")
+    s.eq(s.title(), "入數未對", "the sheet after the confirm")
     s.eq(s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => e.dataset.credit)"),
-         [str(c["partial"]), str(c["group"])], "queue rows after 對")
+         [str(c["group"]), str(c["partial"])], "queue rows after the confirm")
+    s.eq(s.sub(), "接送 · 2 筆 $3170", "what still waits")
     s.close_sheets()
-    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the foot after 對")
+    s.eq(s.queue_text(), "入數啱數 1 筆$2,870.00", "the foot after the confirm")
     s.reach(s.cell(19))
     s.eq((s.cell_state(19), s.cell_state(18)), (("received", "900"), ("received", "390")), "the days of the batch just paid")
     seen = len(s.toasts())
     # From the short-paid batch's own sheet, with money that does not cover it.
     s.open_batch("short")
     s.eq(s.text(".sheet.show .prop-head"), "等緊補數 · 差 $380", "what the batch is waiting for")
-    s.press(".sheet.show .pbtn", has_text="對 $300（差 $80）")
-    s.wait_toast("已對 $300 · 仲差 $80", since=seen)
+    s.expect([[f"銀行入 {md_slash(s.back(7))} 剩", "$300.00"], [s.named("short") + " 仲差", "$380.00"], "", "少 $80.00",
+              "確認收到 $300.00（仲差 $80.00）"] in s.page.evaluate(MATCH_JS, ".sheet.show .mrow"),
+             "a make-up payment is not set against what the statement is still owed")
+    s.press(".sheet.show .pbtn", has_text="確認收到 $300.00（仲差 $80.00）")
+    s.wait_toast("已收 $300.00，仲差 $80.00", since=seen)
     s.eq(s.writes[-1], ("POST", f"/api/credits/{c['partial']}/allocate", json.dumps({"settlement_id": b["short"]}, separators=(",", ":"))),
          "allocate write from the batch")
     s.settle()
@@ -5196,12 +5270,12 @@ def settle_allocate_all(s: Session) -> None:
     b, c = s.t["batch"], s.t["credit"]
     s.open_credit("group")
     s.press(".sheet.show .pbtn[data-alloc-all]")
-    s.wait_toast("已對 2 個批次 · $2870 · 收齊")
+    s.wait_toast("2 張結算 已收齊")
     s.eq(s.writes[-1], ("POST", f"/api/credits/{c['group']}/allocate-all",
                         json.dumps({"settlement_ids": [b["ahead"], b["group"]]}, separators=(",", ":"))), "allocate-all write")
     s.settle()
-    s.eq(s.texts(".sheet.show .hero > div")[2], "已對", "the credit after 對晒")
-    s.eq(s.count(".sheet.show .prow"), 0, "proposals on a matched credit")
+    s.eq(s.texts(".sheet.show .hero > div")[2], "已對", "the credit after the group's confirm")
+    s.eq(s.count(".sheet.show .mrow"), 0, "proposals on a matched credit")
     s.eq(len(s.texts(".sheet.show .sum-row.link")), 2, "the batches it paid")
     s.close_sheets()
     s.reach(s.cell(9))
@@ -5209,6 +5283,53 @@ def settle_allocate_all(s: Session) -> None:
     # transfer has paid for.
     s.eq([s.cell_state(n)[0] for n in (9, 8, 6, 5)], ["received"] * 3 + ["unsettled"], "the days of both batches")
     s.eq(len(s.writes), 1, "writes")
+
+
+@check("settle.queue-leads-with-what-can-be-confirmed", backlog=True)
+def settle_queue_backlog(s: Session) -> None:
+    """A ledger holding dozens of old credits no statement will account for,
+    and a few that have an answer: the foot says there is something to
+    confirm, the queue opens on it, and the old ones are still counted."""
+    old = seed_demo_db.BACKLOG
+    c = s.t["credit"]
+    for width in PHONE_WIDTHS:
+        s.viewport = {"width": width, "height": 844}
+        s.open_settle()
+        ledger = s.api("GET", CREDITS)
+        waiting = [x for x in ledger["credits"] if x["state"] in ("open", "partial")]
+        s.eq(len(waiting), old + 3, "credits waiting")
+        s.eq(s.queue_text(), "入數啱數 2 筆$4,140.00", f"the foot at {width}")
+        foot_holds(s, len(s.totals()), f"with a backlog at {width}")
+        s.tap(".foot [data-credits]")
+        s.eq((s.title(), s.sub()), ("入數未對", f"接送 · {old + 3} 筆 ${fmt(ledger['sums']['open'])}"), "the queue counts every credit")
+        s.eq(s.texts(".sheet.show .prop-head"), ["有結算對得上 · 2 筆", f"未有結算對得上 · {old + 1} 筆"], "the two parts")
+        rows = s.page.eval_on_selector_all(".sheet.show .qrow", "els => els.map(e => +e.dataset.credit)")
+        s.eq(rows[:2], [c["group"], c["exact"]], "the credits with an answer lead, newest first")
+        s.eq(rows[2:], [x["id"] for x in waiting if x["id"] not in (c["group"], c["exact"])], "the rest, oldest first")
+        # Both confirms are on screen as the sheet opens, with nothing to scroll past.
+        seen = s.page.evaluate("""() => [...document.querySelectorAll('.sheet.show .qitem .pbtn')].map(k => {
+          const r = k.getBoundingClientRect(), sheet = k.closest('.sheet').getBoundingClientRect();
+          return [k.closest('.sheet').scrollTop, r.top >= sheet.top && r.bottom <= window.innerHeight, r.height >= 44,
+                  k.closest('.sheet').scrollWidth <= k.closest('.sheet').clientWidth];
+        })""")
+        s.eq(seen, [[0, True, True, True]] * 2, f"the confirms at {width}: at rest, on screen, a thumb tall, no sideways scroll")
+        s.close_sheets()
+        if width != PHONE_WIDTHS[-1]:
+            s.page.close()
+    s.tap(".foot [data-credits]")
+    s.press(f'.sheet.show .pbtn[data-alloc-credit="{c["exact"]}"]')
+    s.wait_toast(s.named("awaiting") + " 已收齊")
+    s.settle()
+    s.eq(s.texts(".sheet.show .prop-head"), ["有結算對得上 · 1 筆", f"未有結算對得上 · {old + 1} 筆"], "the parts after a confirm")
+    s.press(".sheet.show .pbtn[data-alloc-all]")
+    s.wait_toast("2 張結算 已收齊")
+    s.settle()
+    # Nothing left to confirm: the part is not drawn, and the foot counts the backlog again.
+    s.eq(s.texts(".sheet.show .prop-head"), [f"未有結算對得上 · {old + 1} 筆"], "the queue with no answer left")
+    s.close_sheets()
+    left = s.api("GET", CREDITS)["sums"]["open"]
+    s.eq(s.queue_text(), f"入數未對 {old + 1} 筆{money2(left)}", "the foot with no answer left")
+    s.eq(len(s.writes), 2, "writes")
 
 
 @check("settle.unlink")
@@ -5231,7 +5352,11 @@ def settle_unlink(s: Session) -> None:
     s.eq(s.texts(".sheet.show .hero > div")[2], "等過數", "the batch with its money taken back")
     s.eq(s.count(".sheet.show .xbtn"), 0, "allocations left on the batch")
     s.close_sheets()
-    s.eq(s.queue_text(), "入數未對 3 筆$6,220.00", "the foot after 解除")
+    # The money is back among the credits that wait; the foot still counts
+    # the ones with an answer.
+    s.eq(s.queue_text(), "入數啱數 2 筆$4,140.00", "the foot after 解除")
+    s.tap(".foot [data-credits]")
+    s.eq(s.sub(), "接送 · 3 筆 $6220", "the queue after 解除")
     s.eq(len(s.writes), 1, "writes")
 
 
@@ -5305,7 +5430,7 @@ def settle_refused(s: Session) -> None:
                                   ("**/api/settlements/*/unpaid", "POST", "拒絕記低")):
         s.refuse(method, glob, message)
     s.tap(".foot [data-credits]")
-    s.press(".sheet.show .qprop .pbtn", has_text="對")
+    s.press(".sheet.show .qitem .pbtn[data-alloc-credit]")
     s.wait_toast("拒絕對")
     s.press(".sheet.show .pbtn[data-alloc-all]")
     s.wait_toast("拒絕對晒")
@@ -5642,7 +5767,7 @@ def settle_sheet_actions(s: Session) -> None:
     s.open_credit("group")
     tag = box(".sheet.show .ptag")
     s.eq((tag["bg"], tag["ink"]), (green, solid), "啱數 is a solid green block")
-    s.expect(box(".sheet.show .pbtn")["h"] >= 44, "對晒 under 44px")
+    s.expect(box(".sheet.show .pbtn")["h"] >= 44, "the group's key under 44px")
     s.eq(s.colour(".sheet.show .hero-s"), blue, "an unmatched credit's state line")
     s.expect("B612 Mono" in s.colour(".sheet.show .hero-v", "fontFamily"), "the headline figure is not in the figure face")
     s.expect("B612 Mono" in s.colour(".sheet.show .sum-row .v .num", "fontFamily"), "the reference is not in the figure face")
@@ -5652,7 +5777,7 @@ def settle_sheet_actions(s: Session) -> None:
     # A batch paid short: the long key, the small one, the ticks' foot.
     s.open_batch("short", ".sheet.show .up-sec")
     s.eq(s.colour(".sheet.show .hero-s"), amber, "a short-paid batch's state line")
-    long = s.on(".sheet.show .pbtn", has_text="對 $300（差 $80）").first
+    long = s.on(".sheet.show .pbtn", has_text="確認收到 $300.00（仲差 $80.00）").first
     s.expect(long.bounding_box()["height"] >= 44, "the long key under 44px")
     hit = s.page.evaluate("""() => {
       const seen = e => e.getClientRects().length > 0;
@@ -5807,7 +5932,7 @@ def settle_live(s: Session) -> None:
     s.wait(lambda: s.cell_state(19)[0] == "received", "the day to follow a change made elsewhere")
     s.settle()
     s.eq((s.scroll_y(), s.top_week()), (at, top), "the strip's position after a live update")
-    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the foot after a live update")
+    s.eq(s.queue_text(), "入數啱數 1 筆$2,870.00", "the foot after a live update")
     # An open sheet follows too.
     s.open_batch("awaiting")
     s.eq(s.texts(".sheet.show .hero > div")[2], "已收齊 · " + md_slash(s.back(14)), "the batch, collected")
@@ -5905,7 +6030,7 @@ def settle_auth_expired(s: Session) -> None:
     expired(("POST", "PATCH", "DELETE"), "**/api/**")
     s.tap(".foot [data-credits]")
     sent = len(s.writes)
-    s.press(".sheet.show .qprop .pbtn", has_text="對")
+    s.press(".sheet.show .qitem .pbtn[data-alloc-credit]")
     s.wait(lambda: len(s.writes) > sent, "the allocate write")
     s.never(s.toast, "a toast for an expired login (對)", ms=quiet)
     s.press(".sheet.show .pbtn[data-alloc-all]")
@@ -6080,7 +6205,7 @@ def views_hidden_settle(s: Session) -> None:
     s.eq(s.changes("view-settle"), [], "changes to the hidden settle view")
     s.go_settle()
     s.eq(s.cell_state(19)[0], "received", "the batch paid while the view was hidden")
-    s.eq(s.queue_text(), "入數未對 2 筆$3,170.00", "the credit matched while the view was hidden")
+    s.eq(s.queue_text(), "入數啱數 1 筆$2,870.00", "the credit matched while the view was hidden")
     s.eq(s.strip_problems(), [], "the strip's cells")
     # The row is laid out exactly as a page that never left would lay it out.
     drawn = s.page.eval_on_selector("#" + row, "e => e.innerHTML")
@@ -7344,7 +7469,7 @@ TYPE_SHRUNK = ".lkey .v, .fkey .v, .cell .amt"
 TYPE_JS = """
 ([floor, small, shrunk]) => {
   const columns = '.cell, .lkey, .fkey, .cols > *, .row > *, .now, .foot-in > *, .ft, .fnote, .brow > *, .orow > *, ' +
-    '.field-row, .info-row, .sum-row, .pp-opt, .key, .numpad-display, .numpad-hint, .qrow, .prow, .qprop, .blink, ' +
+    '.field-row, .info-row, .sum-row, .pp-opt, .key, .numpad-display, .numpad-hint, .qrow, .mf, .ma, .blink, ' +
     '.hero, .fold, .alloc, .up-foot, .up-chips, .header-row > *, .sheet, .drop, .slist, .orders, .foot-in';
   const cs = e => getComputedStyle(e);
   const px = v => parseFloat(v) || 0;
@@ -7592,7 +7717,7 @@ def run(playwright, browser, chk: dict, today: date, ports: Ports = None) -> tup
         root = ROOT
         if chk["copy"]:
             root = copy_app(stack.enter_context(tempfile.TemporaryDirectory(prefix="ride-app-")))
-        server = Server(today, root, ports)
+        server = Server(today, root, ports, backlog=chk["backlog"])
         url = stack.enter_context(server)
         if chk["clock"] == "installed":
             ctx = browser.new_context(**playwright.devices[DEVICE], color_scheme="dark",

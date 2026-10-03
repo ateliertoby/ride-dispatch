@@ -47,7 +47,8 @@ from .db import (
     update_price,
     DIFF_LABELS,
 )
-from .credits import CENT, guess_unpaid, offer, propose_batch, propose_credit
+from .credits import (CENT, anchor, guess_unpaid, in_window, offer, propose_batch,
+                      propose_credit)
 from .flight import depart_hhmm, exit_urgency, normalize_flight_no, row_time
 from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PICKUP_POINTS
 from .pricing import suggest_price
@@ -494,8 +495,12 @@ def _batch_proposals(batch: dict) -> list[dict]:
     if batch["outstanding"] <= CENT:
         return []
     m = propose_batch(DB_PATH, batch["id"])
+    # `near` says the dates agree, by the matcher's own window: a credit
+    # outside it is a candidate only because nothing rules it out, and a batch
+    # still waiting for its transfer does not announce one as its money.
     return [{"id": c["id"], "amount": c["amount"], "value_date": c["value_date"],
-             "remaining": c["remaining"], "exact": c["id"] in m.exact}
+             "remaining": c["remaining"], "exact": c["id"] in m.exact,
+             "near": in_window(anchor(batch), c["value_date"])}
             for c in offer(m, unallocated_credits(DB_PATH, batch["platform"]))]
 
 
@@ -507,10 +512,13 @@ def _credit_proposals(credit: dict, platform: str) -> tuple[list[dict], dict | N
     can take with one tap; its batches stay offered one by one as well.
     """
     m = propose_credit(DB_PATH, credit["id"])
+    # `due_dates` and `settled_on` are what a statement is named by, so a batch
+    # offered here is named as the month's payload and the ledger name it.
     proposals = [{"id": b["id"], "outstanding": b["outstanding"],
                   "confirmed_amount": b["confirmed_amount"],
                   "dates": sorted({(o["scheduled_time"] or "")[:10] for o in b["orders"]}),
-                  "orders": len(b["orders"]), "exact": b["id"] in m.exact}
+                  "orders": len(b["orders"]), "exact": b["id"] in m.exact,
+                  "due_dates": b["due_dates"], "settled_on": b["settled_on"]}
                  for b in offer(m, open_batches(DB_PATH, platform))]
     combo = None
     if m.reason == "subset" and len(m.exact) > 1:

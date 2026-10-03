@@ -229,17 +229,19 @@ class Server:
     the database, which is what a deploy does.
     """
 
-    def __init__(self, today: date, app_root: str = ROOT, ports: Ports = None):
+    def __init__(self, today: date, app_root: str = ROOT, ports: Ports = None,
+                 backlog: bool = False):
         self.today = today
         self.app_root = app_root
         self.ports = ports
+        self.backlog = backlog      # the seed with its old unmatched credits
         self.proc = None
 
     def __enter__(self) -> str:
         self.dir = tempfile.TemporaryDirectory(prefix="ride-shots-")
         self.db_path = os.path.join(self.dir.name, "demo.db")
         began = time.monotonic()
-        seed_demo_db.seed(self.db_path, self.today)
+        seed_demo_db.seed(self.db_path, self.today, backlog=self.backlog)
         self.seed_s = time.monotonic() - began
         self.port = self.ports.next() if self.ports else free_port()
         self.url = f"http://127.0.0.1:{self.port}"
@@ -502,9 +504,14 @@ def stress_settle(body: dict, today: date) -> None:
 
 def stress_credits(body: dict, today: date) -> None:
     """Rewrite the answer from /api/credits to match: five more unmatched
-    credits with seven-figure amounts, and today's credit paid into three
-    batches."""
+    credits with seven-figure amounts, none of the unmatched offered against
+    anything, and today's credit paid into three batches."""
     like = next(c for c in body["credits"] if c["id"] == seed_demo_db.CREDIT["exact"])
+    # Nothing is offered against any of them, so the foot counts every one
+    # and its figure is the long one.
+    for c in body["credits"]:
+        if c["state"] in ("open", "partial"):
+            c.update(proposals=[], combo=None)
     for i in range(5):
         body["credits"].append(dict(like, id=901 + i, ref=f"DEMO-REF-09{i}", amount=LONG_AMOUNT - i,
                                     remaining=LONG_AMOUNT - i, proposals=[], batches=[], combo=None,
@@ -597,12 +604,16 @@ def foot_earlier(body: dict, amount: float, month) -> None:
 
 
 def foot_credits(body: dict, n: int, total: float) -> None:
-    """Rewrite the answer from /api/credits so that `n` credits are unmatched,
-    `total` between them. Those the seed left unmatched beyond `n` are made
-    matched ones; any still wanted are copies of one of them."""
+    """Rewrite the answer from /api/credits so that `n` credits are unmatched
+    with nothing offered against them, `total` between them. Those the seed
+    left unmatched beyond `n` are made matched ones; any still wanted are
+    copies of one of them."""
     waiting = [c for c in body["credits"] if c["state"] in ("open", "partial")]
     for c in waiting[n:]:
         c.update(state="done", remaining=0.0)
+    # None of them has an answer, so the foot counts them all as unmatched.
+    for c in waiting[:n]:
+        c.update(proposals=[], combo=None)
     for i in range(len(waiting), n):
         body["credits"].append(dict(waiting[0], id=950 + i, ref=f"DEMO-REF-095{i}", proposals=[],
                                     batches=[], combo=None))

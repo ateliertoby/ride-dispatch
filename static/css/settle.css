@@ -336,6 +336,13 @@
      colour. */
   .foot .fkey:is(.short, .prior) .v { color: var(--amber); }
   .foot .fkey.open .v { color: var(--blue); }
+  /* 啱數 in the credits' label: agreement to the cent, as the same block
+     says it in a sheet. No taller than the label's line. */
+  .fmark {
+    display: inline-block; margin: 0 1px 0 3px; padding: 0 3px; border-radius: 2px;
+    background: var(--green); color: var(--on-solid);
+    font-weight: 700; line-height: 14px; letter-spacing: 0;
+  }
   .foot .fkey.unknown .v { color: var(--text-2); }
   /* With no item, one plain line: not a cell and not a control. Green only
      where it says everything is in order; a month still loading shows a
@@ -569,29 +576,36 @@
   /* A credit put away is finished business, not bank money waiting to be
      matched, so its word is not in that money's colour. */
   .qrow .s.off { color: var(--text-2); font-weight: 400; }
-  /* A queue row whose match is unambiguous answers itself, so the answer and
-     the tap that takes it hang under the row, not inside its control. */
-  .qitem { border-bottom: 1px solid var(--line); }
-  .qitem .qrow { border-bottom: none; padding-bottom: 6px; min-height: 44px; }
-  .qprop {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 0 0 8px;
-    font-size: 13px; line-height: 1.35;
-  }
-  .qprop .t { flex: 1 1 0; min-width: 8em; color: var(--text-2); overflow-wrap: anywhere; }
+  /* A queue item whose match is not in question answers itself: the bank's
+     line is the row that opens the credit, and the statement's line, the
+     verdict and the key hang under it, inside one pair of hairlines. */
+  .qitem { border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  .qitem .qrow { border-bottom: none; min-height: 44px; padding: 12px 0 2px; }
 
-  /* ---- proposals ----
-     What the matcher believes could pay what is owed, in either direction. A
-     row states the other side and carries the one tap that would take it; the
-     belief leads without acting on itself, the way the chat card's buttons
-     do. The text gives way and wraps; the key says in full what a tap would
-     do and keeps its line where the row has room for both. */
-  .prow {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
-    border-bottom: 1px solid var(--line); padding: 6px 0;
-    font-size: 14px; line-height: 1.35;
+  /* ---- a credit against a statement ----
+     What the matcher believes could pay what is owed, in either direction,
+     drawn as the comparison the tap is made on: what the bank paid in over
+     what the statement is owed, label left and figure right, so the two
+     figures stand one over the other in the figure face and are compared
+     digit by digit. Under them the verdict and the key. The belief leads
+     without acting on itself. */
+  .mrow { border-bottom: 1px solid var(--line); padding: 9px 0 8px; }
+  .mf {
+    display: flex; align-items: baseline; gap: 12px; padding: 2px 0;
+    font-size: 15px; line-height: 1.35;
   }
-  .prow .t { flex: 1 1 0; min-width: 8em; overflow-wrap: anywhere; }
+  .mf .k { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+  .mf .v { flex-shrink: 0; white-space: nowrap; font-weight: 700; color: var(--text); }
+  /* In the queue the bank's line ends in the mark of a row that opens, so
+     the statement's line keeps the same room free and the figures stay one
+     over the other. */
+  .qitem .mf .c { flex: 0 0 10px; text-align: right; }
+  .qitem > .mf, .qitem > .mn, .qitem > .ma { padding-right: 22px; }
+  .qitem > .ma { padding-right: 0; }
+  /* The statements a group is made of, under the line that sums them. */
+  .mn { font-size: 12px; line-height: 1.35; color: var(--text-3); padding: 0 0 2px; }
   .pt { display: inline-block; }
+  .ma { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding-top: 6px; }
   /* Agreement to the cent is a finished fact: a solid block, as a landed
      flight is on the board. */
   .ptag {
@@ -599,9 +613,18 @@
     background: var(--green); color: var(--on-solid);
     font-size: 12px; font-weight: 700; line-height: 1.35; letter-spacing: .04em;
   }
-  /* The tap that moves money: an outlined key, tall enough for a thumb. */
+  /* Any other verdict is text in the colour of what the tap would leave:
+     short leaves the statement owed, over leaves bank money unmatched, and
+     the same amount on distant dates is no state at all. */
+  .mv { font-size: 13px; line-height: 1.35; font-weight: 600; color: var(--text-2); }
+  .mv.short { color: var(--amber); }
+  .mv.over { color: var(--blue); }
+  /* The tap that moves money: an outlined key, tall enough for a thumb, that
+     says in full what it records. It keeps its line beside the verdict where
+     there is room for both and takes the next one where there is not; a
+     label longer than the sheet breaks between its parts, never in a figure. */
   .pbtn {
-    flex-shrink: 0; margin-left: auto; min-width: 56px; min-height: 44px; padding: 0 14px;
+    flex: 0 1 auto; margin-left: auto; min-width: 56px; min-height: 44px; padding: 4px 14px;
     background: none; border: 1px solid var(--text-3); border-radius: 3px; cursor: pointer;
     font-size: 14px; line-height: 1.35; font-weight: 600; color: var(--text);
   }

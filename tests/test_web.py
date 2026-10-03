@@ -1101,7 +1101,19 @@ def test_settle_proposes_the_credit_that_could_close_a_short_batch(client):
     batch = settle(client)["settlements"][0]
     assert batch["state"] == "partial" and batch["outstanding"] == 510.0
     assert batch["proposals"] == [{"id": later, "amount": 510.0, "value_date": "2026-07-27",
-                                   "remaining": 510.0, "exact": True}]
+                                   "remaining": 510.0, "exact": True, "near": True}]
+
+
+def test_a_batchs_proposals_say_whether_the_dates_agree(client):
+    """An amount that agrees on a date far from the confirmation is offered,
+    and marked as not near: the page does not announce it as the batch's money."""
+    seed_ride("R1")
+    create_batch(["R1"], confirmed=540, settled_on="2026-07-03")
+    short = seed_credit(amount=500.0, value_date="2026-07-05", ref="C1")
+    far = seed_credit(amount=540.0, value_date="2026-07-30", ref="C2")
+    proposals = {p["id"]: p for p in settle(client)["settlements"][0]["proposals"]}
+    assert (proposals[short]["near"], proposals[short]["exact"]) == (True, False)
+    assert (proposals[far]["near"], proposals[far]["exact"]) == (False, False)
 
 
 def test_settle_carries_no_proposals_once_a_batch_is_whole(client):
@@ -1125,9 +1137,25 @@ def test_credits_carry_the_batches_they_could_pay(client):
     by_id = {c["id"]: c for c in client.get("/api/credits").get_json()["credits"]}
     assert by_id[later]["proposals"] == [{
         "id": sid, "outstanding": 510.0, "confirmed_amount": 3460.0,
-        "dates": ["2026-07-20", "2026-07-21", "2026-07-22"], "orders": 14, "exact": True}]
+        "dates": ["2026-07-20", "2026-07-21", "2026-07-22"], "orders": 14, "exact": True,
+        "due_dates": [], "settled_on": "2026-07-23"}]
     # A spent credit and an archived one have nothing left to offer.
     assert by_id[first]["proposals"] == [] and by_id[gone]["proposals"] == []
+
+
+def test_a_credits_proposals_carry_what_their_statements_are_named_by(client):
+    """The same due dates the month's payload and the ledger give a batch."""
+    seed_ride("R1", banner=0.0)
+    stored = {"account": "T", "total": 500.0, "reader": "test", "days": [
+        {"date": "2026-07-01", "count": 1, "sum": 500.0, "rows": [
+            {"date": "2026-07-01", "order_id": "R1", "amount": 500.0, "time": "09:00",
+             "settle_date": "2026-07-04", "truncated": False}]}]}
+    create_batch(["R1"], confirmed=500, settled_on="2026-07-03", statement=stored)
+    seed_credit(amount=500.0, value_date="2026-07-05")
+    proposal = client.get("/api/credits").get_json()["credits"][0]["proposals"][0]
+    batch = settle(client)["settlements"][0]
+    assert proposal["due_dates"] == batch["due_dates"] == ["2026-07-04"]
+    assert proposal["settled_on"] == batch["settled_on"] == "2026-07-03"
 
 
 def seed_group(amount=1050.0):

@@ -93,6 +93,73 @@ export function statementName(batch, sameNameIndex = 0) {
     (sameNameIndex > 0 ? ' (' + (sameNameIndex + 1) + ')' : '');
 }
 
+// An amount as it is written beside another to be compared with it: the $,
+// the thousands comma and the cents, always.
+export function moneyText(amount) {
+  const f = keyFigure(amount);
+  return f.dollars + '.' + f.cents;
+}
+
+// What putting a credit against a statement comes to, said before the tap.
+// `left` is what the credit still has and `owed` what the statement is still
+// owed; a tap moves the smaller of the two. The step exists because the
+// bank's figure can differ from the statement's, so the answer is a verdict
+// on the two figures and a button that says what the tap records:
+//
+//   agree  the two are the same to the cent and the matcher believes the
+//          pair (`believed`: the dates agree as well)
+//   same   the same to the cent on dates too far apart to be believed
+//   short  the credit is smaller: the statement stays owed the difference
+//   over   the credit is larger: the difference stays on the credit
+//
+// `button` is in parts, so a line too short for it breaks between two parts
+// and never inside a figure.
+export function matchWording(left, owed, believed) {
+  const gap = cents(owed) - cents(left);
+  if (!gap) {
+    return believed
+      ? { kind: 'agree', verdict: '啱數', button: ['確認啱數'] }
+      : { kind: 'same', verdict: '銀碼一樣，日期隔得遠', button: ['確認啱數'] };
+  }
+  const by = moneyText(Math.abs(gap) / 100);
+  return gap > 0
+    ? { kind: 'short', verdict: '少 ' + by, button: ['確認收到 ' + moneyText(left), '（仲差 ' + by + '）'] }
+    : { kind: 'over', verdict: '多 ' + by, button: ['確認收到，', '入數剩 ' + by] };
+}
+
+// What the page says once the tap has been recorded, in the same words.
+// `batch` is the statement as the server answered it, `left` what the credit
+// has afterwards and `put` what the tap moved.
+export function confirmedText(name, batch, put, left) {
+  if (batch.state !== 'paid') return '已收 ' + moneyText(put) + '，仲差 ' + moneyText(batch.outstanding);
+  return name + ' 已收齊' + (cents(left) > 0 ? '，入數剩 ' + moneyText(left) : '');
+}
+
+// The one answer a credit has, when it has one and no other: the group one
+// transfer pays whole ({ group }), or the single statement that agrees with it
+// to the cent on dates the matcher believes ({ proposal }). null when nothing
+// agrees or more than one statement does, which is a question, not an answer.
+export function sureMatch(credit) {
+  if (credit.combo) return { group: credit.combo };
+  const exact = (credit.proposals || []).filter(p => p.exact);
+  return exact.length === 1 ? { proposal: exact[0] } : null;
+}
+
+// The credits still waiting, in the two parts their queue shows them in:
+// `matched`, those with one sure answer, newest first, because the newest is
+// the one a notice has just announced; and `rest`, in the order given, which
+// is oldest first. `credits` are the open ones, as the ledger lists them.
+export function queueSections(credits) {
+  const matched = credits.filter(c => sureMatch(c)).sort((a, z) =>
+    z.value_date.localeCompare(a.value_date) || z.id - a.id);
+  return { matched, rest: credits.filter(c => !sureMatch(c)) };
+}
+
+// What the credits in a list still hold between them, added in whole cents.
+export function leftSum(credits) {
+  return credits.reduce((sum, c) => sum + cents(c.remaining), 0) / 100;
+}
+
 // Collected statements in the order their list shows them. One still owed
 // money leads, since it is the one needing action; the rest are records,
 // newest first by the date they are named by: the latest due date a

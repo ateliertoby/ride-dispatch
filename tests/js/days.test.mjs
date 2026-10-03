@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   dayState, cellFigure, keyFigure, statementName, dayRunsLabel, countedDay, inMonthPart, fareGap,
-  otherLines, figureScale, fitLine, waitedDays, collectedOrder,
+  otherLines, figureScale, fitLine, waitedDays, collectedOrder, moneyText, matchWording,
+  confirmedText, sureMatch, queueSections, leftSum,
 } from '../../static/js/settle/days.js';
 
 // Every order here is invented. A 接机 is worth price + banner_fee - penalty_fee.
@@ -551,4 +552,91 @@ test('figureScale fits each cell to its own share when the cells share the room 
 test('figureScale says when the labels alone are too long', () => {
   assert.equal(figureScale(300, row([[20, 100, 50], [20, 100, 50], [20, 100, 50]]), false), null);
   assert.equal(figureScale(300, row([[23, 130, 77], [24, 88, 77]]), true), null);
+});
+
+// ---- a credit against a statement ----
+
+test('moneyText always writes the cents and the thousands comma', () => {
+  assert.equal(moneyText(210), '$210.00');
+  assert.equal(moneyText(2950), '$2,950.00');
+  assert.equal(moneyText(1234567.89), '$1,234,567.89');
+  assert.equal(moneyText(0.1 + 0.2), '$0.30');
+});
+
+test('matchWording: the two figures agree and the matcher believes the pair', () => {
+  assert.deepEqual(matchWording(210, 210, true),
+    { kind: 'agree', verdict: '啱數', button: ['確認啱數'] });
+});
+
+test('matchWording: the same amount on dates too far apart is not called a match', () => {
+  const w = matchWording(210, 210, false);
+  assert.equal(w.kind, 'same');
+  assert.notEqual(w.verdict, '啱數');
+  assert.deepEqual(w.button, ['確認啱數']);
+});
+
+test('matchWording: a credit smaller than what the statement is owed', () => {
+  assert.deepEqual(matchWording(2950, 3460, false),
+    { kind: 'short', verdict: '少 $510.00', button: ['確認收到 $2,950.00', '（仲差 $510.00）'] });
+  // Believed or not, the figures decide.
+  assert.equal(matchWording(2950, 3460, true).kind, 'short');
+});
+
+test('matchWording: a credit larger than what the statement is owed', () => {
+  assert.deepEqual(matchWording(2870, 1425, true),
+    { kind: 'over', verdict: '多 $1,445.00', button: ['確認收到，', '入數剩 $1,445.00'] });
+});
+
+test('matchWording compares in whole cents', () => {
+  assert.equal(matchWording(0.1 + 0.2, 0.3, true).kind, 'agree');
+  assert.equal(matchWording(100.01, 100, true).verdict, '多 $0.01');
+  assert.equal(matchWording(100, 100.01, true).verdict, '少 $0.01');
+});
+
+test('confirmedText says what the tap recorded', () => {
+  assert.equal(confirmedText('10/1 結算', { state: 'paid', outstanding: 0 }, 210, 0), '10/1 結算 已收齊');
+  assert.equal(confirmedText('10/1 結算', { state: 'paid', outstanding: 0 }, 1425, 1445),
+    '10/1 結算 已收齊，入數剩 $1,445.00');
+  assert.equal(confirmedText('10/1 結算', { state: 'partial', outstanding: 510 }, 2950, 0),
+    '已收 $2,950.00，仲差 $510.00');
+});
+
+// Credits as the ledger carries them: oldest first, each with what it could pay.
+const OLD = { id: 1, value_date: '2026-05-02', remaining: 800, proposals: [], combo: null };
+const OLDER_MATCH = { id: 2, value_date: '2026-09-20', remaining: 1270, combo: null,
+                      proposals: [{ id: 7, exact: true }, { id: 8, exact: false }] };
+const TWO_AGREE = { id: 3, value_date: '2026-09-25', remaining: 500, combo: null,
+                    proposals: [{ id: 9, exact: true }, { id: 10, exact: true }] };
+const SHORT_ONLY = { id: 4, value_date: '2026-09-28', remaining: 300, combo: null,
+                     proposals: [{ id: 11, exact: false }] };
+const GROUP = { id: 5, value_date: '2026-10-01', remaining: 2870, combo: { ids: [12, 13], total: 2870 },
+                proposals: [{ id: 12, exact: true }, { id: 13, exact: true }] };
+const NEW_MATCH = { id: 6, value_date: '2026-10-01', remaining: 210, combo: null,
+                    proposals: [{ id: 14, exact: true }] };
+
+test('sureMatch is one statement that agrees, or the group, and nothing less certain', () => {
+  assert.equal(sureMatch(OLD), null);
+  assert.deepEqual(sureMatch(OLDER_MATCH), { proposal: { id: 7, exact: true } });
+  assert.equal(sureMatch(TWO_AGREE), null);
+  assert.equal(sureMatch(SHORT_ONLY), null);
+  assert.deepEqual(sureMatch(GROUP), { group: GROUP.combo });
+  assert.equal(sureMatch({ id: 9, value_date: '2026-10-01', remaining: 1 }), null);
+});
+
+test('queueSections: the sure ones newest first, the rest as they came', () => {
+  const all = [OLD, OLDER_MATCH, TWO_AGREE, SHORT_ONLY, GROUP, NEW_MATCH];
+  const { matched, rest } = queueSections(all);
+  assert.deepEqual(matched.map(c => c.id), [6, 5, 2]);
+  assert.deepEqual(rest.map(c => c.id), [1, 3, 4]);
+  assert.deepEqual(all.map(c => c.id), [1, 2, 3, 4, 5, 6]);
+});
+
+test('queueSections of a backlog with nothing matched has no first part', () => {
+  assert.deepEqual(queueSections([OLD, SHORT_ONLY]), { matched: [], rest: [OLD, SHORT_ONLY] });
+});
+
+test('leftSum adds what the credits still hold in whole cents', () => {
+  assert.equal(leftSum([]), 0);
+  assert.equal(leftSum([{ remaining: 0.1 }, { remaining: 0.2 }]), 0.3);
+  assert.equal(leftSum([GROUP, NEW_MATCH]), 3080);
 });

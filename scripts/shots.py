@@ -14,7 +14,9 @@ reference longer than a line;
 fares at each width it is laid out for, `stress-settle-…` is the settle
 view with a five-digit fare with cents in a day's cell and seven-figure
 amounts in the foot, and `stress-foot-…` is its foot with three items at
-their longest. The settle view's forms are the seed's own rows; only the
+their longest, and `backlog-…` is its foot and its queue of bank credits on
+a ledger that also holds dozens of old credits nothing accounts for (the
+seed's --backlog, served by a second server). The settle view's forms are the seed's own rows; only the
 foot with exactly one, two or three items is arranged by rewriting an
 answer, because which month holds how many depends on the date. A comparison
 prints the number of differing
@@ -455,11 +457,32 @@ def states() -> dict:
         s.credit_sheet("exact")
         s.save("settle-credit-sheet")
 
+    def settle_credit_short(s):
+        # A credit part spent: what it has left is less than any statement is owed.
+        s.credit_sheet("partial")
+        s.save("settle-credit-short")
+
+    def settle_batch_awaiting(s):
+        # A statement waiting for its transfer, with the credit that agrees with it.
+        s.batch_sheet("awaiting")
+        s.on(".sheet.show .mrow").first.wait_for()
+        s.save("settle-batch-awaiting")
+
     def settle_queue(s):
         s.settle_page()
         s.tap(".foot [data-credits]")
         s.on(".sheet.show .qrow").first.wait_for()
         s.save("settle-queue")
+
+    def backlog_foot(s):
+        s.settle_page()
+        s.save("backlog-settle")
+
+    def backlog_queue(s):
+        s.settle_page()
+        s.tap(".foot [data-credits]")
+        s.on(".sheet.show .qrow").first.wait_for()
+        s.save("backlog-queue")
 
     def settle_undo(s):
         s.batch_sheet("awaiting")
@@ -577,10 +600,13 @@ def states() -> dict:
         "settle-order-numpad": settle_order_numpad, "settle-order-cancel": settle_order_cancel,
         "settle-batch-sheet": settle_batch_sheet, "settle-batch-short": settle_batch_short,
         "settle-batch-list": settle_batch_list, "settle-batch-ahead": settle_batch_ahead,
-        "settle-credit-sheet": settle_credit_sheet, "settle-queue": settle_queue,
+        "settle-credit-sheet": settle_credit_sheet, "settle-credit-short": settle_credit_short,
+        "settle-batch-awaiting": settle_batch_awaiting, "settle-queue": settle_queue,
         "settle-undo": settle_undo, "settle-unlink": settle_unlink,
         "settle-statement": settle_statement, "settle-drop": settle_drop,
     }
+    backlog = {"backlog-settle": backlog_foot, "backlog-queue": backlog_queue}
+    wide |= backlog
     return (wide | {f"{name}-{NARROW}": narrow(fn) for name, fn in wide.items()}
             | {f"{name}-{WIDE}": wide_of(fn) for name, fn in wide.items() if name.startswith("settle")}
             | {f"stress-sheet-{w}": sheets_stressed(w) for w in (NARROW, 390)}
@@ -589,13 +615,20 @@ def states() -> dict:
             | {f"stress-foot-{w}": foot_stressed(w) for w in (NARROW, 390)})
 
 
-def shoot(base_url: str, out: str, today: date, only: str) -> None:
+BACKLOG = "backlog-"
+
+
+def wanted_states(only: str, backlog: bool) -> dict:
+    """The states whose names begin with `only`, of the plain seed or of the
+    seed with its backlog."""
+    return {name: fn for name, fn in states().items()
+            if name.startswith(only) and name.startswith(BACKLOG) == backlog}
+
+
+def shoot(base_url: str, out: str, today: date, wanted: dict) -> None:
     from playwright.sync_api import sync_playwright
     os.makedirs(out, exist_ok=True)
     targets = seed_demo_db.targets(today)
-    wanted = {name: fn for name, fn in states().items() if name.startswith(only)}
-    if not wanted:
-        raise SystemExit(f"no state begins with {only!r}")
     with sync_playwright() as p:
         browser = p.webkit.launch()
         for scheme in SCHEMES:
@@ -663,11 +696,19 @@ def main() -> None:
         sys.exit(1 if compare(args.diff[0], args.diff[1], args.only) else 0)
     if not args.out:
         ap.error("--out is required unless --diff is given")
+    plain, backlog = wanted_states(args.only, False), wanted_states(args.only, True)
+    if not plain and not backlog:
+        raise SystemExit(f"no state begins with {args.only!r}")
     if args.base_url:
-        shoot(args.base_url.rstrip("/"), args.out, args.today, args.only)
+        # One server holds one database: the states of the other seed are left out.
+        if plain:
+            shoot(args.base_url.rstrip("/"), args.out, args.today, plain)
     else:
-        with Server(args.today, os.path.abspath(args.app_root)) as url:
-            shoot(url, args.out, args.today, args.only)
+        for wanted, with_backlog in ((plain, False), (backlog, True)):
+            if not wanted:
+                continue
+            with Server(args.today, os.path.abspath(args.app_root), backlog=with_backlog) as url:
+                shoot(url, args.out, args.today, wanted)
     if args.compare:
         sys.exit(1 if compare(args.out, args.compare, args.only) else 0)
 

@@ -15,8 +15,9 @@ import { detailView, useOrderHost } from '../order-sheet.js';
 import { AuthExpired, apiFetch } from '../api.js';
 import { addDays, addMonths, dateSpanLabel, dow, groupId, mdLabel, mdSlash, monthEnd,
          monthKey, monthsBetween, round2, runsOf, tailId } from '../dates.js';
-import { cellFigure, countedDay, dayRunsLabel, dayState, fareGap, figureScale, fitLine, inMonthPart,
-         keyFigure, otherLines, statementName, waitedDays, collectedOrder } from './days.js';
+import { cellFigure, confirmedText, countedDay, dayRunsLabel, dayState, fareGap, figureScale, fitLine,
+         inMonthPart, keyFigure, leftSum, matchWording, moneyText, otherLines, queueSections,
+         statementName, sureMatch, waitedDays, collectedOrder } from './days.js';
 
 let root = null;              // the view's element, set by mount
 // The view's own elements are looked up inside its root: the other view stays
@@ -465,6 +466,15 @@ function renderHeader() {
 // label that may give way when the foot is short of room (see fitFoot), or
 // empty. amount is null where the server withheld the figure. attr is what
 // makes the item a control, and is empty where a tap has nowhere to lead.
+// mark is a word of the label set as a solid block, after `label` and before
+// `tail`.
+//
+// The credits' item has two forms. While any credit has one sure answer it
+// counts those and sums what they hold, 入數啱數: that is the one thing in the
+// ledger a tap can finish now, and counted among every credit still waiting
+// it would be lost in a backlog that never changes. Otherwise it counts all
+// that wait, 入數未對. Either way the figure is bank money no statement
+// accounts for yet, so it keeps that money's colour.
 function footItems() {
   const items = [];
   const t = data.monthTotals[viewMonth] || null;
@@ -477,7 +487,11 @@ function footItems() {
                  name: on.length === 1 ? ' · ' + nameOf(on[0]) : '', amount: t.short, attr: ' data-short="1"' });
   }
   const open = openCredits();
-  if (open.length) {
+  const sure = queueSections(open).matched;
+  if (sure.length) {
+    items.push({ kind: 'open', label: '入數', mark: '啱數', tail: ' ' + sure.length + ' 筆',
+                 amount: leftSum(sure), attr: ' data-credits="1"' });
+  } else if (open.length) {
     items.push({ kind: 'open', label: '入數未對 ' + open.length + ' 筆', amount: ledger.sums.open,
                  attr: ' data-credits="1"' });
   }
@@ -579,6 +593,7 @@ function renderFoot() {
     const tag = it.attr ? 'button' : 'div';
     return '<' + tag + ' class="fkey ' + it.kind + (it.kind === 'short' ? ' st-short' : '') +
       (it.amount === null ? ' unknown' : '') + '"' + it.attr + '><span class="k">' + figs(it.label) +
+      (it.mark ? '<b class="fmark">' + esc(it.mark) + '</b>' + figs(it.tail) : '') +
       (it.name ? '<span data-part="name">' + figs(it.name) + '</span>' : '') +
       '</span><span class="v">' + footFigure(it.amount) + '</span><i class="mk"></i></' + tag + '>';
   }).join('');
@@ -1606,32 +1621,77 @@ function guessLabel(ids, b) {
   return legs.map(legLabel).join(' + ');
 }
 
-// A credit offered against a batch that is short. The button says what a tap
-// would actually do, the way the chat card's does: money that cannot cover the
-// shortfall names what would still be owed after it.
+// ---- a credit against a statement ----
+// Putting a credit against a statement records that this money paid it. The
+// step is a tap and not automatic because the bank's figure can differ from
+// the statement's, so wherever the pair is offered it is drawn as that
+// comparison: what the bank paid in and what the statement is owed, as two
+// lines with their figures one over the other, then the verdict on the two
+// and a key that says what the tap records (matchWording). A credit part
+// spent is compared by what it has left, and a statement part paid by what it
+// is still owed, each labelled as such.
+function factHtml(label, amount) {
+  return '<div class="mf"><span class="k">' + figs(label) + '</span>' +
+    '<span class="v">' + num(moneyText(amount)) + '</span></div>';
+}
+function bankLabel(c, dated) {
+  return '銀行入' + (dated ? ' ' + mdSlash(c.value_date) : '') + (c.remaining < c.amount - 0.005 ? ' 剩' : '');
+}
+// Agreement the matcher believes is a finished fact and a solid block; any
+// other verdict is text in the colour of what it leaves behind.
+function verdictHtml(w) {
+  return w.kind === 'agree' ? '<span class="ptag">' + esc(w.verdict) + '</span>'
+    : '<span class="mv ' + w.kind + '">' + figs(w.verdict) + '</span>';
+}
+function confirmKeyHtml(w, attrs) {
+  return '<button class="pbtn"' + attrs + '>' +
+    w.button.map(p => '<span class="pt">' + figs(p) + '</span>').join('') + '</button>';
+}
+// A statement known only as a proposal is named from what the proposal
+// carries; one the strip holds is numbered among its namesakes as well.
+function propName(p) {
+  const b = batchById(p.id);
+  return b ? nameOf(b) : statementName(p);
+}
+// One credit against one statement. `stmt` is { id, name, owed, partPaid }.
+// In a list of credits the bank's line names its date and is the way into
+// the credit's own sheet; on the credit's sheet the date is the title's.
+function pairHtml(c, stmt, believed, form) {
+  const w = matchWording(c.remaining, stmt.owed, believed);
+  const owed = factHtml(stmt.name + (stmt.partPaid ? ' 仲差' : ''), stmt.owed);
+  const act = '<div class="ma">' + verdictHtml(w) + confirmKeyHtml(w,
+    ' data-alloc-credit="' + c.id + '" data-alloc-batch="' + stmt.id + '"') + '</div>';
+  if (form === 'queue') return '<div class="qitem">' + bankRowHtml(c) + owed + act + '</div>';
+  return '<div class="mrow">' + factHtml(bankLabel(c, form === 'batch'), c.remaining) + owed + act + '</div>';
+}
+// One transfer paying a whole group: the statements are counted on the line
+// that carries their sum and named under it.
+function groupHtml(c, form) {
+  const members = c.combo.ids.map(id => (c.proposals || []).find(p => p.id === id)).filter(Boolean);
+  const w = matchWording(c.remaining, c.combo.total, true);
+  const owed = factHtml(c.combo.ids.length + ' 張結算共', c.combo.total) +
+    '<div class="mn">' + members.map(p => '<span class="pt">' + figs(propName(p)) + '</span>').join('、') + '</div>';
+  const act = '<div class="ma">' + verdictHtml(w) + confirmKeyHtml(w,
+    ' data-alloc-all="' + c.id + '" data-alloc-ids="' + c.combo.ids.join(',') + '"') + '</div>';
+  if (form === 'queue') return '<div class="qitem">' + bankRowHtml(c) + owed + act + '</div>';
+  return '<div class="mrow">' + factHtml(bankLabel(c, false), c.remaining) + owed + act + '</div>';
+}
+// The bank's line as a row of the queue: the whole line opens the credit.
+function bankRowHtml(c) {
+  return '<button class="qrow mf" data-credit="' + c.id + '"><span class="k">' + figs(bankLabel(c, true)) +
+    '</span><span class="v">' + num(moneyText(c.remaining)) + '</span><span class="c">&rsaquo;</span></button>';
+}
+
+// A credit offered against a batch.
 function creditPropHtml(p, b) {
-  const gap = round2(b.outstanding - p.remaining);
-  const label = gap > 0.005 ? '對 $' + $(p.remaining) + '（差 $' + $(gap) + '）' : '對';
-  const left = p.remaining < p.amount - 0.005 ? ['剩 $' + $(p.remaining)] : [];
-  return '<div class="prow"><span class="t">' +
-    parts(['入數 ' + mdSlash(p.value_date), '$' + $(p.amount)].concat(left)) + '</span>' +
-    (p.exact ? '<span class="ptag">啱數</span>' : '') +
-    '<button class="pbtn" data-alloc-credit="' + p.id + '" data-alloc-batch="' + b.id +
-    '">' + figs(label) + '</button></div>';
+  return pairHtml(p, { id: b.id, name: nameOf(b), owed: b.outstanding, partPaid: b.received > 0.005 },
+    p.exact, 'batch');
 }
 
 // The mirror: a batch offered against a credit that has money left.
 function batchPropHtml(p, c) {
-  const gap = round2(p.outstanding - c.remaining);
-  const label = gap > 0.005 ? '對 $' + $(c.remaining) + '（差 $' + $(gap) + '）' : '對';
-  // A batch of the group is exact only together with the others, and the
-  // group row above already says so.
-  const exact = p.exact && !(c.combo && c.combo.ids.includes(p.id));
-  return '<div class="prow"><span class="t">' +
-    parts(['批次 ' + spanLabelOf(p.dates), p.orders + ' 程', '差 $' + $(p.outstanding)]) + '</span>' +
-    (exact ? '<span class="ptag">啱數</span>' : '') +
-    '<button class="pbtn" data-alloc-credit="' + c.id + '" data-alloc-batch="' + p.id +
-    '">' + figs(label) + '</button></div>';
+  return pairHtml(c, { id: p.id, name: propName(p), owed: p.outstanding,
+                       partPaid: p.outstanding < p.confirmed_amount - 0.005 }, p.exact, 'credit');
 }
 
 // The lines the batch carries itself: money on the transfer that no leg of it
@@ -1732,8 +1792,16 @@ function batchViewHtml(v) {
       '<button class="up-btn" data-upsave="' + b.id + '"' + (match ? '' : ' disabled') +
       '>記低</button></div></div>';
   } else {
+    // Money that has arrived on dates that agree with this statement's is
+    // said before the legs, with the tap that records it. A credit dated far
+    // from it is a candidate only on the credit's own sheet: here it would be
+    // announced as this statement's money. A statement with no money yet is
+    // the ordinary case and says nothing.
+    const arrived = (b.proposals || []).filter(p => p.near);
     const open = foldOpen.has(b.id);
-    mid = '<button class="fold" data-fold="' + b.id + '"><span>' + figs(b.orders.length + ' 程') + '</span>' +
+    mid = (arrived.length ? '<div class="prop-sec"><div class="prop-head">入數到咗</div>' +
+      arrived.map(p => creditPropHtml(p, b)).join('') + '</div>' : '') +
+      '<button class="fold" data-fold="' + b.id + '"><span>' + figs(b.orders.length + ' 程') + '</span>' +
       '<span class="c">' + (open ? '&#9662;' : '&#9656;') + '</span></button>' +
       (open ? orderListHtml(b, rows, null) : '');
   }
@@ -1759,20 +1827,6 @@ function batchViewHtml(v) {
 // one that left it short.
 // One transfer pays a whole confirmation day, so the group the matcher found
 // is offered as one row and one tap; its batches stay offered one by one below.
-function comboHtml(c) {
-  const members = c.combo.ids.map(id => (c.proposals || []).find(p => p.id === id)).filter(Boolean);
-  const pt = text => '<span class="pt">' + figs(text) + '</span>';
-  return pt(c.combo.ids.length + ' 個批次') + ' · ' +
-    members.map(p => pt(spanLabelOf(p.dates))).join('、') + ' · ' + pt('$' + $(c.combo.total));
-}
-function comboBtnHtml(c, label) {
-  return '<button class="pbtn" data-alloc-all="' + c.id + '" data-alloc-ids="' +
-    c.combo.ids.join(',') + '">' + label + '</button>';
-}
-function comboPropHtml(c) {
-  return '<div class="prow"><span class="t">' + comboHtml(c) + '</span>' +
-    '<span class="ptag">啱數</span>' + comboBtnHtml(c, '對晒') + '</div>';
-}
 function creditViewHtml(v) {
   const c = creditById(v.id);
   if (!c) return '';
@@ -1790,7 +1844,7 @@ function creditViewHtml(v) {
     const props = c.proposals || [];
     extra = props.length
       ? '<div class="prop-sec"><div class="prop-head">可能對</div>' +
-        (c.combo ? comboPropHtml(c) : '') +
+        (c.combo ? groupHtml(c, 'credit') : '') +
         props.map(p => batchPropHtml(p, c)).join('') + '</div>'
       : '<div class="sub-note mute">冇 statement 對得上</div>';
   }
@@ -1820,11 +1874,23 @@ function creditViewHtml(v) {
 // Only the work queue is a list: a matched credit is reached from the batch it
 // paid, so listing it again would only bury the ones still waiting for a
 // statement.
+//
+// It is in two parts. A credit with one sure answer (sureMatch) comes first,
+// newest first, with the comparison and the tap that records it in place:
+// those are the rows a tap can finish, and the newest is the one a notice has
+// just announced. The rest follow, oldest first, each a way into its own
+// sheet. Old credits no statement will ever account for stay in the second
+// part and in the count, so the first part is never pushed off the screen by
+// them. A part with nothing in it is not drawn.
 function queueViewHtml() {
   const open = openCredits();
+  const { matched, rest } = queueSections(open);
+  const head = (text, n) => '<div class="prop-head">' + figs(text + ' · ' + n + ' 筆') + '</div>';
   return sheetHead('入數未對', figs(platLabel(curPlat) + ' · ' + open.length + ' 筆 $' + $(ledger.sums.open))) +
     (open.length ? '' : '<div class="empty">冇未對嘅入數</div>') +
-    open.map(queueRowHtml).join('') +
+    (matched.length ? head('有結算對得上', matched.length) + matched.map(queueMatchHtml).join('') : '') +
+    (rest.length ? head('未有結算對得上', rest.length) + rest.map(c => creditRowHtml(c,
+      '未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : ''), '')).join('') : '') +
     '<div class="sheet-acts"><button class="ghost-btn" data-back="1">收埋</button></div>';
 }
 
@@ -1849,24 +1915,14 @@ function archivedViewHtml() {
     '<div class="sheet-acts"><button class="ghost-btn" data-back="1">收埋</button></div>';
 }
 
-// A row whose match is not in question answers itself: the batch it agrees
-// with, and the tap that puts it there without leaving the queue. Anything
-// less certain stays a way into the credit's own sheet.
-function queueRowHtml(c) {
-  const row = creditRowHtml(c, '未對' + (c.state === 'partial' ? ' · 剩 $' + $(c.remaining) : ''), '');
-  if (c.combo) {
-    return '<div class="qitem">' + row +
-      '<div class="qprop"><span class="t">&rarr; ' + comboHtml(c) + '</span>' +
-      comboBtnHtml(c, '對晒') + '</div></div>';
-  }
-  const exact = (c.proposals || []).filter(p => p.exact);
-  if (exact.length !== 1) return row;
-  const p = exact[0];
-  return '<div class="qitem">' + row +
-    '<div class="qprop"><span class="t">&rarr; ' + figs('批次 ' + spanLabelOf(p.dates) +
-    ' 差 $' + $(p.outstanding)) + '</span>' +
-    '<button class="pbtn" data-alloc-credit="' + c.id + '" data-alloc-batch="' + p.id +
-    '">對</button></div></div>';
+// A credit whose match is not in question answers itself: the statement it
+// agrees with, and the tap that records it without leaving the queue.
+function queueMatchHtml(c) {
+  const sure = sureMatch(c);
+  if (sure.group) return groupHtml(c, 'queue');
+  const p = sure.proposal;
+  return pairHtml(c, { id: p.id, name: propName(p), owed: p.outstanding,
+                       partPaid: p.outstanding < p.confirmed_amount - 0.005 }, true, 'queue');
 }
 
 // ---- statement sheet ----
@@ -1950,6 +2006,10 @@ async function undoBatch(id) {
 // a batch, and this is the tap. The amount is the server's — as much of the
 // batch as the credit can still pay — so the page never proposes a figure.
 async function allocateCredit(creditId, batchId) {
+  // Named before the write: the reload that follows can renumber namesakes.
+  const held = batchById(batchId);
+  const offered = (creditById(creditId) || {}).proposals || [];
+  const name = held ? nameOf(held) : statementName(offered.find(p => p.id === batchId) || {});
   let batch;
   try {
     batch = await apiWrite('POST', '/api/credits/' + creditId + '/allocate',
@@ -1960,9 +2020,7 @@ async function allocateCredit(creditId, batchId) {
   }
   const put = (batch.allocations.find(a => a.credit_id === +creditId) || {}).amount || 0;
   await load();
-  toast(batch.state === 'paid'
-    ? '已對 $' + $(put) + ' · 批次收齊'
-    : '已對 $' + $(put) + ' · 仲差 $' + $(batch.outstanding));
+  toast(confirmedText(name, batch, put, batch.credit ? batch.credit.remaining : 0));
 }
 
 async function allocateAll(creditId, batchIds) {
@@ -1975,8 +2033,7 @@ async function allocateAll(creditId, batchIds) {
     return;
   }
   await load();
-  toast('已對 ' + res.batches.length + ' 個批次 · $' +
-    $(round2(res.batches.reduce((sum, b) => sum + b.confirmed_amount, 0))) + ' · 收齊');
+  toast(res.batches.length + ' 張結算 已收齊');
 }
 
 async function unlinkCredit(batchId, creditId) {
