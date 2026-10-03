@@ -379,8 +379,15 @@ class Driver:
         page.on("response", answered)
         page.on("pageerror", lambda e: self.errors.append(str(e)))
 
-    def _quiet(self, ms: int = 300) -> None:
-        """No request in flight, and none started or finished for `ms`."""
+    def _quiet(self, ms: int = 100) -> None:
+        """No request in flight, and none started or finished for `ms`.
+
+        The window is the floor of every settle(), and settle() follows every
+        tap, so it is the largest single share of a run.  It has to outlast
+        only the gap between one answer and the request the page makes because
+        of it; anything the page asks for later, on coming to rest, is caught
+        by settle()'s own second look rather than by waiting longer here.
+        """
         deadline = time.monotonic() + TIMEOUT_MS / 1000
         while True:
             seen = self.activity
