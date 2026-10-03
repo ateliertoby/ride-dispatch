@@ -137,6 +137,33 @@ def test_bank_credits_unmatched_and_put_away(seeded):
     assert "open" in states and "partial" in states and "archived" in states
 
 
+def test_the_backlog_adds_old_credits_nothing_accounts_for(seeded, tmp_path):
+    from ride_dispatch import credits
+    path = str(tmp_path / "backlog.db")
+    seed_demo_db.seed(path, seeded.today, backlog=True)
+    def ledger_of(db_path):
+        # But for when the row was written, which is the clock's.
+        return [{k: v for k, v in c.items() if k != "imported_at"} for c in db.list_credits(db_path, "ride")]
+
+    plain = {c["id"]: c for c in ledger_of(seeded.path)}
+    ledger = ledger_of(path)
+    old = [c for c in ledger if c["id"] not in plain]
+    # Every row of the plain seed is the same row with the backlog behind it.
+    assert [c for c in ledger if c["id"] in plain] == list(plain.values())
+    assert len(old) == seed_demo_db.BACKLOG and all(c["state"] == "open" for c in old)
+    assert [(c["value_date"], c["amount"]) for c in old] == seed_demo_db.backlog_credits(seeded.today)
+    # Oldest first, they fill the queue ahead of every credit that has an answer.
+    waiting = [c for c in ledger if c["state"] in ("open", "partial")]
+    assert waiting[:len(old)] == old and len(waiting) > len(old)
+    for c in old:
+        m = credits.propose_credit(path, c["id"])
+        assert credits.offer(m, db.open_batches(path, "ride")) == []
+    # What can be acted on is still there: one credit agreeing with the
+    # statement that waits for its transfer.
+    answer = credits.propose_credit(path, seed_demo_db.CREDIT["exact"])
+    assert (answer.reason, answer.exact) == ("exact", [seed_demo_db.BATCH["awaiting"]])
+
+
 def test_the_current_month_has_open_money_before_it(seeded):
     earlier = seeded.month(0)["earlier"]
     assert earlier["open"] > 0 and earlier["month"] < seeded.today.isoformat()[:7]

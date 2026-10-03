@@ -1,6 +1,6 @@
 """Build a synthetic database that puts every visual state of the two views on screen.
 
-    python scripts/seed_demo_db.py PATH [--today YYYY-MM-DD]
+    python scripts/seed_demo_db.py PATH [--today YYYY-MM-DD] [--backlog]
 
 Every value is invented. Rows are written through ride_dispatch.db's own
 functions, the ones the bot and the web app use, so the database is one the
@@ -14,6 +14,11 @@ on the date. What has to be true of a month whatever the date is placed by
 the calendar instead (_months_back): a statement whose legs lie either side of
 a month's first day, a second statement collected in full in the month it
 reaches into, and a month of one platform with nothing left to do.
+
+--backlog adds a ledger's worth of old bank credits that no statement will
+ever account for, behind the few that have one: the shape of a ledger in use
+for months, where what can be acted on is one row among dozens that cannot.
+The rows of the plain seed are the same with it, id for id.
 
 PATH must not exist yet. The script never opens a database it did not create.
 """
@@ -62,6 +67,12 @@ CREDIT = {"paid": 1, "short": 2, "exact": 3, "partial": 4, "archived": 5, "group
 # set, as no two of the platform's do, although two were confirmed on one day.
 DUE = {"paid": 32, "short": {27: 25, 26: 25, 25: 24}, "awaiting": 17,
        "held_back": {15: 13, 12: 10, 11: 10}, "ahead": 1, "group": 3}
+# How many old credits --backlog adds, and how long before today the newest
+# of them was paid in. Every statement still owed money has a leg driven
+# later than that, and money cannot pay for work not yet done, so none of
+# them is offered against anything.
+BACKLOG = 43
+BACKLOG_FROM = 60
 # The platform each of them is on, where it is not the ride platform.
 PLATFORM = {"clean": "uber"}
 ORDER = {
@@ -102,6 +113,12 @@ def straddle_days(today: date) -> list:
     last two days of one month and the first two of the next."""
     first = month_start(today, STRADDLE_MONTHS_BACK)
     return [first + timedelta(days=n) for n in (-2, -1, 0, 1)]
+
+
+def backlog_credits(today: date) -> list:
+    """The old credits --backlog adds, oldest first: (value date, amount)."""
+    return [(day(today, BACKLOG_FROM + 3 * n), 300.0 + 40 * (n % 9) + (n % 4) * 0.25)
+            for n in reversed(range(BACKLOG))]
 
 
 def targets(today: date) -> dict:
@@ -411,7 +428,19 @@ def _ledger(s: _Seeder) -> None:
     s.quick("foodpanda", 4, "12:30", 62)
 
 
-def seed(path: str, today: date) -> dict:
+def _backlog(s: _Seeder) -> None:
+    """Old credits nothing accounts for. Written last, so every other row
+    keeps the id it has without them."""
+    for n, (value_date, amount) in enumerate(backlog_credits(s.today)):
+        db.insert_credit(s.path, {
+            "ref": f"DEMO-OLD-{n + 1:04d}", "platform": "ride", "amount": amount,
+            "currency": "HKD", "value_date": value_date,
+            "payer": "DEMO PLATFORM LTD", "memo": "SUPPLIERPAY",
+            "email_id": None, "received_at": None, "recorded_at": None,
+        })
+
+
+def seed(path: str, today: date, backlog: bool = False) -> dict:
     """Create the database at `path`; returns targets(today)."""
     if os.path.exists(path):
         raise FileExistsError(f"{path} exists; the demo data goes into a new file only")
@@ -424,6 +453,8 @@ def seed(path: str, today: date) -> dict:
     _months_back_settled(s, legs)
     _neighbours(s)
     _today(s)
+    if backlog:
+        _backlog(s)
     return targets(today)
 
 
@@ -432,8 +463,10 @@ def main() -> None:
     ap.add_argument("path", help="database file to create; must not exist")
     ap.add_argument("--today", type=date.fromisoformat, default=date.today(),
                     help="the day the data is built around (default: today)")
+    ap.add_argument("--backlog", action="store_true",
+                    help=f"add {BACKLOG} old bank credits that no statement accounts for")
     args = ap.parse_args()
-    seed(args.path, args.today)
+    seed(args.path, args.today, backlog=args.backlog)
     print(f"seeded {args.path} around {args.today.isoformat()}")
 
 
