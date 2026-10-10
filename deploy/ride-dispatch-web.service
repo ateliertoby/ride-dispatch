@@ -9,6 +9,10 @@ WorkingDirectory=/home/toby/ride-dispatch
 ExecStart=/home/toby/ride-dispatch/.venv/bin/python -m ride_dispatch.web
 Restart=always
 RestartSec=5
+# Every open page holds a thread, a socket and a database connection for its
+# event stream, and the default soft limit of 1024 files is what a leak of
+# those reaches first.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
