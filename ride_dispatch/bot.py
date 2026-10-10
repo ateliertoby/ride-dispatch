@@ -21,6 +21,7 @@ from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PIC
 from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, parking_sessions_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
+from . import webproc
 from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available, next_free_at,
                       pay_plan, classify, arming_orders, pick_order, from_db_time, db_time,
                       db_seconds, from_db_seconds,
@@ -1197,13 +1198,31 @@ async def _parking_tick(context):
 # answering after the app has stopped working.
 #
 # A deploy stops the web app for a few seconds, so one failure says nothing.
-# WEB_HEALTH_FAILURES in a row, a minute apart, is an outage.  In-memory on
-# purpose: a bot restart during an outage tells it again, which is harmless.
+# WEB_HEALTH_FAILURES in a row, a minute apart, is an outage.
+#
+# An outage is acted on once: what the process holds is written down, the
+# process is ended, and its unit starts another.  The order matters, because
+# the state that explains the fault is gone with the process.  A restart
+# cures what lives in the process (a leak, a stuck thread) and nothing
+# outside it (a damaged database, a full disk), so it is tried once per
+# outage and at most once per WEB_RESTART_GAP; after that it is a matter for
+# a person, who is told.  Every restart is told, so a fault that recurs
+# cannot hide behind its own cure.
+#
+# All of it is in memory on purpose: a bot restart during an outage acts on
+# it again, and the gap is then not kept, which costs one restart.
 WEB_HEALTH_INTERVAL = 60
 WEB_HEALTH_FAILURES = 3
 WEB_HEALTH_TIMEOUT = 10
+WEB_RESTART_GAP = 1800
 _web_failures = 0
-_web_down_told = False
+_web_outage = False
+_web_restarted = False      # in this outage
+_web_stuck = False          # the restart did not help, and that has been said
+_web_restart_at: datetime | None = None
+# Notices not yet pushed, oldest first.  A push that fails leaves its notice
+# here for the next check, so telling again never means acting again.
+_web_notices: list[str] = []
 _web_health_transport = None
 _web_logger = logging.getLogger("web_health")
 
@@ -1223,8 +1242,38 @@ async def _web_fault() -> str | None:
     return None if res.status_code == 200 else f"HTTP {res.status_code}"
 
 
+async def _web_act(fault: str, failures: int, now: datetime) -> tuple[str, bool]:
+    """Record the failing web process and restart it if that may be done.
+    Returns the notice for the operator and whether a restart was made."""
+    head = f"Web app 用唔到（{fault}），連續 {failures} 次檢查失敗。"
+    lines = [f"time: {now:%Y-%m-%d %H:%M:%S}", f"fault: {fault}", f"failed checks in a row: {failures}"]
+    pid = webproc.read_pid(webproc.pid_path(DB_PATH))
+    restarted = False
+    if pid is None:
+        outcome, said = "process not identified, left alone", "認唔到 web process，冇 restart，要人手睇。"
+    else:
+        lines += webproc.snapshot(pid, DB_PATH)
+        recent = _web_restart_at and (now - _web_restart_at).total_seconds() < WEB_RESTART_GAP
+        if recent:
+            outcome = f"restarted at {_web_restart_at:%H:%M:%S}, left alone"
+            said = f"{WEB_RESTART_GAP // 60} 分鐘內已經自動 restart 過一次，今次冇再試，要人手睇。"
+        # Off the event loop: it waits for the process to go.
+        elif await asyncio.to_thread(webproc.stop, pid):
+            restarted = True
+            outcome, said = "stopped for its unit to start again", "已自動 restart。"
+        else:
+            outcome, said = "would not stop", "停唔到個 process，要人手睇。"
+    lines.append(f"action: {outcome}")
+    _web_logger.warning("web app failing: %s", "; ".join(lines))
+    try:
+        said += "\n現場記錄：" + webproc.write_incident(webproc.incident_dir(DB_PATH), now, lines)
+    except OSError:
+        _web_logger.exception("incident record not written")
+    return head + said, restarted
+
+
 async def _web_health_tick(context):
-    global _web_failures, _web_down_told
+    global _web_failures, _web_outage, _web_restarted, _web_stuck, _web_restart_at
     chat_id = _notify_chat_id()
     if not chat_id:
         return
@@ -1232,20 +1281,31 @@ async def _web_health_tick(context):
         fault = await _web_fault()
         if fault is None:
             _web_failures = 0
-            if _web_down_told:
-                await context.application.bot.send_message(chat_id=chat_id, text="Web app 正常返。")
-                _web_down_told = False
+            if _web_outage:
+                _web_outage = _web_restarted = _web_stuck = False
                 _web_logger.warning("web app answers again")
-            return
-        _web_failures += 1
-        if _web_failures >= WEB_HEALTH_FAILURES and not _web_down_told:
-            _web_logger.warning("web app failing: %s, %d checks in a row", fault, _web_failures)
-            # Marked as told only once the push has gone, so a push that
-            # failed is made again on the next tick.
-            await context.application.bot.send_message(
-                chat_id=chat_id,
-                text=f"Web app 用唔到（{fault}），連續 {_web_failures} 次檢查都失敗。入單同埋數頁要等佢返。")
-            _web_down_told = True
+                _web_notices.append("Web app 正常返。")
+        else:
+            _web_failures += 1
+            if _web_failures >= WEB_HEALTH_FAILURES:
+                if not _web_outage:
+                    _web_outage = True
+                    now = datetime.now()
+                    notice, restarted = await _web_act(fault, _web_failures, now)
+                    _web_notices.append(notice)
+                    if restarted:
+                        _web_restarted = True
+                        _web_restart_at = now
+                        # The new process is counted from nothing.
+                        _web_failures = 0
+                elif _web_restarted and not _web_stuck:
+                    _web_stuck = True
+                    _web_logger.warning("web app still failing after restart: %s", fault)
+                    _web_notices.append(
+                        f"Web app restart 之後仲係用唔到（{fault}），唔會再自動試，要人手睇。")
+        while _web_notices:
+            await context.application.bot.send_message(chat_id=chat_id, text=_web_notices[0])
+            _web_notices.pop(0)
     except Exception:
         _web_logger.exception("web health check error")
 
