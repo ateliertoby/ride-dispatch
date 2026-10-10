@@ -1,6 +1,6 @@
 # Architecture
 
-Two processes share one SQLite file. `ride_dispatch.bot` is the Telegram bot and runs the repeating jobs (flights, car park, bank credit feed). `ride_dispatch.web` is a Flask app serving one document with two views: the day view (`/`) and the settle view (`/settle`, 埋數).
+Two processes share one SQLite file. `ride_dispatch.bot` is the Telegram bot and runs the repeating jobs (flights, car park, bank credit feed, and a watch on the web app). `ride_dispatch.web` is a Flask app serving one document with two views: the day view (`/`) and the settle view (`/settle`, 埋數).
 
 This file has three parts:
 
@@ -17,6 +17,17 @@ Terms used throughout: a **batch** is a settlement (`settlements` row) created f
 **SQLite.** Single user, single machine. Nothing heavier is justified. The schema is created and migrated on start by `db.init_db`, with `ALTER TABLE ... ADD COLUMN` as the only migration mechanism.
 
 **All auth is at the perimeter.** The web app is exposed through a named Cloudflare Tunnel with Cloudflare Access (email OTP) as the single auth layer. The Flask app binds to localhost, has no auth of its own and trusts the tunnel: whoever passes Access is the operator and can read, edit, create and cancel.
+
+**The bot watches the web app, and restarts it once.** A web process that still runs but no longer works is restarted by nobody: its unit acts only when the process exits, and the one other witness is the operator opening the app for the next order. The web app once answered every request with a 500 for sixteen hours that way. The bot already runs beside it and already has a chat to push to, so the bot asks `GET /api/health` once a minute (`bot._web_health_tick`).
+
+- Health reads the database. `/api/ping` does not, and went on answering 200 throughout that outage, so nothing that needs to know whether the app works may ask ping.
+- Three failures in a row are an outage. A deploy stops the web app for a few seconds, and one or two failed checks say nothing.
+- On an outage the bot writes down what the process holds, ends it, and leaves its unit to start another. The order matters: the open files and threads that explain a fault are gone with the process. The record (`incidents/web-<time>.txt` beside the database) holds counts by kind (database connections, sockets, threads, memory) and never a name or any content.
+- A restart cures what lives in the process, such as a leak or a stuck thread, and nothing outside it, such as a damaged database or a full disk. It is made once per outage and at most once in 30 minutes. If the new process fails as well, the bot says so once and leaves it to a person.
+- Every restart is pushed, with the record's path, and the recovery is pushed too. A fault that recurs cannot hide behind its own cure. With no chat to push to, the bot neither checks nor restarts.
+- The process is named by more than its pid, because a pid is handed to another process once the first has gone. The web app writes its pid with the start time the kernel reports for it (`web.pid` beside the database), and the bot signals only while `/proc` still gives that pid the same start time (`webproc.read_pid`). Without `/proc` no start time is recorded and nothing is ever stopped; the bot then only reports.
+- The bot ends the process with a signal sent as the same user and needs no privilege. It asks first (`SIGTERM`) and forces (`SIGKILL`) a process that stays, since a stuck or stopped process acts on no request. Something has to start the web app again, so this relies on a supervisor that restarts on any exit (`Restart=always`).
+- The state is in memory. A bot restart during an outage acts on it again and does not keep the 30 minutes, which costs one restart. The bot cannot report its own death, or the machine's.
 
 **Prices and costs are entered by hand.** The platform gives a flat price per order, and costs (tunnel, parking) are variable but predictable. Manual entry is fast enough for three to seven orders a day, and rules are added only where they pay for themselves. Two have been: parking, which is planned from the meeting point and settled by the car park visit, and a suggested price, which `pricing.py` reads off the history of fares to the same zone and holds no price constants of its own.
 
@@ -258,6 +269,8 @@ Ids are then bound to orders in four passes, weakest evidence last, so nothing w
 
 - The fingerprint (`web._fingerprint`) is a hash of every column of every order, plus the batches, the credits and the allocations. The orders are hashed whole so that a column a view starts to show is covered without being named: an amendment that changes only an address or a flight number has to reach another open device. None of it is scoped to a day, because the settle view holds months and the ledger changes without any order moving.
 - Hashing the table costs tens of milliseconds at a few thousand rows, too much for every two seconds per connection. A stream keeps one database connection and reads `PRAGMA data_version` first, which costs microseconds and moves only when another connection's commit has modified the database file; the fingerprint is taken only then (`web._Watch`). The version is only the gate that says when to look, and the fingerprint decides. A commit to a table no view shows, such as a car park reading, moves the version and not the fingerprint, and is not reported.
+- A quiet stream still writes: after 20 s without a change it sends a comment line (`: keepalive`), which an `EventSource` reads and raises no event for. Two things depend on it. Cloudflare drops a response that has sent nothing for about two minutes, so a silent stream was cut and reopened about 28 times an hour for as long as a page stayed open. And the server learns that a client has gone only when a write to it fails, so each of those abandoned streams kept its thread, its socket and its database connection until the next change to the data. On a day with no change that reached the process's limit on open files, after which it could not open the database at all.
+- The stream opens its database connection before it sends the greeting. A page takes the greeting to mean its stream is up and forgets how often the stream has failed, so a greeting sent ahead of a failure holds the page's retry at two seconds, and each greeting reloads the view as well. A stream that cannot read the database ends before its first byte and the server answers 500.
 - `stream.js` holds the one `EventSource`. Every connection begins with a greeting. The first greeting of the first connection is not a change, unless the stream had already failed before it; the greeting of any later connection stands for whatever was missed while the stream was down.
 - The document stays open for hours, so the stream has to outlive what would end it. A browser retries a dropped line itself, but an answer that is not a 200 event stream (the tunnel's 502 while the web service restarts) closes an `EventSource` for good. A closed stream is opened again after a delay that doubles from 2 s to 30 s and starts over once a message arrives.
 - The document is not reloaded between uses, so becoming visible after having been hidden refreshes the showing view and opens a waiting stream at once. A phone that slept would otherwise show data hours old.
@@ -514,6 +527,16 @@ Order entry
 Live update
   any write → web._fingerprint differs → GET /api/events says so
     → stream.js → the showing view reloads
+  no change for 20 s → a comment line, which reloads nothing
+
+Web app watch (bot, 60 s)
+  GET /api/health on 127.0.0.1 → 200 → nothing
+    → third failure in a row → webproc.read_pid (web.pid, checked against /proc)
+        → webproc.snapshot → incidents/web-<time>.txt
+        → webproc.stop → the unit starts a new web process
+        → push: what failed, what was done, where the record is
+    → next 200 → push: 正常返
+    → three more failures after a restart → push once, and no second restart
 
 Flights (bot, 60 s heartbeat, fetch gated by calc_next_interval)
   reminders first: 用車時間, 出發, ETA-passed advisory, dep30 / dep10
@@ -595,7 +618,8 @@ Settle view load
 | `GET /assets/<version>/<path>` | Versioned static files; 404 for any other version |
 | `GET /sw.js` | Service worker, rendered with the version and the precache list |
 | `GET /manifest.webmanifest` | Web app manifest, at a fixed address |
-| `GET /api/ping` | `{ok, version}` |
+| `GET /api/ping` | `{ok, version}`; reads no data, so it says the process answers and nothing more |
+| `GET /api/health` | `{ok}` after reading the database; 500 when it cannot. What the bot asks |
 | `GET /api/events` | Server-sent event stream |
 | `GET /api/orders?date=` | One day's active orders |
 | `POST /api/orders/parse` | Preview of a pasted message |
@@ -631,7 +655,8 @@ Settle view load
 - `statement.py`: the statement reader (OCR boxes to rows, columns named off the header), `reconcile`, `leg_amount`, `due_dates`, and the report and button text both frontends print.
 - `statement_flow.py`: `prepare` and `confirm`, shared by the bot and the web app; `keep_unread_image`.
 - `credits.py`: feed ingestion, the pure credit and batch matcher, the `propose_*` wrappers that read the database, `guess_unpaid`, and the chat text about credits. Writes credits only, never allocations.
-- `bot.py`: Telegram handlers (order cards, quick orders, statement images, `/cancel`, `/board`, `/parking`, `/credits`, `/start`) and the two repeating jobs. `_notify_chat_id()` is where every push is addressed.
+- `bot.py`: Telegram handlers (order cards, quick orders, statement images, `/cancel`, `/board`, `/parking`, `/credits`, `/start`) and the three repeating jobs: the flight poll, the car park check and the watch on the web app. `_notify_chat_id()` is where every push is addressed.
+- `webproc.py`: the running web process as the bot needs to know it: the pid record and its check against `/proc`, the snapshot of what a process holds, the incident record, and ending a process.
 - `web.py`: the Flask app: the shell, versioned assets, the service worker, the JSON API and the event stream. Holds read statements under a token until confirmed.
 
 **Web (`templates/`, `static/`)**
@@ -660,5 +685,5 @@ Settle view load
 - `scripts/harness.py`: the server and page driver the two scripts below share.
 - `scripts/shots.py`: screenshots every state in WebKit in both themes, each again at 340 wide and the settle view's again at 1000 wide, and compares two runs pixel by pixel.
 - `scripts/e2e.py`: drives the app through its behaviour in the same browser. Every check has a server and a freshly seeded database of its own, so checks run in parallel processes. `--today-set` runs the whole set for several days, because the seed's days fall differently around the first of a month.
-- `tests/`: pytest for the Python modules; `tests/js/` for the stateless browser modules under `node --test`; `tests/fixtures/` holds recorded OCR output with hashed order numbers. `tests/test_seed_demo.py` holds the synthetic database to what the scripts rely on: every month of every platform adds up, at days either side of a month's and a year's end and on a leap day.
-- `deploy/`: example launchd plists and systemd units for the bot, the web app and the tunnel.
+- `tests/`: pytest for the Python modules; `tests/test_web_live.py` runs the app behind a real socket, the only place where a client can leave a stream or a stream can fail before its first byte; `tests/js/` for the stateless browser modules under `node --test`; `tests/fixtures/` holds recorded OCR output with hashed order numbers. `tests/test_seed_demo.py` holds the synthetic database to what the scripts rely on: every month of every platform adds up, at days either side of a month's and a year's end and on a leap day.
+- `deploy/`: example launchd plists and systemd units for the bot, the web app and the tunnel. The web unit raises the limit on open files, which is the first ceiling a leak of streams reaches.
