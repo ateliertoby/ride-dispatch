@@ -45,6 +45,8 @@ The money side has the same shape. The platform pays for a run of days with one 
 
 12. **Match the bank.** A separate program (first-reader) publishes the bank's credit advices as a JSONL feed, which the bot reads every minute. Every credit is recorded and announced in the chat with what it appears to pay (對到 批次 #4？), with a link to that credit on the settle view when `RIDE_WEB_URL` is set. Nothing is allocated automatically, because the bank's figure can differ from the statement's. The settle view shows the two side by side, what the bank paid in over what the statement is owed, with a verdict (啱數, 少 $N, 多 $N) and a key that says what the tap records: 確認啱數, or 確認收到 $X（仲差 $N） when the money is short. One transfer paying a whole group of statements is one row and one tap. The queue of credits opens on the ones that have such an answer, and a statement waiting for its transfer shows the credit on its own sheet. 解除 takes money back off. When a statement is paid short, the batch's sheet is where the unpaid legs are ticked (未過數) until the make-up payment arrives.
 
+13. **Hear about a web app that stops working.** The bot checks the web app once a minute. After three failed checks in a row it records what the web process was holding, restarts it, and pushes what failed and where the record is; a second push says when the app answers again. If the restart does not help it says so and leaves it alone.
+
 How the matcher decides, how a statement is read and why the settle view is shaped the way it is are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ### Bot commands
@@ -79,10 +81,10 @@ cp .env.example .env
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Bot only | From BotFather |
 | `TELEGRAM_BOT_USERNAME` | No | The bot's username, without the `@`. The web app's order sheet links to the order in the bot's chat with it (喺 Telegram 開). Unset = no link |
-| `RIDE_DB_PATH` | No | SQLite path (default: `orders.db` in the working directory). `~` is expanded. Statement screenshots (`statements/`) and the socket the two processes share (`bot.sock`) are created beside it; keep it outside cloud-synced directories |
-| `RIDE_WEB_PORT` | No | Web app port on `127.0.0.1` (default: `3200`) |
+| `RIDE_DB_PATH` | No | SQLite path (default: `orders.db` in the working directory). `~` is expanded. Statement screenshots (`statements/`), the socket the two processes share (`bot.sock`), the web process's pid record (`web.pid`) and the records of web app outages (`incidents/`) are created beside it; keep it outside cloud-synced directories |
+| `RIDE_WEB_PORT` | No | Web app port on `127.0.0.1` (default: `3200`). The bot reads it too, to know where to check the web app |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated Telegram chat IDs the bot answers. Empty = it answers anyone |
-| `NOTIFY_CHAT_ID` | No | Chat every push goes to (flight, reminders, car park, credits). When the variable is absent or blank, the first of `ALLOWED_CHAT_IDS` is used. With no chat to push to, the bot still answers messages but runs no flight, car park or credit checks |
+| `NOTIFY_CHAT_ID` | No | Chat every push goes to (flight, reminders, car park, credits). When the variable is absent or blank, the first of `ALLOWED_CHAT_IDS` is used. With no chat to push to, the bot still answers messages but runs no flight, car park or credit checks, and does not watch the web app |
 | `FAL_KEY` | No | fal.ai API key for the sign photo. Unset = feature off |
 | `CAR_PLATE` | No | Plate to watch in the HKIA car parks. Unset = car park tracking off |
 | `PARKING_EMAIL` | No | Address HKIA attaches to an online parking payment. Blank is accepted |
@@ -132,6 +134,8 @@ The web app is exposed through a named Cloudflare Tunnel (`~/.cloudflared/ride-d
 **Statement OCR** is a separate install on the server: `pip install -r requirements.txt`, then `pip install --no-deps -r requirements-ocr.txt`, in that order. It adds roughly 360 MB to the venv (onnxruntime plus the PP-OCR models), so check disk first. Restart the bot and web services afterwards.
 
 **Updating the web app** is one step in three moves: stop the web service, `git pull`, start it again. The server works out the version of its assets once per process and serves them under that version as immutable, so a process left running over changed files would hand out new files at the old version's address. The tunnel answers 502 for the second or two this takes, and an open app reconnects by itself. A phone shows 有新版本 once it has fetched the new version in the background, and takes it when that is tapped or the next time the app is launched.
+
+**The bot restarts a web app that stops answering**, by ending the process and leaving the service definition to start it again, so the web service must restart on any exit (`Restart=always` in the systemd unit, `KeepAlive` in the plist). The restart needs `/proc` to be sure which process it is ending; on macOS the bot only reports. A deploy's own restart is over well inside the three minutes the bot waits. Each outage leaves a small text file under `incidents/` beside the database, which nothing removes. The web unit sets `LimitNOFILE=65536`: every open page holds a thread, a socket and a database connection, and the default of 1024 open files leaves little room.
 
 Two gotchas with `cloudflared`:
 
