@@ -885,7 +885,8 @@ def test_the_parking_job_is_started_at_the_fast_rate(monkeypatch):
     monkeypatch.setattr(bot, "_set_commands", AsyncMock())
     monkeypatch.setattr(bot, "_start_kick_server", AsyncMock())
     asyncio.run(bot._post_init(FakeApp()))
-    assert jobs == [(bot._poll_tick, 60), (bot._parking_tick, bot.PARKING_OPEN_INTERVAL)]
+    assert jobs == [(bot._poll_tick, 60), (bot._parking_tick, bot.PARKING_OPEN_INTERVAL),
+                    (bot._web_health_tick, bot.WEB_HEALTH_INTERVAL)]
 
 
 def test_an_open_visit_is_checked_every_fast_tick(db_path, tg, ctx, poll_globals, monkeypatch):

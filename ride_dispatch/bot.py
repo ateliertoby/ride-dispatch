@@ -6,6 +6,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
+import httpx
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError
@@ -1189,6 +1190,66 @@ async def _parking_tick(context):
         _next_parking_at = tick_start + timedelta(seconds=interval - POLL_TICK_TOLERANCE)
 
 
+# The web app is watched from here because nothing else would notice it
+# failing: a process that still runs is never restarted by its unit, and the
+# only other witness is whoever opens the app next.  The check asks for
+# /api/health, which reads the database; /api/ping does not, and keeps
+# answering after the app has stopped working.
+#
+# A deploy stops the web app for a few seconds, so one failure says nothing.
+# WEB_HEALTH_FAILURES in a row, a minute apart, is an outage.  In-memory on
+# purpose: a bot restart during an outage tells it again, which is harmless.
+WEB_HEALTH_INTERVAL = 60
+WEB_HEALTH_FAILURES = 3
+WEB_HEALTH_TIMEOUT = 10
+_web_failures = 0
+_web_down_told = False
+_web_health_transport = None
+_web_logger = logging.getLogger("web_health")
+
+
+def _web_port() -> int:
+    return int(os.environ.get("RIDE_WEB_PORT") or "3200")
+
+
+async def _web_fault() -> str | None:
+    """What is wrong with the web app, in a few words; None when it is well."""
+    try:
+        async with httpx.AsyncClient(timeout=WEB_HEALTH_TIMEOUT,
+                                     transport=_web_health_transport) as client:
+            res = await client.get(f"http://127.0.0.1:{_web_port()}/api/health")
+    except httpx.HTTPError as e:
+        return type(e).__name__
+    return None if res.status_code == 200 else f"HTTP {res.status_code}"
+
+
+async def _web_health_tick(context):
+    global _web_failures, _web_down_told
+    chat_id = _notify_chat_id()
+    if not chat_id:
+        return
+    try:
+        fault = await _web_fault()
+        if fault is None:
+            _web_failures = 0
+            if _web_down_told:
+                await context.application.bot.send_message(chat_id=chat_id, text="Web app 正常返。")
+                _web_down_told = False
+                _web_logger.warning("web app answers again")
+            return
+        _web_failures += 1
+        if _web_failures >= WEB_HEALTH_FAILURES and not _web_down_told:
+            _web_logger.warning("web app failing: %s, %d checks in a row", fault, _web_failures)
+            # Marked as told only once the push has gone, so a push that
+            # failed is made again on the next tick.
+            await context.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"Web app 用唔到（{fault}），連續 {_web_failures} 次檢查都失敗。入單同埋數頁要等佢返。")
+            _web_down_told = True
+    except Exception:
+        _web_logger.exception("web health check error")
+
+
 async def _poll_tick(context):
     global _next_poll_at, _poll_running
     # Before the flight gate: a credit must not wait out a long flight interval.
@@ -2102,6 +2163,8 @@ async def _post_init(app):
     # no car is inside: sharing the flight heartbeat would put the whole poll
     # on the parking cadence.
     app.job_queue.run_repeating(_parking_tick, interval=PARKING_OPEN_INTERVAL, first=5,
+                                job_kwargs=_JOB_KWARGS)
+    app.job_queue.run_repeating(_web_health_tick, interval=WEB_HEALTH_INTERVAL, first=30,
                                 job_kwargs=_JOB_KWARGS)
 
 
