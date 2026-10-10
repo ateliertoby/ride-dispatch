@@ -913,9 +913,12 @@ STREAM_KEEPALIVE = 20
 
 
 def _event_stream(sleep=time.sleep):
-    yield "data: connected\n\n"
+    # Before the greeting: a page takes the greeting to mean its stream is up
+    # and forgets how often the stream has failed.  A stream that cannot read
+    # the database must fail without one, and the server then answers 500.
     watch = _Watch()
     try:
+        yield "data: connected\n\n"
         quiet = 0
         while True:
             sleep(STREAM_TICK)
