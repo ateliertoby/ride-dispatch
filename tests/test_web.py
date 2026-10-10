@@ -1410,6 +1410,50 @@ def test_a_stream_reports_a_change_once_and_only_a_change(client):
         watch.close()
 
 
+def _stream_items(n):
+    """The first n things a stream sends after its greeting, and how many
+    ticks it slept through to send them."""
+    ticks = []
+    stream = web._event_stream(sleep=ticks.append)
+    try:
+        assert next(stream) == "data: connected\n\n"
+        return [next(stream) for _ in range(n)], len(ticks)
+    finally:
+        stream.close()
+
+
+def test_a_quiet_stream_sends_a_comment_before_a_proxy_would_drop_it(client):
+    """A stream that writes nothing is cut by the proxy in front of it and is
+    never found dead by the server, which only learns a client has gone when
+    a write fails. A comment line is a write the client does not act on."""
+    seed_ride("R1")
+    items, ticks = _stream_items(2)
+    assert items == [": keepalive\n\n"] * 2
+    assert all(not item.startswith("data:") for item in items)
+    assert ticks * web.STREAM_TICK == 2 * web.STREAM_KEEPALIVE
+    assert web.STREAM_KEEPALIVE <= 30
+
+
+def test_a_change_on_a_stream_puts_off_the_next_comment(client):
+    seed_ride("R1")
+    ticks = []
+
+    def sleep(seconds):
+        ticks.append(seconds)
+        if len(ticks) == 3:
+            _set_column("R1", "dropoff", "another address")
+
+    stream = web._event_stream(sleep=sleep)
+    try:
+        assert next(stream) == "data: connected\n\n"
+        assert next(stream) == "data: refresh\n\n"
+        assert len(ticks) == 3
+        assert next(stream) == ": keepalive\n\n"
+        assert (len(ticks) - 3) * web.STREAM_TICK == web.STREAM_KEEPALIVE
+    finally:
+        stream.close()
+
+
 def test_fingerprint_distinguishes_a_resettle(client):
     """Undo empties the book back to its pre-settlement fingerprint, so the
     batch id is what keeps a re-settle from looking like no change at all."""

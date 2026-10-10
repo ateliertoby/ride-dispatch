@@ -902,21 +902,39 @@ class _Watch:
         self.conn.close()
 
 
+STREAM_TICK = 2
+# The longest a stream goes without writing, in seconds.  Two things depend on
+# a quiet stream still writing: the proxy in front of the app drops a response
+# that has sent nothing for about two minutes, and the server only learns that
+# a client has gone when a write to it fails.  Without the write, every stream
+# a client abandons keeps its thread, socket and connection until the next
+# change to the data, however long that takes.
+STREAM_KEEPALIVE = 20
+
+
+def _event_stream(sleep=time.sleep):
+    yield "data: connected\n\n"
+    watch = _Watch()
+    try:
+        quiet = 0
+        while True:
+            sleep(STREAM_TICK)
+            quiet += STREAM_TICK
+            if watch.changed():
+                quiet = 0
+                yield "data: refresh\n\n"
+            elif quiet >= STREAM_KEEPALIVE:
+                quiet = 0
+                # A comment line: an EventSource reads it and raises no event.
+                yield ": keepalive\n\n"
+    finally:
+        watch.close()
+
+
 @app.route("/api/events")
 def events():
-    def stream():
-        yield "data: connected\n\n"
-        watch = _Watch()
-        try:
-            while True:
-                time.sleep(2)
-                if watch.changed():
-                    yield "data: refresh\n\n"
-        finally:
-            watch.close()
-
     return Response(
-        stream(),
+        _event_stream(),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
