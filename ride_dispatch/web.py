@@ -212,6 +212,14 @@ def api_ping():
     return jsonify({"ok": True, "version": asset_version()})
 
 
+@app.get("/api/health")
+def api_health():
+    # Ping reads nothing, so it goes on answering when the process can no
+    # longer open its database.  This reads it, and fails when it cannot.
+    count_active_orders(DB_PATH)
+    return jsonify({"ok": True})
+
+
 @app.after_request
 def _no_store_api(resp):
     # Money and schedule data must come from the server every time. Set over

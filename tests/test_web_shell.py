@@ -368,6 +368,17 @@ def test_ping_names_the_version(client):
     assert client.get("/api/ping").get_json() == {"ok": True, "version": web.asset_version()}
 
 
+def test_health_answers_only_when_the_database_can_be_read(client, monkeypatch):
+    """Ping says the process answers, and goes on saying so when the process
+    can no longer open its database. Health is the one to ask whether the app
+    works."""
+    assert client.get("/api/health").get_json() == {"ok": True}
+    monkeypatch.setitem(web.app.config, "TESTING", False)
+    monkeypatch.setattr(web, "DB_PATH", os.path.join(os.path.dirname(web.DB_PATH), "no-such-dir", "x.db"))
+    assert client.get("/api/ping").status_code == 200
+    assert client.get("/api/health").status_code == 500
+
+
 def test_the_document_carries_no_script_or_style_of_its_own(client):
     """Everything the app runs is an asset under the versioned address, which
     is what lets the worker hold one version whole. Script or style written
