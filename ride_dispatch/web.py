@@ -54,6 +54,7 @@ from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PIC
 from .pricing import suggest_price
 from .service import PLATFORMS, is_flight_pickup
 from . import statement
+from . import webproc
 from . import statement_flow
 from .statement import leg_amount
 
@@ -954,6 +955,8 @@ def events():
 def main():
     os.makedirs("logs", exist_ok=True)
     init_db(DB_PATH)
+    # For the bot, which ends this process when it stops answering.
+    webproc.write_pid(webproc.pid_path(DB_PATH))
     print(f"DB: {os.path.abspath(DB_PATH)} ({count_active_orders(DB_PATH)} active orders)", flush=True)
     port = int(os.environ.get("RIDE_WEB_PORT") or "3200")
     app.run(host="127.0.0.1", port=port)
