@@ -1930,10 +1930,18 @@ function queueMatchHtml(c) {
 // batch from it. The report is printed as the server sent it, which is the
 // same string the bot's card carries.
 function stmtViewHtml(v) {
+  // The held-back ids stay on the read after a confirm, so both branches offer
+  // them; an older read has no held_ids field at all.
+  const held = (v.read && v.read.held_ids) || [];
+  const copyHeld = held.length
+    ? '<button class="ghost-btn" data-stmtcopy="1">' +
+      figs('複製抽起單號（' + held.length + '）') + '</button>'
+    : '';
   if (v.done) {
     return sheetHead('已結算') +
       '<pre class="stmt-report">' + figs(v.done.text) + '</pre>' +
-      '<div class="sheet-acts"><button class="ghost-btn" data-bl="' + v.done.settlement_id + '">睇批次</button>' +
+      '<div class="sheet-acts">' + copyHeld +
+      '<button class="ghost-btn" data-bl="' + v.done.settlement_id + '">睇批次</button>' +
       '<button class="ghost-btn" data-close="1">收埋</button></div>';
   }
   const r = v.read;
@@ -1951,6 +1959,7 @@ function stmtViewHtml(v) {
     (r.no_orders_offer ? '<div class="stmt-note">' + figs(r.no_orders_offer.label) + '</div>' : '') +
     '<div class="sheet-acts">' +
     (canConfirm ? '<button class="primary-btn" data-stmtgo="1">' + figs(r.confirm_label) + '</button>' : '') +
+    copyHeld +
     '<button class="ghost-btn" data-close="1">' + (canConfirm ? '唔確認' : '收埋') + '</button></div>';
 }
 
@@ -2174,6 +2183,16 @@ function copyId(id) {
   toast('已複製 ' + id);
 }
 
+// Only the bare ids: the platform searches by them, and the report's labels and
+// amounts are there for the operator, not for it.
+function copyHeldIds() {
+  const v = curView();
+  const ids = (v && v.read && v.read.held_ids) || [];
+  if (!ids.length) return;
+  if (navigator.clipboard) navigator.clipboard.writeText(ids.join('\n')).catch(() => {});
+  toast('已複製 ' + ids.length + ' 個單號');
+}
+
 // ---- events ----
 // The arrows and the month button name a month, and whatever of it is not
 // loaded yet is loaded first. On the calendar they move the scroll, not the
@@ -2381,6 +2400,7 @@ export const settleView = {
       if (undoGo) { undoBatch(undoGo.dataset.undogo); return; }
       const stmtGo = e.target.closest('[data-stmtgo]');
       if (stmtGo && !stmtGo.disabled) { confirmStatement(); return; }
+      if (e.target.closest('[data-stmtcopy]')) { copyHeldIds(); return; }
       const all = e.target.closest('[data-alloc-all]');
       if (all) { allocateAll(+all.dataset.allocAll, all.dataset.allocIds.split(',').map(Number)); return; }
       const alloc = e.target.closest('[data-alloc-credit]');

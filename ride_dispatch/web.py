@@ -639,9 +639,18 @@ def api_read_statement():
             _sweep_pending(now)
             _pending_statements[token] = (now, prepared, data)
     archive = prepared.no_orders_credit
+    # The same grouping and day order format_report prints, so the ids land on
+    # the clipboard in the order the operator reads them.
+    missing_by_date: dict[str, list[dict]] = {}
+    for o in prepared.rec.missing:
+        missing_by_date.setdefault(o["scheduled_time"][:10], []).append(o)
+    held_ids = [o["order_id"]
+                for day in prepared.rec.days
+                for o in missing_by_date.get(day.date, [])]
     return jsonify({
         "token": token,
         "report": prepared.report,
+        "held_ids": held_ids,
         "credit_line": prepared.credit_line,
         "confirm_label": prepared.confirm_label,
         "can_settle": prepared.can_settle,

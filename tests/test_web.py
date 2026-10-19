@@ -1020,7 +1020,7 @@ def test_settle_page_exposes_only_the_actions_that_remain(client):
         "focus", "fold", "k", "lens", "loose", "od", "part", "s", "short", "total", "unfocus", "upbatch", "upguess",
         "uptick", "upsave",
         "undo", "undogo", "alloc-batch", "alloc-credit", "alloc-all", "alloc-ids", "stmtgo",
-        "unlink-batch", "unlink-credit", "unlinkgo"}
+        "stmtcopy", "unlink-batch", "unlink-credit", "unlinkgo"}
 
 
 def test_both_views_open_the_same_order_sheet(client):

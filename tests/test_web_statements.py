@@ -123,6 +123,22 @@ def test_read_offers_no_token_when_nothing_can_settle(client, monkeypatch):
     assert web._pending_statements == {}
 
 
+def test_read_lists_the_held_back_ids_for_the_copy_button(client, monkeypatch):
+    seed("KEEP1", f"{YESTERDAY} 09:00:00", 210.0)
+    seed("HELD1", f"{YESTERDAY} 10:00:00", 280.0)
+    use_statement(monkeypatch, stmt_for({YESTERDAY: [("KEEP1", 210.0)]}, 210.0))
+    body = upload(client).get_json()
+    assert body["held_ids"] == ["HELD1"]
+    assert "抽起" in body["report"] and "HELD1" in body["report"]
+
+
+def test_read_returns_no_held_ids_when_the_statement_lists_everything(client, monkeypatch):
+    seed("ONLY1", f"{YESTERDAY} 09:00:00", 210.0)
+    use_statement(monkeypatch, stmt_for({YESTERDAY: [("ONLY1", 210.0)]}, 210.0))
+    body = upload(client).get_json()
+    assert body["held_ids"] == []
+
+
 def test_read_rejects_an_empty_upload(client, monkeypatch):
     use_statement(monkeypatch, stmt_for({YESTERDAY: [("A1", 210.0)]}, 210.0))
     assert client.post("/api/statements/read", data={},
