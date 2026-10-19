@@ -282,6 +282,15 @@ def test_a_watermark_above_a_line_does_not_split_it():
     assert statement._checksum(stmt) == ("ok", [])
 
 
+def test_a_row_holding_two_dates_is_never_a_day_header():
+    """A day group header carries exactly one date; a row with two is a fragment
+    of a data line and must fall through to the other branches."""
+    boxes = [box(39, "2026-10-13", 10), box(300, "2026-10-15", 10),
+             box(1240, "240.00", 10, w=40)]
+    rows = statement._rows_from_boxes(boxes)
+    assert statement._classify(rows, 1280) == ["noise"]
+
+
 def test_a_percentage_is_not_money():
     assert statement._MONEY_RE.findall("0.00%") == []
     assert statement._MONEY_RE.findall("210.00 合格 0.90%") == ["210.00"]

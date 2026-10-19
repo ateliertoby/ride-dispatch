@@ -799,6 +799,10 @@ def _day_head(row: list, width: int) -> tuple[int, str] | None:
     row's first box: the ▾ expand caret beside it can be recognised as a box of
     its own, so the date is looked for rather than assumed to lead.
     """
+    # A day group header carries exactly one date; two or more date matches
+    # belong to a data line's service and settlement dates, never to a header.
+    if sum(len(_DATE_RE.findall(text)) for _, _, _, text in row) > 1:
+        return None
     for i, (x0, _x1, _y, text) in enumerate(row):
         if x0 < width * 0.15 and (m := _DATE_RE.match(text.strip())):
             return i, m.group()
