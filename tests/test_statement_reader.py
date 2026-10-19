@@ -251,6 +251,37 @@ def wide_day_row(date, count, total, y=10):
             box(1240, f"{total:.2f}", y, w=40), box(1300, f"记录数{count}", y, w=60)]
 
 
+# ---- row grouping and day heads ----
+
+def test_a_watermark_above_a_line_does_not_split_it():
+    """The platform prints a faint watermark as boxes taller than the text and a
+    few px higher.  Two of them in one line must not anchor the row above the
+    real cells and push the amount, which sits a few px lower, into a second row
+    that then reads as a day header."""
+    def cell(x, text, y, h=13, w=90):
+        return [[[x, y], [x + w, y], [x + w, y + h], [x, y + h]], text, 0.9]
+
+    boxes = [cell(39, "測試人【AA0000】", 10, h=12),
+             cell(1240, "240.00", 10, h=12, w=40)]
+    boxes += wide_day_row("2026-10-13", 1, 240.0, y=40)
+    # Real cells of one data line: id, time and chip at centre 123.5, the two
+    # dates and the amount at centre 124.5.
+    boxes += [cell(39, "2026-10-13", 118), cell(138, "2026-10-13 09:30", 117),
+              cell(298, "【送機】", 117, w=50),
+              cell(357, "1000000000000001", 117, w=170),
+              cell(1100, "2026-10-15", 118),
+              cell(1240, "240.00", 118, w=40)]
+    # Watermark boxes, taller and higher, printed across the same line.
+    boxes += [cell(540, "3930", 108, h=20, w=40),
+              cell(700, "930", 109, h=22, w=40)]
+
+    stmt = parse_boxes(boxes, 1280)
+    assert [d.date for d in stmt.days] == ["2026-10-13"]
+    assert [r.amount for r in stmt.days[0].rows] == [240.0]
+    assert stmt.warnings == []
+    assert statement._checksum(stmt) == ("ok", [])
+
+
 def test_a_percentage_is_not_money():
     assert statement._MONEY_RE.findall("0.00%") == []
     assert statement._MONEY_RE.findall("210.00 合格 0.90%") == ["210.00"]

@@ -645,12 +645,17 @@ def _rows_from_boxes(boxes: list) -> list[list[tuple[float, float, float, str]]]
     tol = max(4.0, 0.45 * heights[len(heights) // 2])
     items.sort(key=lambda t: t[2])
     rows: list[list] = []
-    centre = None
+    centres: list[float] = []
     for x0, x1, y, _h, text in items:
-        if centre is None or y - centre > tol:
+        # Anchor on the mean of the centres already in the row, not on its
+        # first box: the faint watermark's boxes sit a few px higher than the
+        # text they cross, and one of them leading must not make the real cells
+        # look like a second row.
+        if not centres or y - sum(centres) / len(centres) > tol:
             rows.append([])
-            centre = y
+            centres = []
         rows[-1].append((x0, x1, y, text))
+        centres.append(y)
     return [sorted(r) for r in rows]
 
 
