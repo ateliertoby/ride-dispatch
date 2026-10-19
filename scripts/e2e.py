@@ -5947,6 +5947,31 @@ def settle_statement_confirm(s: Session) -> None:
                                     "/api/statements/read", "/api/statements/confirm"], "writes")
 
 
+@check("settle.statement-copy-held")
+def settle_statement_copy_held(s: Session) -> None:
+    s.open_settle()
+    s.allow("http 400", "status of 400")
+    answer = {**STATEMENT_READ, "held_ids": ["8800000000000601", "8800000000000602"]}
+    s.stub("POST", "**/api/statements/read", 200, json.dumps(answer), "application/json")
+    s.pick_statement()
+    s.on(".sheet.show .stmt-report").wait_for()
+    s.eq(s.text(".sheet.show [data-stmtcopy]"), "複製抽起單號（2）", "the held-order copy button")
+    s.eq(s.texts(".sheet.show .primary-btn, .sheet.show .ghost-btn"),
+         ["確認結算 + 對入數", "複製抽起單號（2）", "唔確認"], "button order")
+    s.capture_clipboard()
+    s.press(".sheet.show [data-stmtcopy]")
+    s.wait_toast("已複製 2 個單號")
+    s.eq(s.page.evaluate("() => window.__copied"),
+         "8800000000000601\n8800000000000602", "clipboard contents")
+    batch = s.t["batch"]["awaiting"]
+    s.stub("POST", "**/api/statements/confirm", 200,
+           json.dumps({"settlement_id": batch, "text": "DEMO 已結算 3 程 $1270"}), "application/json")
+    s.press(".sheet.show [data-stmtgo]")
+    s.wait(lambda: s.title() == "已結算", "the sheet to say it is settled")
+    s.eq(s.text(".sheet.show [data-stmtcopy]"), "複製抽起單號（2）", "the held-order copy button after settling")
+    s.settle()
+
+
 # ---- settle view: live update, timing (inventory K) ----
 
 @check("settle.live-update")

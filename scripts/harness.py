@@ -425,6 +425,10 @@ class Driver:
         self.on(selector, **kw).first.tap()
         self.settle()
 
+    def capture_clipboard(self) -> None:
+        self.page.evaluate("() => Object.defineProperty(navigator, 'clipboard', { configurable: true,"
+                            " value: { writeText: t => { window.__copied = t; return Promise.resolve(); } } })")
+
     def open(self, path: str, ready: str) -> None:
         self.page = self.ctx.new_page()
         self.page.set_default_timeout(TIMEOUT_MS)
@@ -662,6 +666,7 @@ STATEMENT_SAMPLE = {
                "  金額唔同  #…0012  平台 $380 · 系統 $400\n  8800000000000012\n\n系統應收 $1,840 · 差額 −$20"),
     "credit_line": "入數可能係：\n入數 $2,870 · 10-01",
     "confirm_label": "照平台數確認 · 4 程 · $1,820（差額 −$20）", "can_settle": True, "no_orders_offer": None,
+    "held_ids": ["8800000000000601"],
 }
 
 LONG_REF = "HSBCNET-DEMO-20261001-0000000000000042-SUPPLIERPAYMENT-REF"
