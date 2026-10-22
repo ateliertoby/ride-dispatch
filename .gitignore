@@ -12,3 +12,5 @@ AGENTS.md
 docs/
 .superpowers/
 .claude/
+# onnxruntime (via rapidocr) leaves this when it cannot write its telemetry under ~/Library, e.g. in a sandbox
+:memory:.ses
