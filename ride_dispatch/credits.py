@@ -23,10 +23,11 @@ from .statement import leg_amount, money_str
 logger = logging.getLogger("credits")
 
 # A payment is keyed to the working day the operator confirmed the statements,
-# never to the settle dates printed on them: everything confirmed within one
-# working day is paid as a single transfer about two working days later.  A
-# statement can be confirmed long after the days it covers, so its own dates
-# say nothing about when its money arrives.
+# never to the settle dates printed on them: one transfer pays the batches
+# confirmed within one working day, or within several whole working days bundled
+# together, about two working days later.  A statement can be confirmed long
+# after the days it covers, so its own dates say nothing about when its money
+# arrives.
 #
 # The window is what separates a match from a coincidence, not a tie-breaker.
 # Amounts here are round hundreds and the ledger holds months of them, so a
@@ -35,9 +36,10 @@ logger = logging.getLogger("credits")
 # as the answer; one outside it is only offered among the alternatives.
 WINDOW_DAYS = 7
 MAX_CANDIDATES = 8
-# A transfer can still mix confirmation days — a make-up payment bundled into
-# one — and only then is a combination searched for blind, once the day's whole
-# group has been tried.  The search is exponential: past four it buys nothing.
+# A transfer can still mix part of one confirmation day with part of another — a
+# make-up payment bundled into one — and only then is a combination searched for
+# blind, once the whole days and their unions have been tried.  The search is
+# exponential: past four it buys nothing.
 MAX_SUBSET = 4
 # A card the operator has to scroll is a card he taps the wrong row of; the
 # part payments are a shortlist, the rest of the pool is behind them.
@@ -269,6 +271,19 @@ def match_credit(credit: dict, batches: list[dict]) -> Match:
                      candidates=_lead_with(_others(list(union.values()), short, _by_anchor),
                                            _others(pool, short, _by_anchor)),
                      reason="ambiguous")
+    # One transfer can also pay several whole confirmation days at once, which is
+    # the same kind of payment as one day: every group in the union is taken
+    # whole and a day is never split across two transfers here — a part of a day
+    # is the blind search's case below.  The window holds at most fifteen day
+    # groups (±WINDOW_DAYS), so every union of two or more of them is cheap to
+    # enumerate and needs no cap.
+    day_groups = list(groups.values())
+    day_totals = [sum(b["outstanding"] for b in g) for g in day_groups]
+    union_hits: list[list[dict]] = []
+    for size in range(2, len(day_groups) + 1):
+        for union in combinations(range(len(day_groups)), size):
+            if _same(sum(day_totals[i] for i in union), remaining):
+                union_hits.append([b for i in union for b in day_groups[i]])
     # A transfer that mixes confirmation days — a make-up payment bundled into
     # one — leaves no whole group to match, so the combinations are searched
     # blind, and only a single hit is an answer.
@@ -277,13 +292,24 @@ def match_credit(credit: dict, batches: list[dict]) -> Match:
         for combo in combinations(windowed, size):
             if _same(sum(b["outstanding"] for b in combo), remaining):
                 hits.append(combo)
-    if len(hits) > 1:
-        # A combination drawn from a single confirmation day is a real payment
-        # under the platform's grouping rule; equal-sum combinations spanning
-        # days are the coincidences the ambiguity refusal exists for.
-        one_day = [h for h in hits if len({anchor(b) for b in h}) == 1]
-        if len(one_day) == 1:
-            hits = one_day
+    # A combination drawn from a single confirmation day is a real payment under
+    # the platform's grouping rule, so it answers beside the whole-day unions;
+    # equal sums spanning days are the coincidences the ambiguity refusal exists
+    # for.  One answer is proposed, several are the operator's to decide.
+    single_day = [h for h in hits if len({anchor(b) for b in h}) == 1]
+    answers = union_hits + single_day
+    if len(answers) == 1:
+        combo = list(answers[0])
+        return Match(exact=sorted(b["id"] for b in combo), short=short,
+                     candidates=_others(pool, combo + short, _by_anchor), reason="subset")
+    if answers:
+        union = {b["id"]: b for combo in answers for b in combo}
+        return Match(short=short,
+                     candidates=_lead_with(_others(list(union.values()), short, _by_anchor),
+                                           _others(pool, short, _by_anchor)),
+                     reason="ambiguous")
+    # No whole-day answer, so what is left is the blind search's own: every hit
+    # here spans days, and only a single one is an answer.
     if len(hits) == 1:
         combo = list(hits[0])
         return Match(exact=sorted(b["id"] for b in combo), short=short,

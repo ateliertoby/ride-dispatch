@@ -287,16 +287,86 @@ def test_two_confirmation_days_summing_alike_are_ambiguous():
 
 
 def test_a_single_day_combination_beats_one_that_spans_days():
-    """No whole day sums to the credit, so the blind search finds two equal
+    """No whole day sums to the credit, so the blind search finds equal
     combinations; only the one drawn from a single confirmation day can be a
     transfer under the platform's grouping rule."""
     bs = [B(1, 400.0, ["2026-08-16"], "2026-08-18"),
           B(2, 600.0, ["2026-08-16"], "2026-08-18"),
           B(3, 50.0, ["2026-08-16"], "2026-08-18"),
           B(4, 250.0, ["2026-08-16"], "2026-08-19"),
-          B(5, 750.0, ["2026-08-16"], "2026-08-20")]
+          B(5, 750.0, ["2026-08-16"], "2026-08-20"),
+          B(6, 100.0, ["2026-08-16"], "2026-08-20")]   # 08-19 and 08-20 are not a whole-day union either
     m = match_credit(C(9, 1000.0, "2026-08-21"), bs)
     assert m.reason == "subset" and m.exact == [1, 2]
+
+
+def test_two_whole_confirmation_days_are_paid_as_one_transfer():
+    """The platform bundles whole confirmation days into one payment, so a
+    credit equal to two of them is that transfer: every day is taken whole, at
+    any size, and the six batches are far past the blind search's cap."""
+    bs = [B(1, 500.0, ["2026-08-16"], "2026-08-19"),
+          B(2, 400.0, ["2026-08-16"], "2026-08-19"),
+          B(3, 600.0, ["2026-08-16"], "2026-08-19"),
+          B(4, 300.0, ["2026-08-17"], "2026-08-20"),
+          B(5, 400.0, ["2026-08-17"], "2026-08-20"),
+          B(6, 300.0, ["2026-08-17"], "2026-08-20")]
+    assert len(bs) > credits.MAX_SUBSET
+    m = match_credit(C(9, 2500.0, "2026-08-21"), bs)
+    assert m.reason == "subset" and m.exact == [1, 2, 3, 4, 5, 6]
+
+
+def test_two_whole_day_unions_summing_alike_are_ambiguous():
+    """Four whole days of 1000 each: A+B and C+D are both whole-day unions
+    summing to the credit, and nothing in the ledger says which arrived."""
+    bs = [B(1, 400.0, ["2026-08-16"], "2026-08-18"), B(2, 600.0, ["2026-08-16"], "2026-08-18"),
+          B(3, 300.0, ["2026-08-16"], "2026-08-19"), B(4, 700.0, ["2026-08-16"], "2026-08-19"),
+          B(5, 500.0, ["2026-08-16"], "2026-08-20"), B(6, 500.0, ["2026-08-16"], "2026-08-20"),
+          B(7, 200.0, ["2026-08-16"], "2026-08-21"), B(8, 800.0, ["2026-08-16"], "2026-08-21")]
+    m = match_credit(C(9, 2000.0, "2026-08-22"), bs)
+    assert m.reason == "ambiguous" and m.exact == []
+    assert sorted(b["id"] for b in m.candidates) == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_a_whole_day_union_and_a_single_day_combination_are_ambiguous():
+    """A whole-day union (08-19 with 08-20) and a combination inside one day
+    (08-21's 800+700+500) both sum to the credit.  Both are payments the
+    platform's grouping allows, so neither is proposed."""
+    bs = [B(1, 600.0, ["2026-08-16"], "2026-08-19"), B(2, 400.0, ["2026-08-16"], "2026-08-19"),
+          B(3, 500.0, ["2026-08-17"], "2026-08-20"), B(4, 500.0, ["2026-08-17"], "2026-08-20"),
+          B(5, 800.0, ["2026-08-18"], "2026-08-21"), B(6, 700.0, ["2026-08-18"], "2026-08-21"),
+          B(7, 500.0, ["2026-08-18"], "2026-08-21"), B(8, 200.0, ["2026-08-18"], "2026-08-21")]
+    m = match_credit(C(9, 2000.0, "2026-08-22"), bs)
+    assert m.reason == "ambiguous" and m.exact == []
+    assert sorted(b["id"] for b in m.candidates) == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_a_union_never_splits_a_confirmation_day():
+    """The credit is 08-19 whole (1000) plus one 300 batch of 08-20, which no
+    whole-day union can make: a day taken in part is the blind search's case,
+    and six batches are past its cap."""
+    bs = [B(1, 100.0, ["2026-08-16"], "2026-08-19"), B(2, 150.0, ["2026-08-16"], "2026-08-19"),
+          B(3, 200.0, ["2026-08-16"], "2026-08-19"), B(4, 250.0, ["2026-08-16"], "2026-08-19"),
+          B(5, 300.0, ["2026-08-16"], "2026-08-19"),
+          B(6, 200.0, ["2026-08-17"], "2026-08-20"), B(7, 300.0, ["2026-08-17"], "2026-08-20"),
+          B(8, 400.0, ["2026-08-17"], "2026-08-20")]
+    assert sum(b["outstanding"] for b in bs[:5]) + 300.0 == 1300.0    # day A whole + part of day B
+    m = match_credit(C(9, 1300.0, "2026-08-22"), bs)
+    assert m.reason == "none" and m.exact == []
+
+
+def test_a_union_is_built_only_from_days_inside_the_window():
+    """08-01 is outside the credit's window, so the whole-day union that would
+    answer the credit does not exist until that day is inside it."""
+    out = [B(1, 100.0, ["2026-08-16"], "2026-08-19"), B(2, 150.0, ["2026-08-16"], "2026-08-19"),
+           B(3, 200.0, ["2026-08-16"], "2026-08-19"), B(4, 250.0, ["2026-08-16"], "2026-08-19"),
+           B(5, 300.0, ["2026-08-16"], "2026-08-19"),
+           B(6, 200.0, ["2026-07-28"], "2026-08-01"), B(7, 200.0, ["2026-07-28"], "2026-08-01"),
+           B(8, 200.0, ["2026-07-28"], "2026-08-01")]
+    m = match_credit(C(9, 1600.0, "2026-08-21"), out)
+    assert m.reason == "none" and m.exact == []
+    inside = [dict(b, settled_on="2026-08-20") for b in out[5:]]
+    m = match_credit(C(9, 1600.0, "2026-08-21"), out[:5] + inside)
+    assert m.reason == "subset" and m.exact == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_two_single_day_combinations_are_still_ambiguous():
