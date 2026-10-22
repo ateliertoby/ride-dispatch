@@ -333,19 +333,24 @@ STRIP_JS = """
 """
 
 # How one day's cell is drawn: the ink, weight and size of its figure, the
-# cents against the dollars, its date, and the rule under the figure with the
-# length of a short-paid rule's first part.
+# cents against the dollars, its date, and each driven order's part.
 CELL_JS = """
 e => {
   const cs = x => getComputedStyle(x);
   const a = e.querySelector('.amt'), m = e.querySelector('.mk'), ct = e.querySelector('.ct'), d = e.querySelector('.d');
   const r = m.getBoundingClientRect();
+  const box = e.getBoundingClientRect();
   return {
     ink: cs(a).color, weight: cs(a).fontWeight, size: parseFloat(cs(a).fontSize),
     cents: ct ? parseFloat(cs(ct).fontSize) / parseFloat(cs(a).fontSize) : null,
     date: [cs(d).color, cs(d).fontSize],
     rule: [r.width, r.height, cs(m).backgroundColor, cs(m).backgroundImage],
-    got: parseFloat(m.style.getPropertyValue('--got')),
+    parts: [...m.querySelectorAll('.leg')].map(x => {
+      const p = x.getBoundingClientRect();
+      return {state: [...x.classList].find(c => c !== 'leg'), colour: cs(x).backgroundColor,
+        width: p.width, left: p.left, right: p.right};
+    }),
+    cell: [box.left, box.right],
     ground: cs(e).backgroundColor, faded: [e, a, d, m].some(x => cs(x).opacity !== '1'),
   };
 }
@@ -3043,22 +3048,33 @@ def settle_cells(s: Session) -> None:
             34: ("received", "896.55"), 33: ("received", "480"), 12: ("received", "570"),
             -1: ("future", "900")}
     s.eq({n: s.cell_state(n) for n in want}, want, "the state and the figure of each seeded day")
+    expected_legs = {
+        38: ["unsettled"], 1: ["unsettled", "unsettled"], 3: ["unsettled", "unsettled"],
+        0: ["unsettled", "unsettled"], 27: ["received", "received"], 26: ["short", "received"],
+        25: ["received"], 19: ["awaiting", "awaiting"], 18: ["awaiting"], 6: ["awaiting"] * 2,
+        5: ["unsettled", "awaiting"], 34: ["received", "received"], 33: ["received"],
+        12: ["received"], -1: [],
+    }
+    s.eq({n: [p["state"] for p in s.look(n)["parts"]] for n in want}, expected_legs,
+         "each seeded day's driven-order parts, furthest from paid first")
     # Today's whole fare counts the orders still to be driven; the server's
     # payload is where the figure comes from.
     book = s.api("GET", settle_path(s.today))
     s.eq(s.cell_state(0)[1], fare_of([o for o in book["orders"] if o["scheduled_time"].startswith(s.day())]), "today's figure against the payload")
     for scheme in SCHEMES:
         s.page.emulate_media(color_scheme=scheme)
-        text, text3, text4, amber, green, text2 = (s.token(n) for n in ("--text", "--text-3", "--text-4", "--amber", "--green", "--text-2"))
+        text, text3, text4, amber, text2, line = (s.token(n) for n in ("--text", "--text-3", "--text-4", "--amber", "--text-2", "--line"))
         owed, short, waiting, done, ahead = (s.look(n) for n in (1, 26, 19, 34, -1))
-        s.eq((owed["ink"], owed["weight"], owed["rule"][:3]), (amber, "700", [24, 3, amber]), f"a day no statement has claimed ({scheme})")
-        s.eq((short["ink"], short["weight"], short["rule"][:2]), (text, "700", [24, 3]), f"a day on a statement paid short ({scheme})")
-        s.expect(green in short["rule"][3] and amber in short["rule"][3], f"the short rule is not green then amber ({scheme}): {short['rule'][3]}")
-        # 3px of the 24 is the break between the two parts.
-        s.expect(short["got"] >= 6 and 24 - 3 - short["got"] >= 6, f"a part of the short rule under 6px: {short['got']}")
-        s.eq((waiting["ink"], waiting["weight"], waiting["rule"][:3]), (text, "700", [24, 1, text2]), f"a day awaiting its transfer ({scheme})")
+        part_colours = {"unsettled": amber, "short": amber, "awaiting": text2, "received": line}
+        for n in want:
+            look = s.look(n)
+            s.eq([p["colour"] for p in look["parts"]], [part_colours[x] for x in expected_legs[n]],
+                 f"the parts' colours on day {s.back(n)} ({scheme})")
+        s.eq((owed["ink"], owed["weight"]), (text, "700"), f"the whole fare of an unsettled day ({scheme})")
+        s.eq((short["ink"], short["weight"]), (text, "700"), f"the whole fare of a short-paid day ({scheme})")
+        s.eq((waiting["ink"], waiting["weight"]), (text, "700"), f"the whole fare of a day awaiting transfer ({scheme})")
         for name, got in (("collected", done), ("still to come", ahead)):
-            s.eq((got["ink"], got["weight"], got["rule"][2:]), (text3, "400", [CLEAR, "none"]), f"a day {name} ({scheme})")
+            s.eq((got["ink"], got["weight"]), (text3, "400"), f"a day {name} ({scheme})")
         s.eq((owed["date"], round(done["cents"], 2), {x["size"] for x in (owed, short, waiting, done, ahead)}),
              ([text3, "10px"], 0.7, {13}), f"the date, the cents and the figures' size ({scheme})")
         s.eq(s.colour(".cell.none .d"), text4, f"the date of an empty day ({scheme})")
@@ -3068,6 +3084,24 @@ def settle_cells(s: Session) -> None:
             cells_hold(s, f"at {width} ({scheme})")
         s.resize(390)
     s.page.emulate_media(color_scheme="dark")
+    s.resize(320)
+    busiest = s.page.evaluate("""month => {
+      const cells = [...document.querySelectorAll('#grid .cell[data-d]')]
+        .filter(e => e.dataset.d.slice(0, 7) === month).map(e => {
+          const b = e.getBoundingClientRect();
+          return {date: e.dataset.d, cell: [b.left, b.right], parts: [...e.querySelectorAll('.leg')].map(x => {
+            const p = x.getBoundingClientRect();
+            return {width: p.width, left: p.left, right: p.right};
+          })};
+        });
+      const count = Math.max(...cells.map(e => e.parts.length));
+      return {count, days: cells.filter(e => e.parts.length === count)};
+    }""", month_key(s.today))
+    s.eq(busiest["count"], 2, "the seeded day with the most driven orders")
+    s.expect(all(p["width"] > 0 and p["left"] >= day["cell"][0] - 0.5 and
+                 p["right"] <= day["cell"][1] + 0.5 for day in busiest["days"] for p in day["parts"]),
+             f"a busiest-day part has no width or runs outside its cell at 320px: {busiest}")
+    s.resize(390)
     s.expect("today" in s.on(s.cell(0)).first.get_attribute("class"), "today's cell is not marked")
     # Today's number is an inverse block: the ink as its ground, the ground as its ink.
     block = s.cell(0) + " .d"
@@ -3117,7 +3151,7 @@ def settle_day_fare(s: Session) -> None:
     s.expect(len(kept["today"]) >= 2, "the seed has no order later today")
     s.eq(s.cell_state(0), ("future", fare_of(kept["today"])), "today with nothing driven yet")
     today = s.look(0)
-    s.eq((today["ink"], today["weight"], today["rule"][2:]), (s.token("--text-3"), "400", [CLEAR, "none"]),
+    s.eq((today["ink"], today["weight"], today["parts"]), (s.token("--text-3"), "400", []),
          "today's figure and rule with nothing driven yet")
     cells_hold(s, "with the days rewritten")
     s.eq(s.writes, [], "writes")
@@ -3194,9 +3228,12 @@ def settle_focus(s: Session) -> None:
         lit, owed, waiting, done = (s.look(n) for n in (26, 1, 19, 34))
         s.expect(not any(x["faded"] for x in (lit, owed, waiting, done)), f"a day is faded by opacity ({scheme})")
         s.eq((lit["ground"], lit["ink"], lit["weight"]), (s.token("--surface"), s.token("--text"), "700"), f"a lit day ({scheme})")
-        s.eq((owed["ink"], owed["weight"], owed["rule"][2]), (s.token("--text-2"), "400", s.token("--line")), f"a receded day with open money ({scheme})")
-        s.eq((waiting["ink"], waiting["weight"], waiting["rule"][2]), (s.token("--text-3"), "400", s.token("--line")), f"a receded day awaiting its transfer ({scheme})")
-        s.eq((done["ink"], done["ground"]), (s.token("--text-3"), CLEAR), f"a receded record ({scheme})")
+        s.eq((owed["ink"], owed["weight"], {p["colour"] for p in owed["parts"]}),
+             (s.token("--text-2"), "400", {s.token("--line")}), f"a receded day with open money ({scheme})")
+        s.eq((waiting["ink"], waiting["weight"], {p["colour"] for p in waiting["parts"]}),
+             (s.token("--text-3"), "400", {s.token("--line")}), f"a receded day awaiting its transfer ({scheme})")
+        s.eq((done["ink"], done["ground"], {p["colour"] for p in done["parts"]}),
+             (s.token("--text-3"), CLEAR, {s.token("--line")}), f"a receded record ({scheme})")
         for width in PHONE_WIDTHS:
             s.resize(width)
             cells_hold(s, f"with a focus down at {width} ({scheme})")
@@ -3938,7 +3975,7 @@ def keys_drawn(s: Session, totals: dict, what: str) -> None:
         "awaiting": (text, text2) if totals["awaiting"] > 0 else (text2, CLEAR),
         "unsettled": (amber, amber) if totals["unsettled"] > 0 else (text2, CLEAR),
     }
-    heights = {"awaiting": 1, "unsettled": 3}
+    heights = {"awaiting": 3, "unsettled": 3}
     for key in s.page.evaluate(KEYS_JS):
         ink, rule = want[key["lens"]]
         s.eq((key["ink"], key["rule"][1]), (ink, rule), f"ink and rule of {key['lens']}, {what}")
@@ -4158,12 +4195,15 @@ def settle_unsettled_lens(s: Session) -> None:
         s.page.emulate_media(color_scheme=scheme)
         lit, waiting, done, ahead = (s.look(n) for n in (19, 18, 34, -1))
         s.expect(not any(x["faded"] for x in (lit, waiting, done, ahead)), f"a day is faded by opacity under the lens ({scheme})")
-        s.eq((lit["ground"], lit["ink"], lit["weight"], lit["rule"][:3]),
-             (s.token("--surface"), s.token("--amber"), "700", [24, 3, s.token("--amber")]), f"a lit day ({scheme})")
-        s.eq((waiting["ink"], waiting["weight"], waiting["rule"][2], waiting["ground"]),
-             (s.token("--text-3"), "400", s.token("--line"), CLEAR), f"a receded day awaiting its transfer ({scheme})")
+        s.eq((lit["ground"], lit["ink"], lit["weight"], [p["colour"] for p in lit["parts"]]),
+             (s.token("--surface"), s.token("--text"), "700", [s.token("--amber"), s.token("--text-2")]),
+             f"a lit mixed day ({scheme})")
+        s.eq((waiting["ink"], waiting["weight"], {p["colour"] for p in waiting["parts"]}, waiting["ground"]),
+             (s.token("--text-3"), "400", {s.token("--line")}, CLEAR), f"a receded day awaiting its transfer ({scheme})")
         for name, got in (("collected", done), ("still to come", ahead)):
-            s.eq((got["ink"], got["weight"], got["ground"]), (s.token("--text-3"), "400", CLEAR), f"a receded day {name} ({scheme})")
+            s.eq((got["ink"], got["weight"], {p["colour"] for p in got["parts"]}, got["ground"]),
+                 (s.token("--text-3"), "400", {s.token("--line")} if got["parts"] else set(), CLEAR),
+                 f"a receded day {name} ({scheme})")
         for width in PHONE_WIDTHS:
             s.resize(width)
             cells_hold(s, f"under the lens at {width} ({scheme})")
