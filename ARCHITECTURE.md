@@ -343,7 +343,10 @@ Ids are then bound to orders in four passes, weakest evidence last, so nothing w
 
 - A figure that meant the unsettled part on one day and the total on the next could not be added up or compared down a column. So the figure is the whole day everywhere except under 未結算, where the lit days say by their ground that they are showing a part.
 - Inside the grid a figure has no `$` and no thousands comma, and its cents are set smaller. Outside it, in the keys, the lists and the foot, it has all three.
-- A day in several states shows the one furthest from being paid: unsettled (amber rule and figure), paid short (a rule in two parts, green then amber, cut at the share that has arrived), awaiting (a thin rule), collected or still to come (no rule, faintest readable ink).
+- The rule is drawn in parts, one per order driven, each in the colour of where that order's money has got to: unsettled and short in amber, awaiting in grey, collected in the line colour. The parts furthest from being paid come first, so one order left to settle reads apart from most of the day. A part is 6px and they give way evenly when a day holds more orders than the cell is wide for.
+- The figure never wears a state's colour. It is the whole day, and amber on it would say the whole day is unsettled. A collected day and a day still to come are set in the faintest readable ink, since neither has anything to chase.
+- On a statement paid short, the legs ticked 未過數 are the short ones and every other leg on it has been paid; until a leg is ticked nothing says which is short, so each leg of it is drawn short.
+- The keys draw their state's colour whole, so the row of keys stays the legend of the parts. The 已收 key draws none: money in has nothing to chase, and on a day its part is there only so the orders can be counted.
 - Only orders already driven decide the state, as only they are counted in the month's totals. A booking later today cannot turn its day amber.
 - A day with no orders is its date alone and takes no tap.
 - Batches and credits are not drawn in the grid at all. A statement is a set of orders, and what a row of days can say about it (a bar cut at the week's end, dashes for the days it skips, one label on one segment) is less than its row in a list says.

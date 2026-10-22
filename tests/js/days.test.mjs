@@ -22,7 +22,7 @@ function lookup(batches) {
 const nowhere = () => null;
 
 test('dayState of a day with no orders', () => {
-  assert.deepEqual(dayState([], nowhere, NOW), { n: 0, total: 0, loose: 0, state: 'none' });
+  assert.deepEqual(dayState([], nowhere, NOW), { n: 0, total: 0, loose: 0, state: 'none', legs: [] });
 });
 
 test('dayState of a mixed day shows the whole fare and the worst state', () => {
@@ -30,7 +30,8 @@ test('dayState of a mixed day shows the whole fare and the worst state', () => {
   const loose = leg('a3', '2026-10-07 18:00', 400);
   const paid = { id: 1, state: 'paid', orders: settled };
   assert.deepEqual(dayState([...settled, loose], lookup([paid]), NOW),
-    { n: 3, total: 1080, loose: 400, state: 'unsettled' });
+    { n: 3, total: 1080, loose: 400, state: 'unsettled',
+      legs: ['unsettled', 'received', 'received'] });
 });
 
 test('dayState is short when an order is on a partial batch and nothing is loose', () => {
@@ -38,7 +39,7 @@ test('dayState is short when an order is on a partial batch and nothing is loose
   const partial = { id: 2, state: 'partial', orders: [orders[0]] };
   const paid = { id: 3, state: 'paid', orders: [orders[1]] };
   assert.deepEqual(dayState(orders, lookup([partial, paid]), NOW),
-    { n: 2, total: 920, loose: 0, state: 'short' });
+    { n: 2, total: 920, loose: 0, state: 'short', legs: ['short', 'received'] });
 });
 
 test('dayState ranks short over awaiting and awaiting over received', () => {
@@ -57,13 +58,37 @@ test('dayState ranks short over awaiting and awaiting over received', () => {
 test('dayState of a day wholly after now is future and owes nothing yet', () => {
   const ahead = [leg('d1', '2026-10-23 09:00', 380)];
   assert.deepEqual(dayState(ahead, nowhere, NOW),
-    { n: 1, total: 380, loose: 0, state: 'future' });
+    { n: 1, total: 380, loose: 0, state: 'future', legs: [] });
   // Later today counts as not driven; the minute before now counts as driven.
   assert.deepEqual(dayState([leg('d2', '2026-10-22 23:00', 380)], nowhere, NOW),
-    { n: 1, total: 380, loose: 0, state: 'future' });
+    { n: 1, total: 380, loose: 0, state: 'future', legs: [] });
   assert.equal(dayState([leg('d3', '2026-10-22 12:00:00', 380)], nowhere, NOW).state, 'future');
   assert.deepEqual(dayState([leg('d4', '2026-10-22 11:59', 380)], nowhere, NOW),
-    { n: 1, total: 380, loose: 380, state: 'unsettled' });
+    { n: 1, total: 380, loose: 380, state: 'unsettled', legs: ['unsettled'] });
+});
+
+test('dayState draws a part per driven order, the ones furthest from paid first', () => {
+  const o = [leg('e1', '2026-10-10 08:00', 100), leg('e2', '2026-10-10 09:00', 100),
+             leg('e3', '2026-10-10 10:00', 100), leg('e4', '2026-10-10 11:00', 100)];
+  const awaiting = { id: 7, state: 'awaiting', orders: [o[0]] };
+  const paid = { id: 8, state: 'paid', orders: [o[1], o[3]] };
+  // One order left to settle among three on statements reads as one part.
+  assert.deepEqual(dayState(o, lookup([awaiting, paid]), NOW).legs,
+    ['unsettled', 'awaiting', 'received', 'received']);
+  // An order not yet driven has no part.
+  const later = leg('e5', '2026-10-22 18:00', 100);
+  assert.equal(dayState([later, o[1]], lookup([paid]), NOW).legs.length, 1);
+});
+
+test('dayState names the short legs of a statement paid short by its ticks', () => {
+  const o = [leg('f1', '2026-10-11 08:00', 100), leg('f2', '2026-10-11 09:00', 100, { unpaid: true })];
+  const ticked = { id: 9, state: 'partial', orders: o };
+  // A tick names the short leg, and every other leg has been paid.
+  assert.deepEqual(dayState(o, lookup([ticked]), NOW).legs, ['short', 'received']);
+  // Unticked, nothing says which leg is short, so each one is.
+  const bare = [leg('g1', '2026-10-11 08:00', 100), leg('g2', '2026-10-11 09:00', 100)];
+  assert.deepEqual(dayState(bare, lookup([{ id: 10, state: 'partial', orders: bare }]), NOW).legs,
+    ['short', 'short']);
 });
 
 test('dayState of today counts only the orders already driven', () => {
@@ -73,7 +98,7 @@ test('dayState of today counts only the orders already driven', () => {
   const later = leg('d6', '2026-10-22 20:00', 420);
   const paid = { id: 10, state: 'paid', orders: [driven] };
   assert.deepEqual(dayState([driven, later], lookup([paid]), NOW),
-    { n: 2, total: 800, loose: 0, state: 'received' });
+    { n: 2, total: 800, loose: 0, state: 'received', legs: ['received'] });
   // An undriven order already on a batch does not lend the day its state.
   const partial = { id: 11, state: 'partial', orders: [later] };
   assert.equal(dayState([driven, later], lookup([paid, partial]), NOW).state, 'received');
@@ -83,7 +108,7 @@ test('dayState takes money paid ahead off the loose part only', () => {
   // The 舉牌 another batch already carries is not owed again for this leg.
   const o = leg('e1', '2026-10-12 09:00', 380, { banner_fee: 50, paid_ahead: 50 });
   assert.deepEqual(dayState([o], nowhere, NOW),
-    { n: 1, total: 430, loose: 380, state: 'unsettled' });
+    { n: 1, total: 430, loose: 380, state: 'unsettled', legs: ['unsettled'] });
 });
 
 test('dayState sums to the cent', () => {

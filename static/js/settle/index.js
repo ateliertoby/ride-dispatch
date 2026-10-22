@@ -917,16 +917,6 @@ function cellsOf(html) {
   return (text.length - off).toFixed(2);
 }
 
-// How much of a short-paid day's rule is drawn as money that came: the share
-// of its statement that has arrived. Of the rule's 24px, 3px is the break
-// between the two parts and neither part is under 6px, so both are seen
-// however lopsided the share.
-function shortGot(orders) {
-  const b = orders.map(o => batchOf(o.order_id)).find(x => x && x.state === 'partial');
-  const share = b && b.confirmed_amount > 0 ? b.received / b.confirmed_amount : 0;
-  return Math.min(15, Math.max(6, Math.round(21 * share)));
-}
-
 // A cell's money figure: its markup, and its length in cells of the dollars'
 // size, which the stylesheet sizes it by. The cents are set at .7 of that
 // size (.ct in the stylesheet).
@@ -940,7 +930,8 @@ function figureOf(amount) {
 }
 
 // A day says three things and no more: its date, what the whole day is worth,
-// and by a rule under that figure where its money has got to.
+// and by a rule under that figure where its money has got to, one part per
+// order driven, so one order left to settle reads apart from most of them.
 //
 // The cell also carries, unseen, the two amounts it can be asked to print:
 // the whole day's fare, and the part of it no statement has claimed when
@@ -957,11 +948,11 @@ function cellHtml(dateStr) {
   // Only an empty day is inert; every day holding work opens, past or future.
   if (!info.n) return '<button class="cell none' + today + '" disabled><span class="d">' + tight(num) + '</span></button>';
   const f = figureOf(info.total);
-  const got = info.state === 'short' ? ' style="--got:' + shortGot(orders) + 'px"' : '';
+  const legs = info.legs.map(s => '<i class="leg ' + s + '"></i>').join('');
   return '<button class="cell st-' + info.state + today + '" data-d="' + dateStr +
     '" data-total="' + info.total + '"' + (info.loose > 0 ? ' data-loose="' + info.loose + '"' : '') + '>' +
     '<span class="d">' + tight(num) + '</span><span class="amt" style="--n:' + f.n + '">' +
-    f.html + '</span><i class="mk"' + got + '></i></button>';
+    f.html + '</span><i class="mk">' + legs + '</i></button>';
 }
 
 // Every week of the loaded run, end to end, with no month break in it: from the

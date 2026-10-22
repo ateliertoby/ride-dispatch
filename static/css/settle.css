@@ -91,10 +91,12 @@
      Where a figure's money has got to, for a total key and for a day of the
      calendar alike, which is what makes the keys the calendar's legend: thick
      is money no statement has claimed, thick in two parts is a statement paid
-     short, a hairline is money waiting on its transfer, none is money in or a
-     figure with nothing to chase. A state mark, not a sign that something can
-     be tapped. The mark keeps its place when it draws nothing, so a key or a
-     day is the same height in every state. */
+     short, grey is money waiting on its transfer, and money in draws nothing
+     on a key and the line colour on a day, where every order needs a part to
+     be counted. A day draws one part per order driven in the colour of that
+     order's state; a key draws its state's colour whole. A state mark, not a sign
+     that something can be tapped. The mark keeps its place when it draws
+     nothing, so a key or a day is the same height in every state. */
   .mk { display: block; width: 24px; height: 3px; }
   .st-unsettled .mk { background: var(--amber); }
   /* What came, a break, what is still owed. --got is the first part's
@@ -103,7 +105,7 @@
     background: linear-gradient(90deg, var(--green) var(--got, 6px),
       transparent 0 calc(var(--got, 6px) + 3px), var(--amber) 0);
   }
-  .st-awaiting .mk { height: 1px; margin-block: 1px; background: var(--text-2); }
+  .st-awaiting .mk { background: var(--text-2); }
   /* The received total is the receded state, yet it is a key like the other
      three: quieter ink, same weight. */
   .lkey.st-received .v { color: var(--text-2); }
@@ -201,14 +203,20 @@
      what it is read by. No line height of their own, or the smaller box
      would hang below the line and make the day taller. */
   .cell .ct { font-size: .7em; line-height: 0; }
-  /* Amber is money no statement has claimed yet. Money that is in is a
+  /* The figure is the whole day, so it never wears a state's colour: amber
+     on it would claim the whole day is unsettled. Money that is in is a
      record, and a day still to be driven has nothing to claim, so both
      recede. */
-  .cell.st-unsettled .amt { color: var(--amber); }
   .cell:is(.st-received, .st-future) .amt { color: var(--text-3); font-weight: 400; }
   /* The rule stands 2px under the figure whatever its thickness. */
-  .cell .mk { margin-top: 2px; }
-  .cell.st-awaiting .mk { margin-block: 3px 1px; }
+  /* The day's rule is its parts, not a fill: a part is 6px and gives way
+     evenly when a day holds more orders than the cell is wide for, so every
+     order keeps a part of its own. */
+  .cell .mk { display: flex; gap: 2px; width: 100%; margin-top: 2px; background: none; }
+  .cell .leg { flex: 0 1 6px; min-width: 0; }
+  .cell .leg:is(.unsettled, .short) { background: var(--amber); }
+  .cell .leg.awaiting { background: var(--text-2); }
+  .cell .leg.received { background: var(--line); }
   /* Today: the number as an inverse block. Pulled out by its own padding so
      the digits stay on the column's edge. */
   .cell.today .d {
@@ -236,7 +244,7 @@
      louder than a record and nothing is made louder by being pushed away. */
   .cell.dim .amt { color: var(--text-3); font-weight: 400; }
   .cell.dim.st-unsettled .amt { color: var(--text-2); }
-  .cell.dim:is(.st-unsettled, .st-short, .st-awaiting) .mk { background: var(--line); }
+  .cell.dim .leg { background: var(--line); }
   /* A lit day takes the panel ground; today keeps its block, which is drawn
      on the number. */
   .cell.lit { --band: var(--surface); }

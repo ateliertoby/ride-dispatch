@@ -16,26 +16,42 @@ function orderDate(o) { return (o.scheduled_time || '').split(' ')[0]; }
 const RANK = ['received', 'awaiting', 'short', 'unsettled'];
 const BATCH_STATE = { paid: 'received', awaiting: 'awaiting', partial: 'short' };
 
-// One day's orders -> { n, total, loose, state }. `batchOf` maps an order id
-// to the batch holding it, or null. `now` is the payload's clock,
+// Where one driven order's money has got to. On a statement paid short, the
+// legs ticked 未過數 are the short ones and, once any is ticked, every other
+// leg has been paid; until then nothing says which leg is short, so each one
+// is.
+function legState(o, b) {
+  if (!b) return 'unsettled';
+  if (b.state !== 'partial') return BATCH_STATE[b.state];
+  if (o.unpaid) return 'short';
+  return (b.orders || []).some(x => x.unpaid) ? 'received' : 'short';
+}
+
+// One day's orders -> { n, total, loose, state, legs }. `batchOf` maps an
+// order id to the batch holding it, or null. `now` is the payload's clock,
 // 'YYYY-MM-DD HH:MM:SS'. `total` is what the whole day is worth, driven or
-// not. `loose` and `state` are decided from the orders already driven
+// not. `loose`, `state` and `legs` are decided from the orders already driven
 // (scheduled before `now`) and from no other: one not yet driven may still be
 // cancelled, the server's month totals count it nowhere, and a day marked for
 // it would disagree with them. `loose` is the driven part no statement has
 // claimed. `state` is one of 'none' (no orders), 'future' (none driven yet),
-// 'unsettled', 'short', 'awaiting', 'received'.
+// 'unsettled', 'short', 'awaiting', 'received'. `legs` is each driven order's
+// own state, furthest from being paid first, so the ones still to chase stand
+// together and can be counted.
 export function dayState(orders, batchOf, now) {
   let total = 0, loose = 0, worst = -1;
+  const legs = [];
   for (const o of orders) {
     total += cents(expectedOf(o));
     if ((o.scheduled_time || '') >= now) continue;
     const b = batchOf(o.order_id);
     if (!b) loose += cents(owedOf(o));
     worst = Math.max(worst, RANK.indexOf(b ? BATCH_STATE[b.state] : 'unsettled'));
+    legs.push(legState(o, b));
   }
+  legs.sort((x, y) => RANK.indexOf(y) - RANK.indexOf(x));
   const state = !orders.length ? 'none' : worst < 0 ? 'future' : RANK[worst];
-  return { n: orders.length, total: total / 100, loose: loose / 100, state };
+  return { n: orders.length, total: total / 100, loose: loose / 100, state, legs };
 }
 
 // An amount as a calendar cell writes it: dollars and cents apart, because
