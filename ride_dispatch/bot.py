@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 from .ingest import parse_any, parking_fee, banner_fee, pickup_point_fields, PICKUP_POINTS
-from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, parking_sessions_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
+from .db import init_db, resolve_db_path, save_or_revive_order, save_quick_order, order_status, update_price, update_cost, update_order_fields, cancel_order, count_active_orders, get_orders_by_date, get_order_by_id, get_order_by_telegram_msg_id, get_pickup_flights, get_tracking_dates, update_flight_info, mark_reminder_sent, get_departure_reminders, open_parking_session, get_open_parking_session, get_parking_session, update_parking_session, close_parking_session, mark_parking_observed, recent_parking_sessions, free_parking_entries_since, parking_sessions_since, record_parking_reply, parking_replies_since, diff_order_against_row, update_order_from_message, DIFF_LABELS, SETTLED_LOCK_MSG, get_settleable_recent, get_credit, unallocated_credits, open_batches, deallocate, archive_credit, archive_credits_before, unarchive_credit, image_extension
 from .flight import fetch_arrivals, match_flights, calc_next_interval, svc_time, svc_reminder_due, departure_milestones_due, pending_reminder_times, clamp_interval, exit_urgency, depart_reminder_due, eta_passed_advisory_due, predicted_landing_hhmm, normalize_flight_no
 from . import parking
 from . import webproc
@@ -27,7 +27,8 @@ from .parking import (ParkingClient, ParkingStatus, ParkingError, free_available
                       db_seconds, from_db_seconds,
                       FREE_MINUTES, GRACE_MINUTES, AUTO_LINK_MINUTE, FREE_WINDOW_HOURS,
                       car_park_point, hourly_fee, has_allowance, TRACKED_CAR_PARKS,
-                      no_entry_orders, no_entry_sessions_since,
+                      no_entry_orders, no_entry_sessions_since, no_entry_replies_since,
+                      PARKING_BLIND_AFTER,
                       NO_ENTRY_MINUTES, NO_ENTRY_TAG, NO_ENTRY_FROM, NO_ENTRY_TO)
 from .phone import format_phone_e164
 from .service import expected_of, is_flight_pickup, label as service_label
@@ -1033,6 +1034,14 @@ PARKING_IDLE_INTERVAL = 60
 _parking_client: ParkingClient | None = None
 _parking_client_built = False
 _parking_miss_at: datetime | None = None
+# An outage of the endpoint. _parking_fail_at is the tick of the first failure
+# in the current run and _parking_fail_count how many in a row; _parking_blind
+# says the operator has been told. In-memory on purpose: a restart mid-outage
+# may push the alert once more, which costs nothing; losing the alert costs
+# the whole outage.
+_parking_fail_at: datetime | None = None
+_parking_fail_count = 0
+_parking_blind = False
 _parking_running = False
 _next_parking_at: datetime | None = None
 _parking_pay_busy: set[int] = set()
@@ -1713,6 +1722,47 @@ async def _close_visit(bot, chat_id: int, session: dict, gone_at: datetime, now:
                            reply_markup=_verdict_buttons(session["id"], kind))
 
 
+async def _parking_blind_push(bot, chat_id: int, now: datetime, session: dict | None):
+    """Count a failed query; tell the operator once the run of them is an outage."""
+    global _parking_fail_at, _parking_fail_count, _parking_blind
+    if _parking_fail_at is None:
+        _parking_fail_at = now
+    _parking_fail_count += 1
+    if _parking_blind or _parking_fail_count < PARKING_BLIND_AFTER:
+        return
+    msg = (f"{_parking_fail_at.strftime('%H:%M')} 起睇唔到停車場（HKIA 冇回應）\n"
+           "入場出場都唔會記錄、唔會推送，停車費要自己入")
+    if session is not None:
+        msg += "\n架車而家喺入面，出閘都唔會見到"
+    try:
+        await bot.send_message(chat_id=chat_id, text=msg)
+    except Exception:
+        # Still blind, so the next failed tick tries the push again.
+        logger.exception("parking blind push failed")
+        return
+    _parking_blind = True
+
+
+async def _parking_seen_again(bot, chat_id: int, now: datetime):
+    """Clear the outage state, saying once that the tracker is back."""
+    global _parking_fail_at, _parking_fail_count, _parking_blind
+    if _parking_blind:
+        since = _parking_fail_at
+        # Pushed before the state is cleared: a send that fails leaves the
+        # outage standing, so the next answer tries the recovery push again.
+        # It must not raise: the reply in hand may be an entry or an exit.
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"{since.strftime('%H:%M')} 至 {now.strftime('%H:%M')} 睇唔到停車場，而家正常返")
+        except Exception:
+            logger.exception("parking recovery push failed")
+            return
+    _parking_fail_at = None
+    _parking_fail_count = 0
+    _parking_blind = False
+
+
 async def _check_parking(bot, chat_id: int, now: datetime):
     global _parking_miss_at
     client = _get_parking_client()
@@ -1729,7 +1779,12 @@ async def _check_parking(bot, chat_id: int, now: datetime):
     except ParkingError as e:
         # Unknown: neither inside nor outside. Leave every state untouched.
         _parking_logger.warning("parking query failed: %s", e)
+        await _parking_blind_push(bot, chat_id, now, session)
         return
+    # A reply is what makes the absence of a visit usable as evidence later;
+    # it is written before anything else the answer may cause.
+    record_parking_reply(DB_PATH, db_time(now))
+    await _parking_seen_again(bot, chat_id, now)
 
     if not status.inside:
         if session is None:
@@ -1815,12 +1870,29 @@ def _no_entry_buttons(order_id: str) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup([row])
 
 
+# What the operator can answer when the tracker was blind to the window: the
+# three places a Car Park 4 pickup can have met its passenger.
+_NO_ENTRY_ANSWERS = ("P1", "P4", NO_ENTRY_TO)
+
+
+def _no_entry_answer_buttons(order_id: str) -> InlineKeyboardMarkup | None:
+    row = [InlineKeyboardButton(f"{point} ${PICKUP_POINTS[point]:g}",
+                                callback_data=f"park:point:{point}:{order_id}")
+           for point in _NO_ENTRY_ANSWERS]
+    # An order id too long to fit would make Telegram reject the whole push;
+    # the question then goes out bare and is answered on the dashboard.
+    if any(len(b.callback_data.encode()) > CALLBACK_DATA_MAX for b in row):
+        return None
+    return InlineKeyboardMarkup([row])
+
+
 async def _check_no_entry(bot, chat_id: int, now: datetime):
     """Move a Car Park 4 pickup the car never entered for to the hotel.
 
-    Reads the database only: the verdict rests on visits already recorded, so
-    it does not wait for HKIA to answer on this tick, nor for any order to be
-    armed. Without a plate there is no tracker and so no evidence of absence.
+    Reads the database only: the verdict rests on visits already recorded and
+    the replies HKIA already gave, so it does not wait for HKIA to answer on
+    this tick, nor for any order to be armed. Without a plate there is no
+    tracker and so no evidence of absence.
     """
     if _get_parking_client() is None:
         return
@@ -1829,7 +1901,10 @@ async def _check_no_entry(bot, chat_id: int, now: datetime):
         return
     sessions = parking_sessions_since(DB_PATH, db_time(no_entry_sessions_since(now)),
                                       [o["order_id"] for o in orders])
-    for order in no_entry_orders(orders, sessions, now):
+    replies = [from_db_time(s) for s in parking_replies_since(
+        DB_PATH, db_time(no_entry_replies_since(now)))]
+    due = no_entry_orders(orders, sessions, replies, now)
+    for order in due.watched:
         order_id = order["order_id"]
         try:
             fields = pickup_point_fields(NO_ENTRY_TO)
@@ -1847,6 +1922,20 @@ async def _check_no_entry(bot, chat_id: int, now: datetime):
             logger.info("no-entry switch to %s for %s", NO_ENTRY_TO, order_id[-4:])
         except Exception:
             logger.exception("no-entry switch failed for %s", order_id[-4:])
+    for order in due.unwatched:
+        order_id = order["order_id"]
+        try:
+            flight = display_flight_no(order.get("flight_number"))
+            # Nothing is written but the tag: the tracker was blind to this
+            # window, so what the car did is the driver's to say.
+            msg = (f"#{order_id[-4:]} {flight} 落地 {NO_ENTRY_MINUTES} 分鐘冇 {NO_ENTRY_FROM} 入場紀錄\n"
+                   f"但呢段時間追蹤斷咗，睇唔到架車有冇入去；上車點同停車費未改")
+            await bot.send_message(chat_id=chat_id, text=msg,
+                                   reply_markup=_no_entry_answer_buttons(order_id))
+            mark_reminder_sent(DB_PATH, order_id, NO_ENTRY_TAG)
+            logger.info("no-entry unproven for %s: tracker blind to the window", order_id[-4:])
+        except Exception:
+            logger.exception("no-entry question failed for %s", order_id[-4:])
 
 
 def _clamp_for_reminders(interval: int, now: datetime) -> int:

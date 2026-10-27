@@ -13,7 +13,9 @@ from ride_dispatch.parking import (
     db_time, from_db_time, db_seconds, from_db_seconds,
     free_available, next_free_at, pay_plan, classify,
     arming_orders, is_armed, pick_order, FREE_MINUTES,
-    no_entry_orders, no_entry_sessions_since, NO_ENTRY_MINUTES, NO_ENTRY_STALE_SECONDS, NO_ENTRY_TAG,
+    no_entry_orders, no_entry_sessions_since, no_entry_replies_since,
+    window_watched, ARM_BEFORE_MINUTES,
+    NO_ENTRY_MINUTES, NO_ENTRY_STALE_SECONDS, NO_ENTRY_TAG, NO_ENTRY_MAX_GAP_MINUTES,
     ParkingClient, callback_token, build_pay_url, BASE_URL,
 )
 from ride_dispatch.flight import landing_datetime
@@ -402,7 +404,90 @@ def visit(entry: datetime, order_id=None, exit: datetime | None = None, open: bo
 
 
 def due_ids(orders, sessions, now):
-    return [o["order_id"] for o in no_entry_orders(orders, sessions, now)]
+    due = no_entry_orders(orders, sessions, replies_covering(orders), now)
+    return [o["order_id"] for o in due.watched]
+
+
+def replies_covering(orders, step=timedelta(minutes=1)):
+    """Successful replies dense enough to watch every one of `orders`' windows."""
+    windows = []
+    for o in orders:
+        landing = landing_datetime(o)
+        if landing is None:
+            continue
+        windows.append((landing - timedelta(minutes=ARM_BEFORE_MINUTES),
+                        landing + timedelta(minutes=NO_ENTRY_MINUTES)))
+    if not windows:
+        return []
+    out, t = [], min(start for start, _ in windows)
+    last = max(end for _, end in windows)
+    while t <= last:
+        out.append(t)
+        t += step
+    return out
+
+
+# The window no_entry_orders judges for one Car Park 4 pickup: from the arming
+# start to the moment the verdict is due.
+WATCH_START = LANDING - timedelta(minutes=ARM_BEFORE_MINUTES)
+WATCH_END = DUE
+
+
+def replies_every(step_minutes: int, start=WATCH_START, end=WATCH_END) -> list[datetime]:
+    out, t = [], start
+    while t <= end:
+        out.append(t)
+        t += timedelta(minutes=step_minutes)
+    return out
+
+
+def test_a_window_covered_by_replies_is_watched():
+    assert window_watched(replies_every(1), WATCH_START, WATCH_END)
+    assert not window_watched(replies_every(1), WATCH_START, WATCH_END + timedelta(minutes=30))
+
+
+def test_no_replies_at_all_is_not_watched():
+    assert not window_watched([], WATCH_START, WATCH_END)
+
+
+def test_a_gap_just_under_the_limit_is_watched():
+    assert window_watched(replies_every(NO_ENTRY_MAX_GAP_MINUTES - 1), WATCH_START, WATCH_END)
+
+
+def test_a_gap_at_the_limit_is_watched():
+    assert window_watched(replies_every(NO_ENTRY_MAX_GAP_MINUTES), WATCH_START, WATCH_END)
+
+
+def test_a_gap_past_the_limit_leaves_the_window_unwatched():
+    assert not window_watched(replies_every(NO_ENTRY_MAX_GAP_MINUTES + 1), WATCH_START, WATCH_END)
+
+
+def test_replies_only_before_the_window_do_not_watch_it():
+    before = replies_every(NO_ENTRY_MAX_GAP_MINUTES, WATCH_START - timedelta(minutes=60), WATCH_START)
+    assert not window_watched(before, WATCH_START, WATCH_END)
+
+
+def test_replies_only_after_the_window_do_not_watch_it():
+    after = replies_every(NO_ENTRY_MAX_GAP_MINUTES, WATCH_END, WATCH_END + timedelta(minutes=60))
+    assert not window_watched(after, WATCH_START, WATCH_END)
+
+
+def test_the_window_edges_are_held_to_the_same_limit():
+    inside = replies_every(NO_ENTRY_MAX_GAP_MINUTES)
+    assert window_watched(inside[1:-1], WATCH_START, WATCH_END)    # one gap at each edge
+    assert not window_watched(inside[2:], WATCH_START, WATCH_END)  # nothing watching the start
+    assert not window_watched(inside[:-2], WATCH_START, WATCH_END)  # nothing watching the end
+
+
+def test_replies_are_asked_for_one_gap_before_the_oldest_window():
+    assert no_entry_replies_since(DUE) == no_entry_sessions_since(DUE) - timedelta(
+        minutes=NO_ENTRY_MAX_GAP_MINUTES)
+
+
+def test_no_entry_without_replies_is_unwatched_and_not_switched():
+    due = no_entry_orders([p4()], [], [], DUE)
+    assert due.watched == []
+    assert [o["order_id"] for o in due.unwatched] == ["O1"]
 
 
 def test_no_entry_is_due_at_ninety_minutes_after_landing_and_not_before():

@@ -84,6 +84,8 @@ Terms used throughout: a **batch** is a settlement (`settlements` row) created f
 **Visits are detected, never entered by hand.** The free half hour, shared by Car Park 3 and 4 and available once in 24 hours, is invisible to the driver and to the API. Only a record of past visits can say whether it is available, and the driver cannot keep that record from the wheel.
 
 - `parking.py` polls HKIA's online-payment status endpoint (public, unauthenticated, undocumented) from 30 minutes before a pickup's predicted landing until two hours after, and keeps polling an open visit until two consecutive not-inside replies.
+- The endpoint can disappear at any time, so a failure is not assumed to pass. While the tracker is needed, a run of failed queries is counted, and after `PARKING_BLIND_AFTER` (3) in a row one push says the tracker cannot see the car park since the first failure's time, that no entry or exit will be recorded or pushed, and that fees must be set by hand (adding that an open visit's exit will not be seen either). The first reply after that pushes once that it is back, with the span. A shorter run pushes nothing, and the WARNING log line stays as it was.
+- Every successful reply is written to `parking_replies` with its db time, and rows older than `PARKING_REPLY_KEEP_DAYS` are pruned on insert. The table is what lets a later verdict tell "no visit" from "not watching": a restart or a spell of downtime leaves a hole in it rather than an alibi.
 - Visits are keyed by HKIA's own `pvNr`, so a restart resumes a visit instead of opening a second one.
 - The lookup is HKIA's online payment service, which covers Car Park 3 and 4 only (`TRACKED_CAR_PARKS`). A Car Park 1 visit never appears, so nothing about it is detected, pushed or written back.
 - With `CAR_PLATE` unset the feature is off.
@@ -115,8 +117,10 @@ Terms used throughout: a **batch** is a settlement (`settlements` row) created f
 
 **The absence of a visit settles a plan too, but only at Car Park 4.** Every visit there is seen, so no row means no visit. A pickup still planned at P4 90 minutes after landing (`NO_ENTRY_MINUTES`) is taken to have met its passenger at the hotel: the place becomes 富豪 and the fee nothing, and one push says so with the fee the order carried.
 
-- The conditions are: no visit linked to the order, none of any order entered since 30 minutes before its landing, and none open. The second is there because one visit that collected two passengers links to only one of their orders.
-- The rule can be wrong in two ways the system cannot see, so the push carries a button for each: the car was at Car Park 1, which only the operator can know, or at Car Park 4 on a visit the tracker missed. Either writes that place and its first-hour charge.
+- The conditions are: no visit linked to the order, none of any order entered since 30 minutes before its landing, and none open. The second is there because one visit that collected two passengers links to only one of their orders. The fourth, below, is that the tracker must have watched the window.
+- That fourth one is `parking.window_watched`: the replies in `parking_replies` must cover the order's window, `[landing - ARM_BEFORE_MINUTES, landing + NO_ENTRY_MINUTES]`, with no gap between consecutive replies, and none between an edge and the first or last reply, longer than `NO_ENTRY_MAX_GAP_MINUTES` (5). A Car Park 4 visit can be shorter than that, so a bigger hole could hide a whole entry and exit. An outage or a bot that was down leaves exactly such a hole.
+- An order that passes everything else but whose window was not watched is not switched, and nothing about it is written except the tag. One push names the order's number and flight and says the tracker could not see the car park during its window, so it cannot tell whether the car went in, with a button for each answer: P1, P4 and 富豪, all through the same `park:point:` callback. `noentry` then keeps it from being asked again.
+- The rule can be wrong in two ways the system cannot see, so the switch push carries a button for each: the car was at Car Park 1, which only the operator can know, or at Car Park 4 on a visit the tracker missed. Either writes that place and its first-hour charge.
 - The push goes out before the write, so a push that fails leaves the order untouched for the next tick. The `noentry` reminder tag keeps an order the operator put back from being judged again.
 - The verdict is given for two hours past its due moment and no later. A bot that comes back after that was not watching while the visit would have happened. It is never given without `CAR_PLATE`.
 - A visit that begins after the switch links and closes like any other and overwrites it.
@@ -556,6 +560,8 @@ Flights (bot, 60 s heartbeat, fetch gated by calc_next_interval)
 Car park (bot, own job: 30 s with a visit open, 60 s otherwise)
   armed by a pickup's landing window (parking.arming_orders), or a visit open
   → ParkingClient.query (plate → inside?, pvNr, entry time, parkTime, fee, paid)
+      → reply → a parking_replies row; 3 failures in a row → one
+        睇唔到停車場 push, then one when it answers again
   → entry: parking_sessions row linked to the nearest armed order
       → 已入 push: allowance verdict or the first hour's price, + pay button
   → every inside reply: last_seen_at, last_park_minutes, last_fee stored
@@ -566,7 +572,9 @@ Car park (bot, own job: 30 s with a visit open, 60 s otherwise)
     written to the order, buttons for the two verdicts not picked
       → button or /parking mark → db.mark_parking_observed
   → every tick, from the database alone: parking.no_entry_orders
-      → push, then pickup_point 富豪 and parking_fee 0, then the noentry tag
+      → window watched (parking_replies covers it): push, then
+        pickup_point 富豪 and parking_fee 0, then the noentry tag
+      → window not watched: push the question, then the noentry tag, no write
       → 其實去咗 P1 / 其實係 P4 → ingest.pickup_point_fields written
 
 Statement (結算單)

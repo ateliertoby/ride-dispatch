@@ -50,6 +50,13 @@ NO_ENTRY_STALE_SECONDS = 7200
 NO_ENTRY_TAG = "noentry"   # in orders.reminders_sent once the verdict was pushed
 NO_ENTRY_FROM = "P4"
 NO_ENTRY_TO = "富豪"
+# Consecutive failed queries, while the tracker is actually needed, that make an
+# outage rather than a slow reply: about three minutes at the idle cadence.
+PARKING_BLIND_AFTER = 3
+# The longest run of blind ticks that still passes for a watched window. A Car
+# Park 4 visit can be shorter than this, so a larger gap could hide a whole
+# entry and exit and the absence of a visit would prove nothing.
+NO_ENTRY_MAX_GAP_MINUTES = 5
 
 API_TIME = "%Y%m%d%H%M"
 DB_TIME = "%Y-%m-%d %H:%M"
@@ -243,11 +250,48 @@ def no_entry_sessions_since(now: datetime) -> datetime:
                            minutes=NO_ENTRY_MINUTES + ARM_BEFORE_MINUTES)
 
 
-def no_entry_orders(orders: list[dict], sessions: list[dict], now: datetime) -> list[dict]:
+def no_entry_replies_since(now: datetime) -> datetime:
+    """Earliest reply no_entry_orders needs at `now`.
+
+    One max gap before the oldest window still worth judging: a reply earlier
+    than that can only be the one covering that window's start.
+    """
+    return no_entry_sessions_since(now) - timedelta(minutes=NO_ENTRY_MAX_GAP_MINUTES)
+
+
+def window_watched(replies: list[datetime], start: datetime, end: datetime) -> bool:
+    """Whether the tracker answered often enough to vouch for [start, end].
+
+    The absence of a visit is evidence only where the replies, and the window's
+    own edges, are no further apart than NO_ENTRY_MAX_GAP_MINUTES.
+    """
+    if not replies:
+        return False
+    limit = timedelta(minutes=NO_ENTRY_MAX_GAP_MINUTES)
+    times = sorted(replies)
+    if times[0] - start > limit or end - times[-1] > limit:
+        return False
+    return all(b - a <= limit for a, b in zip(times, times[1:]))
+
+
+@dataclass
+class NoEntryDue:
+    """Orders the no-entry rule judges, split by what the tracker saw.
+
+    Only `watched` may be switched: in `unwatched` the absence of a visit is
+    not evidence, because the tracker never demonstrably answered.
+    """
+    watched: list[dict]
+    unwatched: list[dict]
+
+
+def no_entry_orders(orders: list[dict], sessions: list[dict],
+                    replies: list[datetime], now: datetime) -> NoEntryDue:
     """Pickups planned at Car Park 4 whose car demonstrably never went in.
 
     `sessions` must hold every visit still open, every visit linked to one of
     `orders`, and every visit entered since no_entry_sessions_since(now).
+    `replies` are the times HKIA answered, from no_entry_replies_since(now).
 
     Only Car Park 4 can be judged: the lookup sees every visit there, so no
     row means no visit, while a Car Park 1 visit never produces a row at all.
@@ -255,10 +299,10 @@ def no_entry_orders(orders: list[dict], sessions: list[dict], now: datetime) -> 
     # The car is inside right now and that visit may yet turn out to be for
     # any of these orders.
     if any(not s.get("exit_time") for s in sessions):
-        return []
+        return NoEntryDue(watched=[], unwatched=[])
     linked = {s.get("order_id") for s in sessions}
     entries = [from_db_time(s["entry_time"]) for s in sessions if s.get("entry_time")]
-    due = []
+    due = NoEntryDue(watched=[], unwatched=[])
     for o in orders:
         if not _trackable(o) or o.get("pickup_point") != NO_ENTRY_FROM:
             continue
@@ -280,7 +324,10 @@ def no_entry_orders(orders: list[dict], sessions: list[dict], now: datetime) -> 
         start = landing - timedelta(minutes=ARM_BEFORE_MINUTES)
         if any(start <= e <= now for e in entries):
             continue
-        due.append(o)
+        if window_watched(replies, start, due_at):
+            due.watched.append(o)
+        else:
+            due.unwatched.append(o)
     return due
 
 

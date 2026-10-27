@@ -9,7 +9,7 @@ import pytest
 import ride_dispatch.bot as bot
 from ride_dispatch.db import (
     init_db, save_order, update_flight_info, get_open_parking_session, get_parking_session,
-    recent_parking_sessions, get_order_by_id,
+    recent_parking_sessions, get_order_by_id, record_parking_reply, parking_replies_since,
 )
 from ride_dispatch.parking import ParkingStatus, ParkingError
 from ride_dispatch.parser import Order
@@ -37,6 +37,9 @@ def db_path(monkeypatch):
     monkeypatch.setattr(bot, "DB_PATH", path)
     monkeypatch.setattr(bot, "_parking_miss_at", None)
     monkeypatch.setattr(bot, "_parking_pay_busy", set())
+    monkeypatch.setattr(bot, "_parking_fail_at", None)
+    monkeypatch.setattr(bot, "_parking_fail_count", 0)
+    monkeypatch.setattr(bot, "_parking_blind", False)
     yield path
     os.unlink(path)
 
@@ -101,6 +104,14 @@ def run(tg, now):
     asyncio.run(bot._check_parking(tg, 123, now))
 
 
+def record_replies(start: datetime, end: datetime, step=timedelta(minutes=1)):
+    """The replies the tracker would have written while watching [start, end]."""
+    t = start
+    while t <= end:
+        record_parking_reply(bot.DB_PATH, t.strftime("%Y-%m-%d %H:%M"))
+        t += step
+
+
 def test_not_armed_means_no_query(db_path, tg, monkeypatch):
     client = FakeClient([])           # any query would IndexError
     monkeypatch.setattr(bot, "_parking_client", client)
@@ -159,6 +170,80 @@ def test_error_reply_changes_nothing(db_path, tg, monkeypatch):
     assert get_open_parking_session(db_path) is not None
     run(tg, ENTRY + timedelta(minutes=4))
     assert get_open_parking_session(db_path) is None
+
+
+# --- an outage of the HKIA endpoint ---
+
+
+def failures(n: int) -> list:
+    return [ParkingError("HTTP 521")] * n
+
+
+def test_a_run_short_of_the_threshold_pushes_nothing(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient(failures(bot.PARKING_BLIND_AFTER - 1)))
+    for m in range(bot.PARKING_BLIND_AFTER - 1):
+        run(tg, ENTRY + timedelta(minutes=m))
+    assert texts(tg) == []
+
+
+def test_the_threshold_of_failures_pushes_once_and_no_more(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient(failures(bot.PARKING_BLIND_AFTER + 3)))
+    for m in range(bot.PARKING_BLIND_AFTER):
+        run(tg, ENTRY + timedelta(minutes=m))
+    t = texts(tg)
+    assert len(t) == 1
+    # Dated from the first failure of the run, not from the push.
+    assert t[0].startswith("18:48 起睇唔到停車場")
+    assert "唔會記錄" in t[0] and "停車費要自己入" in t[0]
+    for m in range(bot.PARKING_BLIND_AFTER, bot.PARKING_BLIND_AFTER + 3):
+        run(tg, ENTRY + timedelta(minutes=m))
+    assert len(texts(tg)) == 1
+
+
+def test_the_blind_push_says_an_open_visit_will_not_be_seen_out(db_path, tg, monkeypatch):
+    open_session(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient(failures(bot.PARKING_BLIND_AFTER)))
+    for m in range(bot.PARKING_BLIND_AFTER):
+        run(tg, ENTRY + timedelta(minutes=m))
+    assert "出閘都唔會見到" in texts(tg)[-1]
+
+
+def test_a_reply_after_the_blind_push_says_it_is_back_once(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client",
+                        FakeClient(failures(bot.PARKING_BLIND_AFTER) + [OUT, OUT]))
+    for m in range(bot.PARKING_BLIND_AFTER):
+        run(tg, ENTRY + timedelta(minutes=m))
+    run(tg, ENTRY + timedelta(minutes=10))
+    run(tg, ENTRY + timedelta(minutes=11))
+    t = texts(tg)
+    assert len(t) == 2
+    assert t[1] == "18:48 至 18:58 睇唔到停車場，而家正常返"
+
+
+def test_a_failed_recovery_push_still_records_the_entry_and_retries(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client",
+                        FakeClient(failures(bot.PARKING_BLIND_AFTER) + [inside(1), inside(2)]))
+    for m in range(bot.PARKING_BLIND_AFTER):
+        run(tg, ENTRY + timedelta(minutes=m))
+    tg.send_message.side_effect = [RuntimeError("telegram down"), None, None]
+    run(tg, ENTRY + timedelta(minutes=10))
+    assert get_open_parking_session(db_path)["pv_nr"] == 700001
+    assert bot._parking_blind
+    run(tg, ENTRY + timedelta(minutes=11))
+    assert not bot._parking_blind
+
+
+def test_a_successful_reply_is_recorded_and_a_failure_is_not(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([OUT, ParkingError("HTTP 521"), OUT]))
+    for m in (1, 2, 3):
+        run(tg, ENTRY + timedelta(minutes=m))
+    assert parking_replies_since(db_path, "2026-08-23 00:00") == [
+        "2026-08-23 18:49", "2026-08-23 18:51"]
 
 
 def test_open_session_polls_even_when_window_closed(db_path, tg, monkeypatch):
@@ -1035,6 +1120,11 @@ def run_no_entry(tg, now):
     asyncio.run(bot._check_no_entry(tg, 123, now))
 
 
+def watched_window():
+    """Replies covering the order's window, so a missing visit is evidence."""
+    record_replies(LANDED - timedelta(minutes=30), NO_ENTRY_DUE)
+
+
 def closed_session(db_path, entry: datetime, order_id=None, pv_nr=700009):
     from ride_dispatch.db import open_parking_session, close_parking_session
     sid = open_parking_session(db_path, pv_nr=pv_nr, plate="AB1234", location="P4O",
@@ -1056,6 +1146,7 @@ def order_row(db_path, order_id="O1"):
 def test_no_entry_switches_the_order_to_the_hotel_and_says_so(db_path, tg, monkeypatch):
     from ride_dispatch.db import update_order_fields
     landed_order(db_path)
+    watched_window()
     # Not the tariff: the push has to quote what the order actually carried.
     update_order_fields(db_path, "O1", {"parking_fee": 64.0})
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
@@ -1073,6 +1164,7 @@ def test_no_entry_switches_the_order_to_the_hotel_and_says_so(db_path, tg, monke
 
 def test_no_entry_pushes_once(db_path, tg, monkeypatch):
     landed_order(db_path)
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     for m in (0, 1, 2):
         run_no_entry(tg, NO_ENTRY_DUE + timedelta(minutes=m))
@@ -1083,6 +1175,7 @@ def test_no_entry_pushes_once(db_path, tg, monkeypatch):
 def test_no_entry_does_not_switch_again_after_the_operator_puts_it_back(db_path, tg, monkeypatch):
     from ride_dispatch.db import update_order_fields
     landed_order(db_path)
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     run_no_entry(tg, NO_ENTRY_DUE)
     update_order_fields(db_path, "O1", {"pickup_point": "P4", "parking_fee": 32.0})
@@ -1100,6 +1193,7 @@ def test_no_entry_is_off_without_a_plate(db_path, tg, monkeypatch):
 
 def test_no_entry_a_failed_push_writes_nothing_and_is_retried(db_path, tg, monkeypatch):
     landed_order(db_path)
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     tg.send_message.side_effect = RuntimeError("network down")
     run_no_entry(tg, NO_ENTRY_DUE)
@@ -1111,9 +1205,65 @@ def test_no_entry_a_failed_push_writes_nothing_and_is_retried(db_path, tg, monke
     assert "停車費 $32 → $0" in texts(tg)[-1]
 
 
+def test_no_entry_without_a_watched_window_asks_and_writes_nothing(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
+    run_no_entry(tg, NO_ENTRY_DUE)
+    o = order_row(db_path)
+    assert o["pickup_point"] == "P4" and o["parking_fee"] == 32
+    t = texts(tg)
+    assert len(t) == 1
+    assert t[0].startswith("#O1 CA727 落地 90 分鐘冇 P4 入場紀錄")
+    assert "睇唔到架車有冇入去" in t[0]
+    buttons = tg.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
+    assert [(b.text, b.callback_data) for b in buttons] == [
+        ("P1 $35", "park:point:P1:O1"), ("P4 $32", "park:point:P4:O1"),
+        ("富豪 $0", "park:point:富豪:O1")]
+    assert "noentry" in order_row(db_path)["reminders_sent"].split(",")
+    # Tagged, so the question goes out once however the operator ignores it.
+    run_no_entry(tg, NO_ENTRY_DUE + timedelta(minutes=1))
+    assert len(texts(tg)) == 1
+
+
+def test_no_entry_with_a_gap_in_the_replies_is_unwatched_too(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    # Watched up to landing, blind from there on: a Car Park 4 visit after
+    # landing could have gone in and out unseen.
+    record_replies(LANDED - timedelta(minutes=30), LANDED)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
+    run_no_entry(tg, NO_ENTRY_DUE)
+    assert order_row(db_path)["pickup_point"] == "P4"
+    assert "睇唔到架車有冇入去" in texts(tg)[0]
+
+
+def test_an_unasked_question_is_retried_when_the_push_fails(db_path, tg, monkeypatch):
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
+    tg.send_message.side_effect = RuntimeError("network down")
+    run_no_entry(tg, NO_ENTRY_DUE)
+    assert not order_row(db_path)["reminders_sent"]
+    tg.send_message.side_effect = None
+    tg.send_message.reset_mock()
+    run_no_entry(tg, NO_ENTRY_DUE + timedelta(minutes=1))
+    assert len(texts(tg)) == 1 and "睇唔到架車有冇入去" in texts(tg)[0]
+    assert tg.send_message.call_args.kwargs["reply_markup"] is not None
+
+
+def test_answering_the_question_moves_the_order_like_any_other_switch(db_path, tg, monkeypatch):
+    monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
+    landed_order(db_path)
+    monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
+    run_no_entry(tg, NO_ENTRY_DUE)
+    upd, ctx, q = _callback("park:point:富豪:O1")
+    asyncio.run(bot.handle_callback(upd, ctx))
+    o = order_row(db_path)
+    assert o["pickup_point"] == "富豪" and o["parking_fee"] == 0
+
+
 def test_no_entry_one_failing_order_does_not_stop_the_next(db_path, tg, monkeypatch):
     landed_order(db_path)
     landed_order(db_path, order_id="O2", flight_number="CA729")
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     tg.send_message.side_effect = [RuntimeError("network down"), None]
     run_no_entry(tg, NO_ENTRY_DUE)
@@ -1158,6 +1308,7 @@ def test_no_entry_leaves_a_stale_order_alone(db_path, tg, monkeypatch):
 def test_no_entry_switches_an_order_already_in_a_batch(db_path, tg, monkeypatch):
     import sqlite3
     landed_order(db_path)
+    watched_window()
     conn = sqlite3.connect(db_path)
     conn.execute("UPDATE orders SET settlement_id = 1 WHERE order_id = 'O1'")
     conn.commit()
@@ -1177,6 +1328,7 @@ def test_no_entry_buttons_are_dropped_when_the_order_id_cannot_fit(db_path):
 
 def test_the_parking_tick_gives_the_verdict_without_an_hkia_answer(db_path, tg, ctx, poll_globals, monkeypatch):
     landed_order(db_path)
+    watched_window()
     # Still inside the arming window, so the tick queries HKIA; it fails.
     client = CountingClient([ParkingError("timeout")])
     monkeypatch.setattr(bot, "_parking_client", client)
@@ -1188,6 +1340,7 @@ def test_the_parking_tick_gives_the_verdict_without_an_hkia_answer(db_path, tg, 
 
 def test_the_parking_tick_gives_the_verdict_after_the_arming_window(db_path, tg, ctx, poll_globals, monkeypatch):
     landed_order(db_path)
+    watched_window()
     client = CountingClient([])
     monkeypatch.setattr(bot, "_parking_client", client)
     # A bot that was down at the due moment: past landing + 2h nothing is armed.
@@ -1213,6 +1366,7 @@ def test_a_failing_no_entry_check_leaves_the_parking_tick_standing(db_path, tg, 
 
 def test_a_visit_after_the_switch_puts_the_order_back_on_what_hkia_saw(db_path, tg, monkeypatch):
     landed_order(db_path)
+    watched_window()
     late = NO_ENTRY_DUE + timedelta(minutes=10)
     status = ParkingStatus(inside=True, pv_nr=700003, location="P4O", location_name="Car Park 4",
                            entry_time=late.strftime("%Y-%m-%d %H:%M"), park_minutes=40, paid=False, fee=32)
@@ -1228,10 +1382,11 @@ def test_a_visit_after_the_switch_puts_the_order_back_on_what_hkia_saw(db_path, 
     assert "#O1 P4 停車費已改 $32" in texts(tg)[-1]
 
 
-@pytest.mark.parametrize("point,fee", [("P1", 35), ("P4", 32)])
+@pytest.mark.parametrize("point,fee", [("P1", 35), ("P4", 32), ("富豪", 0)])
 def test_point_callback_writes_the_place_and_its_fee(db_path, tg, monkeypatch, point, fee):
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
     landed_order(db_path)
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     run_no_entry(tg, NO_ENTRY_DUE)
     upd, ctx, q = _callback(f"park:point:{point}:O1")
@@ -1249,6 +1404,7 @@ def test_point_callback_on_a_cancelled_order_writes_nothing(db_path, tg, monkeyp
     from ride_dispatch.db import cancel_order
     monkeypatch.setattr(bot, "ALLOWED_CHAT_IDS", set())
     landed_order(db_path)
+    watched_window()
     monkeypatch.setattr(bot, "_parking_client", FakeClient([]))
     run_no_entry(tg, NO_ENTRY_DUE)
     cancel_order(db_path, "O1")

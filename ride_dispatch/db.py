@@ -231,6 +231,17 @@ def init_db(db_path: str):
             except sqlite3.OperationalError:
                 pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_parking_free ON parking_sessions(free, entry_time)")
+        # One row per HKIA reply, successful ones only.  Durable on purpose: a
+        # bot restart or a spell of downtime must count as blind, or the
+        # absence of a visit during it would settle a plan the tracker never
+        # saw.  `at` is DB_TIME, the clock the visits are dated on.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS parking_replies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_parking_replies_at ON parking_replies(at)")
         conn.commit()
 
 
@@ -1741,3 +1752,31 @@ def free_parking_entries_since(db_path: str, cutoff: str) -> list[str]:
             (cutoff,),
         ).fetchall()
         return [r["entry_time"] for r in rows]
+
+
+# Replies are evidence only for a window judged within hours of it, and the
+# prune runs on every insert, so the table stays this deep and no deeper.
+PARKING_REPLY_KEEP_DAYS = 3
+
+
+def record_parking_reply(db_path: str, at: str):
+    """Record one successful HKIA reply and drop the ones too old to judge.
+
+    The cutoff is measured from `at` rather than the wall clock, so the same
+    row is kept or dropped by the same rule whenever it is written.
+    """
+    cutoff = (datetime.strptime(at, "%Y-%m-%d %H:%M")
+              - timedelta(days=PARKING_REPLY_KEEP_DAYS)).strftime("%Y-%m-%d %H:%M")
+    with _conn(db_path) as conn:
+        conn.execute("INSERT INTO parking_replies (at) VALUES (?)", (at,))
+        conn.execute("DELETE FROM parking_replies WHERE at < ?", (cutoff,))
+        conn.commit()
+
+
+def parking_replies_since(db_path: str, since: str) -> list[str]:
+    """Times HKIA answered at or after `since`, oldest first."""
+    with _conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT at FROM parking_replies WHERE at >= ? ORDER BY at", (since,)
+        ).fetchall()
+        return [r["at"] for r in rows]
